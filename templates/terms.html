@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Kullanım Koşulları — FırsatVakti{% endblock %}
+{% block content %}
+<div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
+
+  <!-- Hero -->
+  <div style="text-align:center;padding:52px 0 40px;">
+    <div style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;background:linear-gradient(135deg,#10b981,#34d399);border-radius:18px;font-size:28px;margin-bottom:18px;box-shadow:0 8px 24px rgba(16,185,129,.3);">📋</div>
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,5vw,46px);letter-spacing:1px;color:var(--text);margin:0 0 10px;">KULLANIM KOŞULLARI</h1>
+    <p style="font-size:13px;color:var(--muted);font-weight:500;">Son güncelleme: Mart 2025</p>
+  </div>
+
+  <!-- Uyarı bandı -->
+  <div style="background:rgba(245,158,11,.08);border:1.5px solid rgba(245,158,11,.25);border-radius:14px;padding:14px 18px;margin-bottom:20px;display:flex;align-items:center;gap:12px;">
+    <span style="font-size:20px;">⚠️</span>
+    <span style="font-size:13px;color:var(--text);font-weight:500;line-height:1.6;">Siteyi kullanarak aşağıdaki koşulları kabul etmiş sayılırsınız. Lütfen dikkatlice okuyun.</span>
+  </div>
+
+  <!-- İçerik -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    {% for num, icon, title, content in [
+      ('01','🛍','Hizmet Tanımı','FırsatVakti, e-ticaret platformlarındaki ürün fiyatlarını otomatik olarak takip eden ve kullanıcıları fiyat düşüşleri hakkında bilgilendiren ücretsiz bir hizmettir.'),
+      ('02','✅','Kullanım Şartları','Siteyi kullanarak bu koşulları kabul etmiş sayılırsınız. 13 yaşın altındaki kullanıcıların siteyi kullanması yasaktır. Sistemi kötüye kullanmak, spam göndermek veya güvenlik açıklarını istismar etmek yasaktır.'),
+      ('03','💰','Fiyat Doğruluğu','Gösterilen fiyatlar bilgi amaçlıdır. Fiyatlar anlık değişebildiğinden, satın alma öncesinde ilgili platformda güncel fiyatı kontrol etmenizi öneririz. FırsatVakti fiyat farklılıklarından sorumlu tutulamaz.'),
+      ('04','🔗','Affiliate Bağlantılar','Sitemizdeki bazı linkler affiliate (ortak) linklerdir. Bu linkler aracılığıyla yapılan alışverişlerden komisyon kazanılabilir. Bu durum kullanıcı için herhangi bir ek maliyet oluşturmaz.'),
+      ('05','🔑','Hesap Sorumluluğu','Hesabınızın güvenliği sizin sorumluluğunuzdadır. Şifrenizi kimseyle paylaşmayınız. Hesabınızı başkasına devretmek yasaktır.'),
+      ('06','⚙️','Hizmet Değişiklikleri','FırsatVakti, hizmeti önceden haber vermeksizin değiştirme, askıya alma veya sonlandırma hakkını saklı tutar.'),
+      ('07','⚖️','Sorumluluk Reddi','FırsatVakti, kullanıcıların alışveriş kararlarından doğan zararlardan sorumlu tutulamaz. Platform bir karar destek aracıdır, yatırım veya finansal tavsiye niteliği taşımaz.')
+    ] %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;padding:24px 24px 24px 20px;display:flex;gap:18px;align-items:flex-start;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;flex-shrink:0;">
+        <div style="width:42px;height:42px;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;">{{ icon }}</div>
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:13px;color:var(--muted);letter-spacing:.5px;">{{ num }}</span>
+      </div>
+      <div style="flex:1;">
+        <h3 style="font-family:'Bebas Neue',sans-serif;font-size:17px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">{{ title }}</h3>
+        <p style="font-size:13px;color:var(--muted);margin:0;font-weight:500;line-height:1.8;">{{ content }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}

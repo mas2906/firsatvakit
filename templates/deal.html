@@ -1,0 +1,472 @@
+{% extends "base.html" %}
+{% block title %}{{ deal.title or 'Fırsat' }} — FırsatVakti{% endblock %}
+
+{% block content %}
+
+<!-- Geri -->
+<a href="/" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;transition:color .15s;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">
+  ← Tüm Fırsatlar
+</a>
+
+<div style="display:grid;grid-template-columns:1fr 1.6fr;gap:20px;align-items:start;">
+
+  <!-- Resim -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;display:flex;align-items:center;justify-content:center;padding:32px;min-height:320px;position:sticky;top:84px;">
+    {% if deal.image_url %}
+    <img src="{{ deal.image_url }}" alt="{{ deal.title }}" style="max-width:100%;max-height:320px;object-fit:contain;">
+    {% else %}
+    <span style="font-size:96px;">🛍</span>
+    {% endif %}
+  </div>
+
+  <!-- Detay -->
+  <div style="display:flex;flex-direction:column;gap:16px;">
+
+    <!-- Platform + Başlık -->
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+        <span class="badge-{{ deal.platform }}" style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px;">
+          {% if deal.platform=='amazon' %}🟠{% elif deal.platform=='trendyol' %}🔴{% elif deal.platform=='n11' %}🟣{% else %}🟡{% endif %}
+          {{ deal.platform|title }}
+        </span>
+        {% if deal.active %}
+        <span style="background:#f0fdf4;color:#16a34a;border:1.5px solid #bbf7d0;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">✓ Aktif Fırsat</span>
+        {% endif %}
+        {% if deal.stock == 'Stok Yok' %}
+        <span style="background:#fef2f2;color:#dc2626;border:1.5px solid #fecaca;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">✗ Stok Tükendi</span>
+        {% elif deal.stock == 'Stokta Var' %}
+        <span style="background:#f0fdf4;color:#16a34a;border:1.5px solid #bbf7d0;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">📦 Stokta</span>
+        {% endif %}
+      </div>
+
+      <h1 style="font-size:clamp(16px,2.5vw,22px);font-weight:700;color:var(--text);line-height:1.4;margin:0 0 14px;">{{ deal.title or 'Ürün adı yükleniyor...' }}</h1>
+
+      {% if deal.rating %}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+        <span style="color:var(--fire3);font-size:14px;">{% for i in range(deal.rating|int) %}★{% endfor %}</span>
+        <span style="font-size:14px;font-weight:700;color:var(--text);">{{ "%.1f"|format(deal.rating) }}</span>
+        {% if deal.review_count %}<span style="font-size:13px;color:var(--muted);">({{ "{:,}".format(deal.review_count) }} yorum)</span>{% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Fiyat Kutusu -->
+      {% if not deal.active %}
+      <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:16px;padding:18px 24px;margin-bottom:20px;display:flex;align-items:center;gap:12px;">
+        <span style="font-size:28px;">⏰</span>
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#dc2626;letter-spacing:.5px;">BU FIRSAT SONA ERDİ</div>
+          <div style="font-size:13px;color:#991b1b;font-weight:500;">Ürünün fiyatı tekrar yükseldi. Fiyat takibi devam ediyor, yeniden düşerse bilgilendirileceksin.</div>
+        </div>
+      </div>
+      {% endif %}
+      <div style="background:linear-gradient(135deg,{% if deal.active %}#fff8f6{% else %}#f5f5f5{% endif %},#fff);border:1.5px solid {% if deal.active %}rgba(244,80,28,.15){% else %}var(--border){% endif %};border-radius:16px;padding:20px 24px;margin-bottom:20px;{% if not deal.active %}opacity:.6;{% endif %}">
+        <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+          <span style="font-family:'Bebas Neue',sans-serif;font-size:44px;color:{% if deal.active %}var(--fire){% else %}var(--muted){% endif %};line-height:1;letter-spacing:.5px;{% if not deal.active %}text-decoration:line-through;{% endif %}">{{ "%.0f"|format(deal.new_price) }}<span style="font-size:20px;"> TL</span></span>
+          <span style="font-size:16px;color:var(--muted);text-decoration:line-through;font-weight:500;">{{ "%.0f"|format(deal.old_price) }} TL</span>
+          <span style="background:{% if deal.active %}linear-gradient(135deg,var(--fire),var(--fire2)){% else %}#9ca3af{% endif %};color:#fff;font-family:'Bebas Neue',sans-serif;font-size:18px;padding:4px 12px;border-radius:9px;letter-spacing:.5px;">-%{{ deal.discount_pct|int }}</span>
+        </div>
+        {% if deal.active %}
+        <div style="font-size:14px;color:#16a34a;font-weight:700;">
+          🎉 {{ "%.0f"|format(deal.old_price - deal.new_price) }} TL tasarruf
+        </div>
+        {% else %}
+        <div style="font-size:13px;color:var(--muted);font-weight:600;">Bu indirim artık geçerli değil</div>
+        {% endif %}
+      </div>
+
+      <!-- CTA -->
+      {% if short_url and deal.active %}
+      <a href="{{ short_url }}" target="_blank" rel="nofollow"
+         style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:700;padding:15px;border-radius:14px;text-decoration:none;box-shadow:0 6px 20px rgba(244,80,28,.3);transition:all .2s;margin-bottom:12px;"
+         onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 10px 28px rgba(244,80,28,.4)'"
+         onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 6px 20px rgba(244,80,28,.3)'">
+        Fırsata Git
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </a>
+      {% elif short_url and not deal.active %}
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#9ca3af;color:#fff;font-family:'DM Sans',sans-serif;font-size:16px;font-weight:700;padding:15px;border-radius:14px;margin-bottom:12px;">
+        ⏰ Fırsat Sona Erdi
+      </div>
+      {% endif %}
+
+      <!-- Kısa link kopyala -->
+      {% if short_url %}
+      <div style="display:flex;align-items:center;gap:8px;background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:10px 14px;">
+        <span style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ short_url }}</span>
+        <button onclick="navigator.clipboard.writeText('{{ short_url }}');this.innerHTML='✓ Kopyalandı';this.style.color='#16a34a';setTimeout(()=>{this.innerHTML='Kopyala';this.style.color='var(--fire)'},2000)"
+                style="font-size:12px;font-weight:700;color:var(--fire);background:none;border:none;cursor:pointer;flex-shrink:0;padding:0;">Kopyala</button>
+      </div>
+      {% endif %}
+
+      <!-- Takip Et butonu -->
+      <div style="margin-top:12px;">
+        {% if user %}
+        <button id="watch-btn" onclick="toggleWatch({{ deal.product_id }}, {{ 'false' if is_watching else 'true' }}, this)"
+                style="width:100%;padding:11px;border-radius:12px;border:1.5px solid {{ '#6b7280' if is_watching else 'var(--fire)' }};background:{{ 'rgba(107,114,128,.1)' if is_watching else 'rgba(244,80,28,.07)' }};color:{{ '#6b7280' if is_watching else 'var(--fire)' }};font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;">
+          {% if is_watching %}✓ Takip Ediliyor{% else %}🔔 Fiyat Düşünce Bildir{% endif %}
+          {% if watcher_count > 0 %}<span style="font-size:12px;opacity:.7;">({{ watcher_count }} kişi takipte)</span>{% endif %}
+        </button>
+        {% else %}
+        <a href="/auth" style="width:100%;padding:11px;border-radius:12px;border:1.5px solid var(--fire);background:rgba(244,80,28,.07);color:var(--fire);font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;">
+          🔔 Giriş yap → Fiyat Düşünce Bildir
+        </a>
+        {% endif %}
+      </div>
+
+      <!-- Meta -->
+      <div style="display:flex;align-items:center;gap:16px;margin-top:16px;flex-wrap:wrap;">
+        <span style="font-size:12px;color:var(--muted);font-weight:500;">📅 {{ deal.created_at[:10] }}</span>
+        {% if clicks %}<span style="font-size:12px;color:var(--muted);font-weight:500;">👆 {{ clicks }} tıklama</span>{% endif %}
+      </div>
+    </div>
+
+    <!-- Fiyat Geçmişi — Çizgi Grafik -->
+    {% if history|length > 1 %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 16px;">📊 FİYAT GEÇMİŞİ</h2>
+
+      {% set max_p = history|map(attribute='price_value')|max %}
+      {% set min_p = history|map(attribute='price_value')|min %}
+
+      <!-- Çizgi Grafik -->
+      <div style="position:relative;height:180px;background:var(--bg3);border-radius:14px;padding:20px 16px 32px;overflow:hidden;" id="chartWrap">
+        <svg id="priceChart" width="100%" height="100%" style="overflow:visible;"></svg>
+        <div id="chartTip" style="display:none;position:absolute;background:var(--text);color:#fff;font-size:12px;font-weight:700;padding:5px 9px;border-radius:7px;pointer-events:none;white-space:nowrap;z-index:10;box-shadow:0 4px 14px rgba(0,0,0,.2);"></div>
+        <!-- Y ekseni etiketleri -->
+        <div style="position:absolute;left:4px;top:18px;font-size:10px;color:var(--muted);font-weight:600;">{{ "%.0f"|format(max_p) }}</div>
+        <div style="position:absolute;left:4px;bottom:30px;font-size:10px;color:#16a34a;font-weight:600;">{{ "%.0f"|format(min_p) }}</div>
+      </div>
+
+      <!-- Min / Max bilgisi -->
+      <div style="display:flex;align-items:center;gap:16px;margin-top:14px;font-size:12px;font-weight:600;">
+        <span style="color:#16a34a;">🟢 En düşük: {{ "%.0f"|format(min_p) }} TL</span>
+        <span style="color:var(--muted);">🔴 En yüksek: {{ "%.0f"|format(max_p) }} TL</span>
+        <span style="color:var(--muted);margin-left:auto;font-size:11px;">{{ history|length }} fiyat noktası</span>
+      </div>
+    </div>
+
+    <script>
+    (function(){
+      var data=[{% for h in history %}{p:{{ h.price_value }},d:"{{ h.scraped_at[:10] }}"}{% if not loop.last %},{% endif %}{% endfor %}];
+      if(data.length<2)return;
+      var wrap=document.getElementById('chartWrap');
+      var svg=document.getElementById('priceChart');
+      var tip=document.getElementById('chartTip');
+      var W=wrap.clientWidth-32, H=wrap.clientHeight-52;
+      var padX=36, padY=8;
+      var prices=data.map(function(d){return d.p});
+      var minP=Math.min.apply(null,prices), maxP=Math.max.apply(null,prices);
+      var range=maxP-minP||1;
+
+      var pts=data.map(function(d,i){
+        return {
+          x: padX + i/(data.length-1) * (W-padX),
+          y: padY + (1-(d.p-minP)/range) * (H-padY*2),
+          p: d.p,
+          d: d.d
+        };
+      });
+
+      // Çizgi path
+      var pathD='M'+pts.map(function(p){return p.x+','+p.y}).join('L');
+      // Gradient alan
+      var fillD=pathD+'L'+pts[pts.length-1].x+','+(H+4)+'L'+pts[0].x+','+(H+4)+'Z';
+
+      // Grid çizgileri
+      var gridLines='';
+      for(var g=0;g<=4;g++){
+        var gy=padY+g/4*(H-padY*2);
+        gridLines+='<line x1="'+padX+'" y1="'+gy+'" x2="'+W+'" y2="'+gy+'" stroke="var(--border)" stroke-dasharray="4,4"/>';
+      }
+
+      // X ekseni tarihleri (ilk, son ve ortadakiler)
+      var xLabels='';
+      var labelIndices=[0];
+      if(data.length>2) labelIndices.push(Math.floor(data.length/2));
+      labelIndices.push(data.length-1);
+      for(var li=0;li<labelIndices.length;li++){
+        var idx=labelIndices[li];
+        xLabels+='<text x="'+pts[idx].x+'" y="'+(H+16)+'" text-anchor="middle" fill="var(--muted)" font-size="10" font-weight="500" font-family="DM Sans,sans-serif">'+data[idx].d.slice(5)+'</text>';
+      }
+
+      svg.innerHTML=
+        '<defs>'+
+          '<linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">'+
+            '<stop offset="0%" stop-color="var(--fire)" stop-opacity=".18"/>'+
+            '<stop offset="100%" stop-color="var(--fire)" stop-opacity="0"/>'+
+          '</linearGradient>'+
+        '</defs>'+
+        gridLines+
+        '<path d="'+fillD+'" fill="url(#cg)"/>'+
+        '<path d="'+pathD+'" fill="none" stroke="var(--fire)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'+
+        pts.map(function(p,i){
+          var isMin=p.p===minP;
+          var col=isMin?'#16a34a':'var(--fire)';
+          return '<circle cx="'+p.x+'" cy="'+p.y+'" r="5" fill="'+col+'" stroke="#fff" stroke-width="2.5" style="cursor:pointer;transition:r .15s" data-i="'+i+'"/>';
+        }).join('')+
+        xLabels;
+
+      // Tooltip hover
+      svg.querySelectorAll('circle').forEach(function(c){
+        c.addEventListener('mouseenter',function(){
+          var i=parseInt(c.getAttribute('data-i'));
+          var p=pts[i];
+          tip.innerHTML='<span style="font-size:10px;opacity:.7;">'+p.d+'</span><br><span style="font-size:12px;">'+p.p.toLocaleString('tr-TR')+' TL</span>';
+          tip.style.display='block';
+          // Gerçek tooltip boyutunu ölç
+          var tw=tip.offsetWidth, th=tip.offsetHeight;
+          var ww=wrap.clientWidth;
+          // Yatay: noktanın üstünde ortala, kenar kontrolü
+          var tx=p.x-tw/2;
+          if(tx<4) tx=4;
+          if(tx+tw>ww-4) tx=ww-tw-4;
+          // Dikey: noktanın üstüne koy, üst sıkışırsa altına
+          var ty=p.y-th-12;
+          if(ty<4) ty=p.y+14;
+          tip.style.left=tx+'px';
+          tip.style.top=ty+'px';
+          c.setAttribute('r','7');
+        });
+        c.addEventListener('mouseleave',function(){
+          tip.style.display='none';
+          c.setAttribute('r','5');
+        });
+      });
+
+      // Vertical hover line
+      wrap.addEventListener('mousemove',function(e){
+        var rect=wrap.getBoundingClientRect();
+        var mx=e.clientX-rect.left-16;
+        var existing=document.getElementById('vLine');
+        if(!existing){
+          var line=document.createElementNS('http://www.w3.org/2000/svg','line');
+          line.id='vLine';
+          line.setAttribute('stroke','var(--muted)');
+          line.setAttribute('stroke-width','1');
+          line.setAttribute('stroke-dasharray','3,3');
+          line.setAttribute('y1','0');
+          line.setAttribute('y2',H+'');
+          svg.insertBefore(line,svg.firstChild.nextSibling);
+          existing=line;
+        }
+        existing.setAttribute('x1',mx);
+        existing.setAttribute('x2',mx);
+        existing.style.opacity='0.4';
+      });
+      wrap.addEventListener('mouseleave',function(){
+        var vl=document.getElementById('vLine');
+        if(vl) vl.style.opacity='0';
+      });
+    })();
+    </script>
+    {% endif %}
+
+    <!-- FİYAT KARŞILAŞTIRMA (v2) -->
+    {% if comparison and comparison.products|length > 1 %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">⚖️ DİĞER PLATFORMLAR</h2>
+        {% if comparison.group %}
+        <a href="/compare/{{ comparison.group.id }}" style="font-size:12px;color:var(--fire);font-weight:700;text-decoration:none;">Detaylı →</a>
+        {% endif %}
+      </div>
+      {% if comparison.savings %}
+      <div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:10px 16px;margin-bottom:14px;font-size:13px;color:#16a34a;font-weight:600;">
+        💰 <strong>{{ comparison.savings.cheapest_platform|title }}</strong>'da {{ "%.2f"|format(comparison.savings.amount) }} TL daha ucuz!
+      </div>
+      {% endif %}
+      {% for p in comparison.products %}
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;margin-bottom:6px;
+        {% if comparison.cheapest and p.id == comparison.cheapest.id %}background:#f0fdf4;border:1.5px solid #bbf7d0;{% else %}background:var(--bg3);{% endif %}">
+        <span style="font-size:16px;">{% if p.platform == 'amazon' %}🟠{% elif p.platform == 'trendyol' %}🔴{% elif p.platform == 'n11' %}🟣{% else %}🟡{% endif %}</span>
+        <span style="flex:1;font-size:13px;font-weight:600;color:var(--text);">{{ p.platform|title }}</span>
+        {% if p.current_price %}
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:20px;{% if comparison.cheapest and p.id == comparison.cheapest.id %}color:#16a34a;{% else %}color:var(--text);{% endif %}">{{ "%.2f"|format(p.current_price) }} TL</span>
+        {% else %}
+        <span style="font-size:12px;color:var(--muted);">—</span>
+        {% endif %}
+        {% if comparison.cheapest and p.id == comparison.cheapest.id %}
+        <span style="background:#16a34a;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;">EN UCUZ</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Açıklama -->
+    {% if deal.description %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 14px;">📋 ÜRÜN AÇIKLAMASI</h2>
+      <p style="font-size:14px;color:#444;line-height:1.7;margin:0;">{{ deal.description }}</p>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+
+<!-- YORUMLAR (v2) -->
+<div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;margin-top:24px;" id="comments">
+  <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0 0 20px;">
+    💬 YORUMLAR
+    {% if comments_data and comments_data.total > 0 %}<span style="color:var(--muted);font-size:16px;font-weight:400;margin-left:8px;">({{ comments_data.total }})</span>{% endif %}
+  </h2>
+
+  <!-- Puan özet -->
+  {% if comments_data and comments_data.avg_rating %}
+  <div style="display:flex;align-items:center;gap:24px;margin-bottom:24px;padding:18px;background:var(--bg3);border-radius:14px;">
+    <div style="text-align:center;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:42px;line-height:1;color:var(--text);">{{ comments_data.avg_rating }}</div>
+      <div style="color:var(--fire3);font-size:13px;">{% for i in range(comments_data.avg_rating|round|int) %}★{% endfor %}</div>
+      <div style="font-size:11px;color:var(--muted);font-weight:600;margin-top:2px;">{{ comments_data.rated_count }} puan</div>
+    </div>
+    <div style="flex:1;">
+      {% for star in [5,4,3,2,1] %}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
+        <span style="width:12px;font-size:11px;color:var(--muted);text-align:right;">{{ star }}</span>
+        <div style="flex:1;height:6px;background:var(--bg4);border-radius:3px;overflow:hidden;">
+          {% set pct = (comments_data.rating_dist[star] / comments_data.rated_count * 100) if comments_data.rated_count > 0 else 0 %}
+          <div style="height:100%;width:{{ pct }}%;background:var(--fire3);border-radius:3px;"></div>
+        </div>
+        <span style="width:20px;font-size:11px;color:var(--muted);text-align:right;">{{ comments_data.rating_dist[star] }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Yorum formu -->
+  {% if user %}
+  <div style="background:var(--bg3);border-radius:14px;padding:18px;margin-bottom:24px;">
+    <form action="/api/comment" method="post">
+      <input type="hidden" name="product_id" value="{{ deal.product_id }}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+        <span style="font-size:13px;font-weight:600;color:var(--text);">Puan:</span>
+        {% for i in range(1,6) %}
+        <label style="cursor:pointer;"><input type="radio" name="rating" value="{{ i }}" style="display:none;" class="star-radio"><span style="font-size:20px;opacity:.3;transition:opacity .15s;" class="star-label">⭐</span></label>
+        {% endfor %}
+        <span style="font-size:11px;color:var(--muted);margin-left:4px;">(opsiyonel)</span>
+      </div>
+      <textarea name="body" rows="3" required minlength="3" maxlength="2000" placeholder="Bu ürün hakkında ne düşünüyorsun?"
+                style="width:100%;background:var(--bg2);border:1.5px solid var(--border);border-radius:10px;padding:12px 14px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;resize:vertical;box-sizing:border-box;transition:border .2s;"
+                onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+        <button type="submit" class="btn-add" style="border:none;cursor:pointer;font-size:13px;padding:9px 20px;">Yorum Yap</button>
+      </div>
+    </form>
+  </div>
+  {% else %}
+  <div style="background:var(--bg3);border-radius:14px;padding:18px;margin-bottom:24px;text-align:center;">
+    <span style="font-size:14px;color:var(--muted);font-weight:500;">Yorum yapmak için <a href="/login" style="color:var(--fire);font-weight:700;text-decoration:none;">giriş yap</a>.</span>
+  </div>
+  {% endif %}
+
+  <!-- Yorum listesi -->
+  {% if comments_data and comments_data.comments %}
+  {% for c in comments_data.comments %}
+  <div style="border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:16px;">
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--fire),var(--fire2));display:flex;align-items:center;justify-content:center;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:15px;flex-shrink:0;">{{ c.username[:2]|upper }}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="font-size:13px;font-weight:700;color:var(--text);">{{ c.username }}</span>
+          {% if c.rating %}<span style="color:var(--fire3);font-size:11px;">{% for i in range(c.rating) %}★{% endfor %}</span>{% endif %}
+          <span style="font-size:11px;color:var(--muted);">{{ c.created_at[:10] }}</span>
+        </div>
+        <p style="font-size:14px;color:#444;line-height:1.6;margin:6px 0 8px;">{{ c.body }}</p>
+        <div style="display:flex;align-items:center;gap:12px;">
+          {% if user %}
+          <form action="/api/comment/{{ c.id }}/vote" method="post" style="display:inline;"><input type="hidden" name="vote" value="1"><button style="background:none;border:none;cursor:pointer;font-size:12px;color:var(--muted);font-weight:600;padding:0;" onmouseover="this.style.color='#16a34a'" onmouseout="this.style.color='var(--muted)'">👍 {{ c.upvotes or 0 }}</button></form>
+          <form action="/api/comment/{{ c.id }}/vote" method="post" style="display:inline;"><input type="hidden" name="vote" value="-1"><button style="background:none;border:none;cursor:pointer;font-size:12px;color:var(--muted);font-weight:600;padding:0;" onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='var(--muted)'">👎 {{ c.downvotes or 0 }}</button></form>
+          {% else %}
+          <span style="font-size:12px;color:var(--muted);">👍 {{ c.upvotes or 0 }} · 👎 {{ c.downvotes or 0 }}</span>
+          {% endif %}
+          {% if user and (user.id == c.user_id or user.role == 'admin') %}
+          <form action="/api/comment/{{ c.id }}/delete" method="post" style="display:inline;" onsubmit="return confirm('Sil?')"><button style="background:none;border:none;cursor:pointer;font-size:11px;color:#dc2626;font-weight:600;padding:0;">Sil</button></form>
+          {% endif %}
+        </div>
+
+        <!-- Yanıtlar -->
+        {% if c.replies %}
+        <div style="margin-top:12px;margin-left:12px;padding-left:14px;border-left:2px solid var(--border);">
+          {% for r in c.replies %}
+          <div style="margin-bottom:10px;">
+            <div style="display:flex;align-items:center;gap:6px;"><span style="font-size:12px;font-weight:700;color:var(--text);">{{ r.username }}</span><span style="font-size:11px;color:var(--muted);">{{ r.created_at[:10] }}</span></div>
+            <p style="font-size:13px;color:#555;margin:3px 0 0;line-height:1.5;">{{ r.body }}</p>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if user %}
+        <details style="margin-top:8px;">
+          <summary style="font-size:12px;color:var(--fire);cursor:pointer;font-weight:700;">Yanıtla</summary>
+          <form action="/api/comment" method="post" style="display:flex;gap:8px;margin-top:8px;">
+            <input type="hidden" name="product_id" value="{{ deal.product_id }}">
+            <input type="hidden" name="parent_id" value="{{ c.id }}">
+            <input name="body" required minlength="3" maxlength="2000" placeholder="Yanıtın…"
+                   style="flex:1;background:var(--bg3);border:1.5px solid var(--border);border-radius:8px;padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;box-sizing:border-box;">
+            <button type="submit" style="background:var(--text);color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:700;cursor:pointer;">Gönder</button>
+          </form>
+        </details>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div style="text-align:center;padding:32px 0;color:var(--muted);font-size:14px;font-weight:500;">Henüz yorum yok. İlk yorumu sen yap! 🎯</div>
+  {% endif %}
+</div>
+
+<script>
+document.querySelectorAll('.star-radio').forEach(r=>{
+  r.addEventListener('change',()=>{
+    document.querySelectorAll('.star-label').forEach((s,i)=>{s.style.opacity=i<parseInt(r.value)?'1':'.3'});
+  });
+});
+</script>
+
+<!-- Mobil için tek sütun -->
+<style>
+@media (max-width: 700px) {
+  div[style*="grid-template-columns:1fr 1.6fr"] {
+    grid-template-columns: 1fr !important;
+  }
+  div[style*="position:sticky"] {
+    position: static !important;
+    min-height: 200px !important;
+  }
+}
+</style>
+
+<!-- REKLAM ALANI — ÜRÜN SAYFASI ALT (728×90) -->
+<div class="ad-slot ad-banner" style="margin-top:32px;">
+  <span style="font-size:18px;opacity:.3;">📢</span>
+  <span class="ad-slot-label">Reklam Alanı — 728×90</span>
+  <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot="XXXXXXXXXX" data-ad-format="auto"></ins> -->
+</div>
+
+<script>
+async function toggleWatch(productId, doWatch, btn) {
+  const endpoint = doWatch ? `/watch/${productId}` : `/unwatch/${productId}`;
+  try {
+    const r = await fetch(endpoint, {method: 'POST'});
+    if (r.ok) {
+      if (doWatch) {
+        btn.innerHTML = '✓ Takip Ediliyor';
+        btn.style.border = '1.5px solid #6b7280';
+        btn.style.background = 'rgba(107,114,128,.1)';
+        btn.style.color = '#6b7280';
+        btn.setAttribute('onclick', `toggleWatch(${productId}, false, this)`);
+      } else {
+        btn.innerHTML = '🔔 Fiyat Düşünce Bildir';
+        btn.style.border = '1.5px solid var(--fire)';
+        btn.style.background = 'rgba(244,80,28,.07)';
+        btn.style.color = 'var(--fire)';
+        btn.setAttribute('onclick', `toggleWatch(${productId}, true, this)`);
+      }
+    }
+  } catch(e) { console.error(e); }
+}
+</script>
+{% endblock %}

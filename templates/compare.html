@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}{{ comparison.group.name|truncate(60) }} — Fiyat Karşılaştırma | FırsatVakti{% endblock %}
+
+{% block content %}
+<a href="/" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;transition:color .15s;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">← Ana Sayfa</a>
+
+<!-- BAŞLIK -->
+<div style="display:flex;align-items:center;gap:16px;margin-bottom:24px;">
+  {% if comparison.group.image_url %}
+  <img src="{{ comparison.group.image_url }}" alt="" style="width:72px;height:72px;border-radius:14px;object-fit:contain;background:var(--bg2);border:1.5px solid var(--border);padding:6px;">
+  {% endif %}
+  <div>
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(24px,3.5vw,38px);letter-spacing:.5px;color:var(--text);margin:0 0 4px;">⚖️ FİYAT KARŞILAŞTIRMA</h1>
+    <p style="color:var(--muted);font-size:14px;font-weight:500;margin:0;">{{ comparison.group.name|truncate(80) }} — {{ comparison.platform_count }} platformda</p>
+  </div>
+</div>
+
+<!-- TASARRUF BANNER -->
+{% if comparison.savings %}
+<div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:16px;padding:18px 24px;margin-bottom:20px;display:flex;align-items:center;gap:14px;">
+  <span style="font-size:36px;">💰</span>
+  <div>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#16a34a;line-height:1;">{{ "%.2f"|format(comparison.savings.amount) }} TL TASARRUF</div>
+    <div style="font-size:13px;color:#15803d;font-weight:600;margin-top:2px;">
+      En ucuzu <strong>{{ comparison.savings.cheapest_platform|title }}</strong>'da — diğerlerine göre %{{ comparison.savings.percent }} daha ucuz
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- FİYAT TABLOSU -->
+<div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;">
+  <!-- Başlık satırı -->
+  <div style="background:var(--text);color:#fff;padding:14px 24px;display:flex;font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">
+    <div style="flex:1;">Platform & Ürün</div>
+    <div style="width:140px;text-align:right;">Fiyat</div>
+    <div style="width:120px;text-align:right;">İşlem</div>
+  </div>
+
+  {% for p in comparison.products %}
+  <div style="display:flex;align-items:center;padding:16px 24px;border-top:1px solid var(--border);transition:background .1s;{% if comparison.cheapest and p.id == comparison.cheapest.id %}background:#f0fdf4;{% endif %}"
+       onmouseover="this.style.background='{% if comparison.cheapest and p.id == comparison.cheapest.id %}#dcfce7{% else %}var(--bg3){% endif %}'"
+       onmouseout="this.style.background='{% if comparison.cheapest and p.id == comparison.cheapest.id %}#f0fdf4{% else %}transparent{% endif %}'">
+
+    <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;">
+      <div style="width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;
+        {% if p.platform == 'amazon' %}background:#fff8ee;{% elif p.platform == 'trendyol' %}background:#fff2ee;{% elif p.platform == 'n11' %}background:#f5eeff;{% else %}background:#fff5ee;{% endif %}">
+        {% if p.platform == 'amazon' %}🟠{% elif p.platform == 'trendyol' %}🔴{% elif p.platform == 'n11' %}🟣{% else %}🟡{% endif %}
+      </div>
+      <div style="min-width:0;">
+        <div style="font-weight:700;font-size:14px;color:var(--text);">{{ p.platform|title }}</div>
+        <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px;">{{ (p.title or '')|truncate(55) }}</div>
+      </div>
+      {% if comparison.cheapest and p.id == comparison.cheapest.id %}
+      <span style="background:#16a34a;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:.5px;padding:3px 10px;border-radius:6px;flex-shrink:0;">EN UCUZ</span>
+      {% endif %}
+    </div>
+
+    <div style="width:140px;text-align:right;">
+      {% if p.current_price %}
+      <span style="font-family:'Bebas Neue',sans-serif;font-size:26px;line-height:1;letter-spacing:.5px;{% if comparison.cheapest and p.id == comparison.cheapest.id %}color:#16a34a;{% else %}color:var(--text);{% endif %}">{{ "%.2f"|format(p.current_price) }}</span>
+      <span style="font-size:12px;color:var(--muted);margin-left:2px;">TL</span>
+      {% else %}
+      <span style="font-size:13px;color:var(--muted);">—</span>
+      {% endif %}
+    </div>
+
+    <div style="width:120px;text-align:right;">
+      <a href="{{ p.source_url }}" target="_blank" rel="nofollow"
+         style="display:inline-flex;align-items:center;gap:4px;padding:8px 16px;border-radius:10px;font-size:13px;font-weight:700;text-decoration:none;transition:all .15s;
+         {% if comparison.cheapest and p.id == comparison.cheapest.id %}background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;box-shadow:0 3px 12px rgba(244,80,28,.25);{% else %}background:var(--bg3);color:var(--text);border:1.5px solid var(--border);{% endif %}"
+         onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform='none'">
+        Satın Al ↗
+      </a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<p style="text-align:center;font-size:12px;color:var(--muted);margin-top:16px;font-weight:500;">Fiyatlar son tarama tarihine aittir. Güncel fiyat için satıcı sitesini kontrol edin.</p>
+
+<style>
+@media(max-width:600px) {
+  div[style*="width:140px"],div[style*="width:120px"] { width:auto !important; }
+}
+</style>
+{% endblock %}

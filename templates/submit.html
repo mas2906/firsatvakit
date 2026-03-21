@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Link Ekle — FırsatVakti{% endblock %}
+
+{% block content %}
+<div style="max-width:560px;margin:48px auto;">
+
+  <!-- Başlık -->
+  <div style="text-align:center;margin-bottom:32px;">
+    <div style="width:56px;height:56px;background:linear-gradient(135deg,var(--fire),var(--fire2));border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 16px;box-shadow:0 6px 20px rgba(244,80,28,.28);">🔗</div>
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:1px;color:var(--text);margin:0 0 8px;">ÜRÜN LİNKİ EKLE</h1>
+    <p style="color:var(--muted);font-size:15px;margin:0;font-weight:500;">Amazon, Trendyol veya N11 linkini yapıştır — takip başlasın.</p>
+  </div>
+
+  <!-- Kart -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:32px;box-shadow:0 4px 24px rgba(0,0,0,.06);">
+
+    <!-- Hata -->
+    {% if error %}
+    <div style="background:#fff5f5;border:1.5px solid rgba(220,38,38,.2);border-radius:12px;padding:12px 16px;margin-bottom:20px;display:flex;align-items:center;gap:10px;">
+      <span style="font-size:18px;">⚠️</span>
+      <span style="color:#dc2626;font-size:14px;font-weight:600;">{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <!-- Uyarı: Ürün zaten var -->
+    {% if already_exists %}
+    <div style="background:#fffbeb;border:1.5px solid rgba(245,158,11,.35);border-radius:12px;padding:14px 16px;margin-bottom:20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span style="font-size:18px;">🔔</span>
+      <span style="color:#92400e;font-size:14px;font-weight:600;flex:1;">Bu ürün sistemde zaten var. Fiyat düştüğünde bildirim almak ister misin?</span>
+      <a href="{{ already_exists_url }}" style="background:#f59e0b;color:#fff;font-size:13px;font-weight:700;padding:7px 16px;border-radius:8px;text-decoration:none;white-space:nowrap;">Ürünü Gör →</a>
+      {% if user %}
+        <button id="watch-btn-submit" onclick="toggleWatch({{ already_exists_product_id }}, {{ 'false' if is_watching else 'true' }}, this)"
+                style="background:{{ '#6b7280' if is_watching else '#f4501c' }};color:#fff;font-size:13px;font-weight:700;padding:7px 16px;border-radius:8px;border:none;cursor:pointer;white-space:nowrap;">
+          {{ '✓ Takip Ediliyor' if is_watching else '🔔 Takip Et' }}
+        </button>
+      {% else %}
+        <a href="/auth" style="background:#f4501c;color:#fff;font-size:13px;font-weight:700;padding:7px 16px;border-radius:8px;text-decoration:none;white-space:nowrap;">Giriş yap → Takip Et</a>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Başarı -->
+    {% if success %}
+    <div style="background:#f0fdf4;border:1.5px solid rgba(22,163,74,.2);border-radius:12px;padding:14px 16px;margin-bottom:20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span style="font-size:18px;">✅</span>
+      <span style="color:#16a34a;font-size:14px;font-weight:600;">{{ success }}</span>
+      {% if product_id %}
+      <a href="{{ product_url or '/product/' ~ product_id }}" style="margin-left:auto;background:var(--fire);color:#fff;font-size:13px;font-weight:700;padding:7px 16px;border-radius:8px;text-decoration:none;white-space:nowrap;">Ürünü Gör →</a>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Limit göstergesi -->
+    {% if remaining is defined %}
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg3);border-radius:12px;padding:10px 16px;margin-bottom:20px;">
+      <span style="font-size:13px;font-weight:600;color:var(--text);">
+        {% if user %}👤 Günlük limit{% else %}👻 Misafir limiti{% endif %}
+      </span>
+      <span style="font-size:13px;font-weight:700;color:{% if remaining == 0 %}#dc2626{% elif remaining <= 2 %}#d97706{% else %}#16a34a{% endif %};">
+        {{ remaining }} / {{ limit }} kaldı
+      </span>
+    </div>
+    {% endif %}
+
+    <!-- Limit dolmuşsa CTA göster -->
+    {% if limit_reached %}
+    <div style="text-align:center;padding:16px 0 8px;">
+      {% if not user %}
+      <p style="color:var(--muted);font-size:14px;margin:0 0 16px;">Üye olarak <strong style="color:var(--text);">günde 20 link</strong> ekleyebilirsin!</p>
+      <div style="display:flex;gap:10px;justify-content:center;">
+        <a href="/register" class="btn-add" style="text-decoration:none;">Ücretsiz Üye Ol</a>
+        <a href="/login" class="btn-tg" style="text-decoration:none;">Giriş Yap</a>
+      </div>
+      {% else %}
+      <p style="color:var(--muted);font-size:14px;margin:0;">Yarın yeniden link ekleyebilirsin. 🕐</p>
+      {% endif %}
+    </div>
+    {% else %}
+
+    <!-- Form -->
+    <form method="post" action="/submit">
+      <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px;letter-spacing:.3px;">ÜRÜN LİNKİ</label>
+      <div style="display:flex;gap:10px;">
+        <input type="url" name="url" required
+               placeholder="https://www.amazon.com.tr/dp/..."
+               style="flex:1;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:all .2s;"
+               onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff';this.style.boxShadow='0 0 0 3px rgba(244,80,28,.10)'"
+               onblur="this.style.borderColor='var(--border)';this.style.background='var(--bg3)';this.style.boxShadow='none'">
+        <button type="submit" class="btn-add" style="flex-shrink:0;border:none;cursor:pointer;">
+          Ekle →
+        </button>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin-top:10px;font-weight:500;">
+        🟠 Amazon &nbsp;&nbsp; 🔴 Trendyol &nbsp;&nbsp; 🟣 N11 &nbsp;&nbsp; 🟡 Hepsiburada
+      </p>
+    <!-- Çapraz Platform Arama (v2) -->
+    <div style="background:var(--bg3);border:1.5px solid var(--border);border-radius:14px;padding:16px 18px;margin-top:16px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-size:16px;">⚖️</span>
+        <span style="font-size:13px;font-weight:700;color:var(--text);">Diğer Platformlarda Ara</span>
+        <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;">YENİ</span>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px;font-weight:500;">Ürünü otomatik diğer platformlarda arayıp fiyat karşılaştırması oluşturur.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        {% for plat, emoji, label in [('amazon','🟠','Amazon'),('trendyol','🔴','Trendyol'),('n11','🟣','N11'),('hepsiburada','🟡','Hepsiburada')] %}
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text);">
+          <input type="checkbox" class="xplat-cb" data-p="{{ plat }}" style="accent-color:var(--fire);">{{ emoji }} {{ label }}
+        </label>
+        {% endfor %}
+      </div>
+      <input type="hidden" name="cross_search_platforms" id="xplat_val" value="">
+    </div>
+    </form>
+
+    <script>
+    document.querySelectorAll('.xplat-cb').forEach(cb=>{
+      cb.addEventListener('change',()=>{
+        document.getElementById('xplat_val').value=[...document.querySelectorAll('.xplat-cb:checked')].map(e=>e.dataset.p).join(',');
+      });
+    });
+    </script>
+    {% endif %}
+
+    <!-- Ayırıcı -->
+    <div style="border-top:1.5px solid var(--border);margin:28px 0;"></div>
+
+    <!-- Adımlar -->
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;text-align:center;">
+      {% for icon, title, desc in [('🔗','Linki Yapıştır','Amazon, Trendyol ya da N11'),('📊','Otomatik Takip','Fiyat değişimleri izlenir'),('🔔','Anında Bildirim','İndirimde haber verilir')] %}
+      <div style="background:var(--bg3);border-radius:14px;padding:18px 10px;">
+        <div style="font-size:26px;margin-bottom:8px;">{{ icon }}</div>
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:4px;">{{ title }}</div>
+        <div style="font-size:11px;color:var(--muted);font-weight:500;">{{ desc }}</div>
+      </div>
+      {% endfor %}
+    </div>
+
+  </div>
+
+  <!-- Üyelik CTA (misafir ve limit dolmamışsa) -->
+  {% if not user and not limit_reached %}
+  <div style="margin-top:16px;background:#fff8f6;border:1.5px solid rgba(244,80,28,.15);border-radius:14px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+    <div>
+      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px;">Misafir olarak günde 3 link ekleyebilirsin</div>
+      <div style="font-size:12px;color:var(--muted);">Üye olursan günlük 20 link hakkı kazanırsın</div>
+    </div>
+    <a href="/register" style="background:var(--fire);color:#fff;font-size:13px;font-weight:700;padding:9px 18px;border-radius:10px;text-decoration:none;white-space:nowrap;box-shadow:0 3px 10px rgba(244,80,28,.25);">Ücretsiz Üye Ol</a>
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+async function toggleWatch(productId, doWatch, btn) {
+  const endpoint = doWatch ? `/watch/${productId}` : `/unwatch/${productId}`;
+  try {
+    const r = await fetch(endpoint, {method: 'POST'});
+    if (r.ok) {
+      if (doWatch) {
+        btn.textContent = '✓ Takip Ediliyor';
+        btn.style.background = '#6b7280';
+        btn.setAttribute('onclick', `toggleWatch(${productId}, false, this)`);
+      } else {
+        btn.textContent = '🔔 Takip Et';
+        btn.style.background = '#f4501c';
+        btn.setAttribute('onclick', `toggleWatch(${productId}, true, this)`);
+      }
+    }
+  } catch(e) { console.error(e); }
+}
+</script>
+{% endblock %}

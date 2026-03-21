@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}{{ product.title or 'Ürün Takipte' }} — FırsatVakti{% endblock %}
+
+{% block content %}
+
+<a href="/" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;transition:color .15s;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">
+  ← Tüm Fırsatlar
+</a>
+
+<div style="display:grid;grid-template-columns:1fr 1.6fr;gap:20px;align-items:start;">
+
+  <!-- Resim -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;display:flex;align-items:center;justify-content:center;padding:32px;min-height:280px;">
+    {% if product.image_url %}
+    <img src="{{ product.image_url }}" alt="{{ product.title }}" style="max-width:100%;max-height:280px;object-fit:contain;">
+    {% else %}
+    <span style="font-size:80px;">⏳</span>
+    {% endif %}
+  </div>
+
+  <!-- Detay -->
+  <div style="display:flex;flex-direction:column;gap:16px;">
+
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+        <span class="badge-{{ product.platform }}" style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px;">
+          {% if product.platform=='amazon' %}🟠{% elif product.platform=='trendyol' %}🔴{% elif product.platform=='n11' %}🟣{% else %}🟡{% endif %}
+          {{ product.platform|title }}
+        </span>
+        <span style="background:#fef3c7;color:#d97706;border:1.5px solid #fde68a;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">⏳ Taranıyor...</span>
+      </div>
+
+      <h1 style="font-size:clamp(16px,2.5vw,22px);font-weight:700;color:var(--text);line-height:1.4;margin:0 0 16px;">
+        {{ product.title or 'Ürün bilgileri yükleniyor...' }}
+      </h1>
+
+      {% if product.rating %}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
+        <span style="color:var(--fire3);font-size:14px;">{% for i in range(product.rating|int) %}★{% endfor %}</span>
+        <span style="font-size:14px;font-weight:700;">{{ "%.1f"|format(product.rating) }}</span>
+        {% if product.review_count %}<span style="font-size:13px;color:var(--muted);">({{ "{:,}".format(product.review_count) }} yorum)</span>{% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Takip durumu -->
+      <div style="background:linear-gradient(135deg,#fffbeb,#fff);border:1.5px solid #fde68a;border-radius:14px;padding:18px 20px;margin-bottom:20px;">
+        <div style="font-size:14px;font-weight:700;color:#92400e;margin-bottom:6px;">📊 Fiyatı Takip Ediyoruz</div>
+        <div style="font-size:13px;color:#b45309;line-height:1.6;font-weight:500;">
+          Ürün fiyatı izleniyor. Fiyat <strong>%5 veya daha fazla</strong> düştüğünde otomatik olarak fırsat oluşturulur ve bu sayfaya yönlendirilirsin.
+        </div>
+      </div>
+
+      <!-- Orijinal linke git -->
+      <a href="{{ product.source_url }}" target="_blank" rel="nofollow"
+         style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--bg3);border:1.5px solid var(--border);color:var(--text);font-family:'DM Sans',sans-serif;font-size:15px;font-weight:700;padding:14px;border-radius:14px;text-decoration:none;transition:all .2s;margin-bottom:12px;box-sizing:border-box;"
+         onmouseover="this.style.borderColor='var(--fire)';this.style.color='var(--fire)'"
+         onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text)'">
+        {{ product.platform|title }}'da Görüntüle
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
+      </a>
+
+      <div style="font-size:12px;color:var(--muted);font-weight:500;text-align:center;">
+        📅 Eklenme: {{ product.first_seen_at[:10] if product.first_seen_at else '—' }}
+      </div>
+    </div>
+
+    <!-- Fiyat geçmişi (varsa) -->
+    {% if history|length > 1 %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 20px;">📊 FİYAT GEÇMİŞİ</h2>
+      {% set max_p = history|map(attribute='price_value')|max %}
+      {% set min_p = history|map(attribute='price_value')|min %}
+      <div style="display:flex;align-items:flex-end;gap:8px;height:100px;overflow-x:auto;padding-bottom:8px;">
+        {% for h in history %}
+        {% set bar_h = [(h.price_value / max_p * 80)|int, 8]|max %}
+        {% set is_min = h.price_value == min_p %}
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;min-width:44px;">
+          <div style="font-size:10px;font-weight:700;color:{% if is_min %}#16a34a{% else %}var(--text){% endif %};">{{ "%.0f"|format(h.price_value) }}</div>
+          <div style="height:{{ bar_h }}px;width:32px;background:{% if is_min %}#16a34a{% else %}var(--fire){% endif %};border-radius:6px 6px 0 0;opacity:.7;"></div>
+          <div style="font-size:9px;color:var(--muted);">{{ h.scraped_at[5:10] }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      <div style="display:flex;gap:16px;margin-top:12px;font-size:12px;font-weight:600;">
+        <span style="color:#16a34a;">🟢 En düşük: {{ "%.0f"|format(min_p) }} TL</span>
+        <span style="color:var(--muted);">🔴 En yüksek: {{ "%.0f"|format(max_p) }} TL</span>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+
+<style>
+@media (max-width: 700px) {
+  div[style*="grid-template-columns:1fr 1.6fr"] { grid-template-columns: 1fr !important; }
+}
+</style>
+
+{% endblock %}

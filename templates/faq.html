@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}SSS — FırsatVakti{% endblock %}
+{% block content %}
+<div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
+
+  <!-- Hero -->
+  <div style="text-align:center;padding:52px 0 44px;">
+    <div style="display:inline-flex;align-items:center;gap:8px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:99px;padding:6px 16px;margin-bottom:18px;">
+      <span style="font-size:14px;">❓</span>
+      <span style="font-size:12px;font-weight:700;color:#f59e0b;letter-spacing:.8px;">SIKÇA SORULAN SORULAR</span>
+    </div>
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,5vw,46px);letter-spacing:1px;color:var(--text);margin:0 0 12px;">HER ŞEYİ MERAK EDİYOR MUSUN?</h1>
+    <p style="font-size:14px;color:var(--muted);font-weight:500;max-width:400px;margin:0 auto;line-height:1.7;">Aklına takılan soruların cevabı burada. Bulamazsan bize yaz.</p>
+  </div>
+
+  <!-- Kategoriler -->
+  <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:32px;">
+    {% for cat in ['Tümü','Genel','Bildirimler','Teknik','Affiliate'] %}
+    <button onclick="filterFaq(this,'{{ cat }}')"
+            style="padding:7px 16px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid var(--border);background:{% if loop.first %}var(--fire){% else %}var(--bg3){% endif %};color:{% if loop.first %}#fff{% else %}var(--muted){% endif %};transition:all .15s;"
+            class="faq-cat-btn" data-cat="{{ cat }}">{{ cat }}</button>
+    {% endfor %}
+  </div>
+
+  <!-- Sorular -->
+  <div style="display:flex;flex-direction:column;gap:10px;" id="faq-list">
+    {% for cat, q, a in [
+      ('Genel','FırsatVakti ücretsiz mi?','Evet, tamamen ücretsizdir. Üye olman bile gerekmiyor — misafir olarak da link ekleyebilirsin.'),
+      ('Genel','Fiyatlar ne sıklıkla güncellenir?','Ürün fiyatları düzenli aralıklarla otomatik olarak kontrol edilmektedir. Fiyat değişikliklerini mümkün olan en kısa sürede tespit edip bildiriyoruz.'),
+      ('Genel','Hangi platformları destekliyorsunuz?','Şu an Amazon Türkiye, Trendyol, N11 ve Hepsiburada desteklenmektedir. Yeni platformlar eklenmeye devam edecektir.'),
+      ('Genel','Kaç ürün ekleyebilirim?','Misafir kullanıcılar günde sınırlı sayıda ürün ekleyebilir. Üye olarak daha fazla ürün takip edebilirsin.'),
+      ('Bildirimler','Telegram bildirimi nasıl alırım?','Telegram\'da @userinfobot\'a /start yazarak chat ID\'ni öğren. Ardından Ayarlar sayfasına bu ID\'yi girerek bildirimleri aktifleştir. Ayrıca @firsat_vaktibot\'a /start yazman gerekiyor.'),
+      ('Bildirimler','WhatsApp\'tan nasıl takip ederim?','WhatsApp kanalımızı (firsatvakti) takip ederek tüm fırsatlardan haberdar olabilirsin. Kişisel bildirim için şimdilik Telegram önerilir.'),
+      ('Teknik','Ürünümü nasıl silerim?','Şu an ürün silme işlemi yalnızca admin tarafından yapılabilmektedir. Silme talebini iletişim sayfasından iletebilirsin.'),
+      ('Teknik','Fiyat yanlış görünüyor, ne yapmalıyım?','Fiyat bilgisi ilgili platformdan otomatik çekilmektedir. Farklılık varsa lütfen iletişim sayfasından bildirin.'),
+      ('Affiliate','Affiliate link nedir?','Fırsata tıkladığında yönlendirildiğin link bir affiliate linktir. Bu link üzerinden alışveriş yaparsan FırsatVakti küçük bir komisyon kazanır — senin için herhangi bir ek maliyet oluşmaz.'),
+      ('Affiliate','Fiyat affiliate linkten daha pahalı mı?','Hayır. Affiliate linkler fiyatı etkilemez, aynı ürünü aynı fiyata alırsın. Sadece satıştan küçük bir komisyon kazanılır.')
+    ] %}
+    <div class="faq-item" data-cat="{{ cat }}" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;overflow:hidden;transition:border-color .2s;">
+      <details>
+        <summary style="padding:18px 20px;font-size:14px;font-weight:700;color:var(--text);list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;user-select:none;">
+          <span style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--bg3);color:var(--muted);white-space:nowrap;">{{ cat }}</span>
+            {{ q }}
+          </span>
+          <svg class="faq-arrow" width="16" height="16" fill="none" stroke="var(--fire)" stroke-width="2.5" viewBox="0 0 24 24" style="flex-shrink:0;transition:transform .2s;"><path d="M6 9l6 6 6-6"/></svg>
+        </summary>
+        <div style="padding:0 20px 18px;font-size:13px;color:var(--muted);line-height:1.8;font-weight:500;border-top:1px solid var(--border);">
+          <div style="padding-top:14px;">{{ a }}</div>
+        </div>
+      </details>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Alt CTA -->
+  <div style="margin-top:36px;background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;">
+    <div>
+      <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px;">Cevabını bulamadın mı?</div>
+      <div style="font-size:13px;color:var(--muted);font-weight:500;">Bize doğrudan yazabilirsin, en kısa sürede dönüş yaparız.</div>
+    </div>
+    <a href="/contact" class="btn-add" style="text-decoration:none;display:inline-flex;padding:11px 24px;font-size:14px;border-radius:12px;">✉️ Bize Yaz</a>
+  </div>
+
+</div>
+
+<script>
+document.querySelectorAll('details').forEach(function(d){
+  d.addEventListener('toggle',function(){
+    var arrow = d.querySelector('.faq-arrow');
+    if(arrow) arrow.style.transform = d.open ? 'rotate(180deg)' : 'rotate(0)';
+    var item = d.closest('.faq-item');
+    if(item) item.style.borderColor = d.open ? 'var(--fire)' : 'var(--border)';
+  });
+});
+
+function filterFaq(btn, cat) {
+  document.querySelectorAll('.faq-cat-btn').forEach(function(b){
+    b.style.background = 'var(--bg3)'; b.style.color = 'var(--muted)'; b.style.borderColor = 'var(--border)';
+  });
+  btn.style.background = 'var(--fire)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--fire)';
+  document.querySelectorAll('.faq-item').forEach(function(item){
+    item.style.display = (cat === 'Tümü' || item.dataset.cat === cat) ? '' : 'none';
+  });
+}
+</script>
+{% endblock %}

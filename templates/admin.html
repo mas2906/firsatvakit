@@ -1,0 +1,383 @@
+{% extends "base.html" %}
+{% block title %}Admin Panel — FırsatVakti{% endblock %}
+
+{% block content %}
+<div style="max-width:1200px;margin:0 auto;">
+
+  <!-- Başlık -->
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:28px;">
+    <div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:40px;letter-spacing:1px;color:var(--text);margin:0 0 4px;">⚙️ ADMİN PANELİ</h1>
+      <p style="color:var(--muted);font-size:14px;font-weight:500;margin:0;">Hoş geldin, <strong style="color:var(--text);">{{ user.username }}</strong> — sınırsız yetki</p>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <a href="/admin/articles" class="btn-tg" style="text-decoration:none;">📝 Makaleler</a>
+      <form method="post" action="/admin/scan/run" id="scan-form">
+        <button type="submit" id="scan-btn" class="btn-add" style="border:none;cursor:pointer;">
+          🔄 Taramayı Başlat
+        </button>
+      </form>
+      <a href="/" class="btn-tg" style="text-decoration:none;">← Siteye Dön</a>
+    </div>
+  </div>
+
+  <!-- TARAMA DURUMU -->
+  <div id="scan-progress-box" style="display:none;background:var(--bg2);border:2px solid var(--fire);border-radius:16px;padding:20px 24px;margin-bottom:24px;box-shadow:0 4px 20px rgba(244,80,28,.1);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="scan-spinner" style="font-size:20px;display:inline-block;animation:spin 1.2s linear infinite;">⚙️</span>
+        <span id="scan-heading" style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);">TARAMA DEVAM EDİYOR</span>
+      </div>
+      <div style="display:flex;gap:14px;font-size:13px;font-weight:700;">
+        <span style="color:#16a34a;" id="scan-done-count">0 tamam</span>
+        <span style="color:#dc2626;" id="scan-fail-count">0 hata</span>
+      </div>
+    </div>
+    <!-- Progress bar -->
+    <div style="background:var(--bg3);border-radius:99px;height:8px;overflow:hidden;margin-bottom:10px;">
+      <div id="scan-bar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--fire),var(--fire2));border-radius:99px;transition:width .4s ease;"></div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;">
+      <div style="font-size:13px;color:var(--muted);">
+        <span id="scan-current">0</span> / <span id="scan-total">0</span> ürün
+        &nbsp;·&nbsp;
+        <span id="scan-platform" style="font-weight:600;color:var(--text);"></span>
+      </div>
+      <div id="scan-title" style="font-size:12px;color:var(--muted);max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+    </div>
+
+    <!-- Hatalı ürünler -->
+    <div id="scan-errors-wrap" style="display:none;margin-top:16px;border-top:1.5px solid var(--border);padding-top:14px;">
+      <div style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:8px;letter-spacing:.3px;">HATALI ÜRÜNLER</div>
+      <div id="scan-errors-list" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- İSTATİSTİK KARTLARI -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:32px;">
+    {% for val, label, color in [
+      (stats.products, 'Ürün', 'var(--fire)'),
+      (stats.pending_deals, 'Onay Bekliyor', '#f59e0b'),
+      (stats.active_deals, 'Aktif Fırsat', '#10b981'),
+      (stats.deals, 'Toplam Deal', '#6366f1'),
+      (stats.users, 'Üye', '#8b5cf6'),
+      (stats.clicks, 'Tıklama', '#3b82f6'),
+      (stats.queue_pending, 'Kuyrukta', '#ef4444')
+    ] %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:14px;padding:16px 20px;text-align:center;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:{{ color }};">{{ val }}</div>
+      <div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:4px;">{{ label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ══ ONAY BEKLEYEN FIRSATLAR ════════════════════════════ -->
+  {% if pending_deals %}
+  <div style="background:var(--bg2);border:2px solid #f59e0b;border-radius:18px;overflow:hidden;margin-bottom:28px;box-shadow:0 4px 20px rgba(245,158,11,.12);">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,#fffbeb,#fff);">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:24px;">⏳</span>
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0;">ONAY BEKLEYEN FIRSATLAR</h2>
+      </div>
+      <span style="background:#fef3c7;color:#92400e;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_deals|length }} bekliyor</span>
+    </div>
+
+    {% for d in pending_deals %}
+    <div style="padding:20px 24px;border-top:1px solid var(--border);{% if loop.first %}border-top:none;{% endif %}">
+      <div style="display:flex;align-items:start;gap:16px;flex-wrap:wrap;">
+        <!-- Ürün bilgisi -->
+        {% if d.image_url %}
+        <img src="{{ d.image_url }}" alt="" style="width:64px;height:64px;border-radius:12px;object-fit:contain;background:var(--bg3);flex-shrink:0;">
+        {% else %}
+        <div style="width:64px;height:64px;border-radius:12px;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:28px;flex-shrink:0;">🛍</div>
+        {% endif %}
+        <div style="flex:1;min-width:200px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span class="badge-{{ d.platform }}" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">
+              {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %} {{ d.platform|title }}
+            </span>
+            <span style="font-size:12px;color:var(--muted);">#{{ d.id }}</span>
+          </div>
+          <a href="/deal/{{ d.id }}" target="_blank" style="font-size:14px;font-weight:600;color:var(--text);text-decoration:none;display:block;margin-bottom:4px;">{{ d.title or '(başlık yok)' }}</a>
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:var(--muted);text-decoration:line-through;">{{ "%.0f"|format(d.old_price) }} TL</span>
+            <span style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--fire);">{{ "%.0f"|format(d.new_price) }} TL</span>
+            <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;padding:3px 9px;border-radius:7px;">-%{{ d.discount_pct|int }}</span>
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">
+            📅 {{ d.created_at[:16] }}
+            &nbsp;·&nbsp;
+            <a href="{{ d.source_url }}" target="_blank" style="color:var(--fire);text-decoration:none;font-weight:600;">Orijinal link ↗</a>
+          </div>
+        </div>
+
+        <!-- Onay Formu -->
+        <div style="width:320px;flex-shrink:0;">
+          <form method="post" action="/admin/deal/{{ d.id }}/approve" style="display:flex;flex-direction:column;gap:8px;">
+            <label style="font-size:11px;font-weight:700;color:var(--text);letter-spacing:.3px;">AFFİLİATE LİNK <span style="color:var(--muted);font-weight:500;">(opsiyonel)</span></label>
+            <input type="url" name="affiliate_url" placeholder="https://..."
+                   value="{{ d.affiliate_url or '' }}"
+                   style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:9px 12px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;box-sizing:border-box;"
+                   onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'">
+            <div style="display:flex;gap:8px;">
+              <button type="submit" style="flex:1;background:linear-gradient(135deg,#16a34a,#22c55e);color:#fff;border:none;border-radius:10px;padding:10px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 3px 12px rgba(22,163,74,.25);transition:all .15s;"
+                      onmouseover="this.style.transform='translateY(-1px)'" onmouseout="this.style.transform='none'">
+                ✓ Onayla & Yayınla
+              </button>
+            </div>
+          </form>
+          <form method="post" action="/admin/deal/{{ d.id }}/reject" style="margin-top:6px;" onsubmit="return confirm('Bu fırsatı reddetmek istediğine emin misin?')">
+            <button type="submit" style="width:100%;background:#fef2f2;color:#dc2626;border:1.5px solid #fecaca;border-radius:10px;padding:8px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:700;cursor:pointer;">
+              ✗ Reddet
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- SON FIRTASLAR + SİL -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-bottom:28px;">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Son Fırsatlar</h2>
+      <span style="font-size:12px;color:var(--muted);font-weight:600;">{{ recent_deals|length }} kayıt</span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--bg3);">
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">ID</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Ürün</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Platform</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Fiyat</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">İndirim</th>
+            <th style="padding:10px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Durum</th>
+            <th style="padding:10px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">İşlem</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in recent_deals %}
+          <tr style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+            <td style="padding:12px 16px;color:var(--muted);font-size:12px;">#{{ d.id }}</td>
+            <td style="padding:12px 16px;max-width:280px;">
+              <a href="/deal/{{ d.id }}" style="color:var(--text);text-decoration:none;font-weight:500;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;" target="_blank">
+                {{ d.title or '(başlık yok)' }}
+              </a>
+            </td>
+            <td style="padding:12px 16px;">
+              <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;" class="badge-{{ d.platform }}">
+                {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+                {{ d.platform|title }}
+              </span>
+            </td>
+            <td style="padding:12px 16px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:16px;color:var(--text);">{{ "%.0f"|format(d.new_price) }} TL</td>
+            <td style="padding:12px 16px;text-align:right;">
+              <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;padding:3px 9px;border-radius:7px;">-%{{ d.discount_pct|int }}</span>
+            </td>
+            <td style="padding:12px 16px;text-align:center;">
+              <form method="post" action="/admin/deal/{{ d.id }}/toggle" style="display:inline;">
+                <button type="submit" style="border:none;cursor:pointer;padding:5px 12px;border-radius:8px;font-size:11px;font-weight:700;
+                  {% if d.active %}background:#dcfce7;color:#16a34a;{% else %}background:#fef2f2;color:#dc2626;{% endif %}">
+                  {% if d.active %}✓ Aktif{% else %}✗ Pasif{% endif %}
+                </button>
+              </form>
+            </td>
+            <td style="padding:12px 16px;text-align:center;">
+              <div style="display:flex;gap:6px;justify-content:center;">
+                <a href="/deal/{{ d.id }}" target="_blank" style="padding:5px 10px;background:var(--bg3);border-radius:7px;font-size:11px;font-weight:700;color:var(--text);text-decoration:none;">👁</a>
+                <form method="post" action="/admin/deal/{{ d.id }}/delete" style="display:inline;" onsubmit="return confirm('Bu fırsatı silmek istediğine emin misin?')">
+                  <button type="submit" style="padding:5px 10px;background:#fef2f2;border:none;border-radius:7px;font-size:11px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Sil</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ÜRÜN LİSTESİ -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-bottom:28px;">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Ürünler</h2>
+        <span style="font-size:12px;color:var(--muted);font-weight:600;" id="product-count">{{ products|length }} ürün</span>
+      </div>
+      <input type="search" id="product-search" placeholder="Ürün adı veya URL ara..."
+             oninput="filterProducts(this.value)"
+             style="background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;width:260px;"
+             onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'">
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--bg3);">
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">ID</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Ürün</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Platform</th>
+            <th style="padding:10px 16px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Fiyat Sayısı</th>
+            <th style="padding:10px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">İşlem</th>
+          </tr>
+        </thead>
+        <tbody id="product-tbody">
+          {% for p in products %}
+          <tr style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+            <td style="padding:12px 16px;color:var(--muted);font-size:12px;">#{{ p.id }}</td>
+            <td style="padding:12px 16px;max-width:320px;">
+              <div style="font-weight:500;color:var(--text);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;">{{ p.title or '(başlık yok — taranıyor)' }}</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px;">{{ p.source_url }}</div>
+            </td>
+            <td style="padding:12px 16px;">
+              <span class="badge-{{ p.platform }}" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">{{ p.platform|title }}</span>
+            </td>
+            <td style="padding:12px 16px;text-align:right;font-weight:600;color:var(--text);">{{ p.price_count }}</td>
+            <td style="padding:12px 16px;text-align:center;">
+              <form method="post" action="/admin/product/{{ p.id }}/delete" style="display:inline;" onsubmit="return confirm('Ürünü ve tüm geçmişini silmek istediğine emin misin? Bu işlem geri alınamaz!')">
+                <button type="submit" style="padding:5px 14px;background:#fef2f2;border:none;border-radius:7px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Ürünü Sil</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- TARAMA KUYRUĞU -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Tarama Kuyruğu</h2>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:var(--bg3);">
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">URL</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Platform</th>
+            <th style="padding:10px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Durum</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Oluşturulma</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for q in queue %}
+          <tr style="border-top:1px solid var(--border);">
+            <td style="padding:10px 16px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px;">{{ q.url }}</td>
+            <td style="padding:10px 16px;">
+              <span class="badge-{{ q.platform }}" style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:5px;">{{ q.platform }}</span>
+            </td>
+            <td style="padding:10px 16px;text-align:center;">
+              {% if q.status == 'done' %}
+              <span style="background:#dcfce7;color:#16a34a;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">✓ Tamam</span>
+              {% elif q.status == 'running' %}
+              <span style="background:#fef3c7;color:#d97706;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">⏳ Çalışıyor</span>
+              {% elif q.status == 'failed' %}
+              <span style="background:#fef2f2;color:#dc2626;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">✗ Hata</span>
+              {% else %}
+              <span style="background:var(--bg3);color:var(--muted);font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">⏸ Bekliyor</span>
+              {% endif %}
+            </td>
+            <td style="padding:10px 16px;font-size:12px;color:var(--muted);">{{ q.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+<script>
+function filterProducts(q) {
+  q = q.toLowerCase().trim();
+  var rows = document.querySelectorAll('#product-tbody tr');
+  var visible = 0;
+  rows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    var show = !q || text.includes(q);
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  document.getElementById('product-count').textContent = visible + ' ürün';
+}
+
+// --- Scan progress polling ---
+var _scanInterval = null;
+
+function renderErrors(errors) {
+  var wrap = document.getElementById('scan-errors-wrap');
+  var list = document.getElementById('scan-errors-list');
+  if (!errors || errors.length === 0) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = 'block';
+  list.innerHTML = '';
+  errors.forEach(function(e) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:7px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;font-size:12px;';
+    row.innerHTML =
+      '<span style="font-weight:700;color:#dc2626;flex-shrink:0;">#' + e.pid + '</span>' +
+      '<span style="font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (e.title||'') + '">' + (e.title || '(başlık yok)') + '</span>' +
+      '<span style="flex-shrink:0;background:#fee2e2;color:#991b1b;padding:2px 7px;border-radius:5px;font-weight:700;">' + (e.platform||'') + '</span>' +
+      '<span style="flex-shrink:0;color:#b91c1c;">' + (e.reason||'') + '</span>';
+    list.appendChild(row);
+  });
+}
+
+function updateScanUI(s) {
+  var box = document.getElementById('scan-progress-box');
+  var btn = document.getElementById('scan-btn');
+  if (s.running || (s.errors && s.errors.length > 0)) {
+    box.style.display = 'block';
+  }
+  if (s.running) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.style.cursor = 'not-allowed';
+    document.getElementById('scan-spinner').style.display = 'inline-block';
+    var pct = s.total > 0 ? (s.current / s.total * 100) : 0;
+    document.getElementById('scan-bar').style.width = pct.toFixed(1) + '%';
+    document.getElementById('scan-current').textContent = s.current;
+    document.getElementById('scan-total').textContent = s.total;
+    document.getElementById('scan-platform').textContent = s.platform ? ('(' + s.platform + ')') : '';
+    document.getElementById('scan-title').textContent = s.title || '';
+    document.getElementById('scan-done-count').textContent = s.done + ' tamam';
+    document.getElementById('scan-fail-count').textContent = s.failed + ' hata';
+  } else {
+    btn.disabled = false;
+    btn.style.opacity = '';
+    btn.style.cursor = '';
+    document.getElementById('scan-spinner').style.display = 'none';
+    if (_scanInterval) {
+      clearInterval(_scanInterval);
+      _scanInterval = null;
+    }
+    // Tarama bitti — başlığı güncelle
+    if (s.done > 0 || s.failed > 0) {
+      document.getElementById('scan-heading').textContent = 'TARAMA TAMAMLANDI';
+      document.getElementById('scan-bar').style.width = '100%';
+      document.getElementById('scan-bar').style.background = '#16a34a';
+      document.getElementById('scan-current').textContent = s.total;
+    }
+    if (s.errors && s.errors.length === 0 && s.done === 0 && s.failed === 0) {
+      box.style.display = 'none';
+    }
+  }
+  renderErrors(s.errors || []);
+}
+
+function pollScan() {
+  fetch('/api/scan-status').then(function(r){ return r.json(); }).then(updateScanUI).catch(function(){});
+}
+
+// Start polling immediately and on an interval
+pollScan();
+_scanInterval = setInterval(pollScan, 2000);
+</script>
+{% endblock %}

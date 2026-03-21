@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{% if article %}Makale Düzenle{% else %}Yeni Makale{% endif %} — Admin{% endblock %}
+
+{% block content %}
+<div style="max-width:780px;margin:0 auto;">
+  <a href="/admin/articles" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">← Makaleler</a>
+
+  <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:1px;color:var(--text);margin:0 0 24px;">{% if article %}MAKALE DÜZENLE{% else %}YENİ MAKALE{% endif %}</h1>
+
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:32px;">
+    <form action="/admin/article/save" method="post">
+      {% if article %}<input type="hidden" name="article_id" value="{{ article.id }}">{% endif %}
+
+      <div style="margin-bottom:18px;">
+        <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:.3px;">BAŞLIK</label>
+        <input name="title" value="{{ article.title if article else '' }}" required placeholder="En İyi Kulaklıklar 2025 — Karşılaştırma"
+               style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:all .2s;box-sizing:border-box;"
+               onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff'" onblur="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
+      </div>
+
+      <div style="margin-bottom:18px;">
+        <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:.3px;">ÖZET <span style="color:var(--muted);font-weight:500;font-size:11px;">(SEO meta description)</span></label>
+        <input name="summary" value="{{ article.summary if article else '' }}" placeholder="Kısa açıklama — max 160 karakter"
+               style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:all .2s;box-sizing:border-box;"
+               onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff'" onblur="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:18px;">
+        <div>
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;">KATEGORİ</label>
+          <select name="category" style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:11px 14px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);box-sizing:border-box;">
+            <option value="rehber" {% if article and article.category == 'rehber' %}selected{% endif %}>📘 Rehber</option>
+            <option value="karsilastirma" {% if article and article.category == 'karsilastirma' %}selected{% endif %}>⚖️ Karşılaştırma</option>
+            <option value="inceleme" {% if article and article.category == 'inceleme' %}selected{% endif %}>🔍 İnceleme</option>
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;">ETİKETLER</label>
+          <input name="tags" value="{{ article.tags if article else '' }}" placeholder="kulaklık, bluetooth"
+                 style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:11px 14px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);box-sizing:border-box;">
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;">DURUM</label>
+          <select name="status" style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:11px 14px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);box-sizing:border-box;">
+            <option value="draft" {% if article and article.status == 'draft' %}selected{% endif %}>📋 Taslak</option>
+            <option value="published" {% if article and article.status == 'published' %}selected{% endif %}>🟢 Yayınla</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-bottom:24px;">
+        <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;">İÇERİK <span style="color:var(--muted);font-weight:500;font-size:11px;">(HTML desteklenir)</span></label>
+        <textarea name="body_html" rows="22" required placeholder="<h2>Giriş</h2><p>Bu rehberde...</p>"
+                  style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:14px 16px;font-family:monospace;font-size:13px;color:var(--text);outline:none;transition:all .2s;box-sizing:border-box;resize:vertical;line-height:1.6;"
+                  onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff'" onblur="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">{{ article.body_html if article else '' }}</textarea>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;border-top:1.5px solid var(--border);padding-top:20px;">
+        <a href="/admin/articles" style="font-size:13px;color:var(--muted);text-decoration:none;font-weight:600;">İptal</a>
+        <div style="display:flex;gap:10px;">
+          <button type="submit" name="status" value="draft" class="btn-tg" style="border:none;cursor:pointer;">Taslak Kaydet</button>
+          <button type="submit" name="status" value="published" class="btn-add" style="border:none;cursor:pointer;">🟢 Yayınla</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

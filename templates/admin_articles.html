@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Makale Yönetimi — Admin{% endblock %}
+
+{% block content %}
+<div style="max-width:1200px;margin:0 auto;">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px;">
+    <div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:1px;color:var(--text);margin:0 0 4px;">📝 MAKALE YÖNETİMİ</h1>
+      <p style="color:var(--muted);font-size:13px;font-weight:500;"><a href="/admin" style="color:var(--muted);text-decoration:none;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">← Admin Panel</a></p>
+    </div>
+    <a href="/admin/article/new" class="btn-add" style="text-decoration:none;">+ Yeni Makale</a>
+  </div>
+
+  {% if articles %}
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;">
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead>
+        <tr style="background:var(--bg3);">
+          <th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Başlık</th>
+          <th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;width:100px;">Kategori</th>
+          <th style="padding:12px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;width:80px;">Durum</th>
+          <th style="padding:12px 16px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;width:80px;">Görüntüleme</th>
+          <th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;width:100px;">Tarih</th>
+          <th style="padding:12px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;width:80px;">İşlem</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in articles %}
+        <tr style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+          <td style="padding:12px 16px;">
+            <a href="/blog/{{ a.slug }}" target="_blank" style="color:var(--text);text-decoration:none;font-weight:600;">{{ a.title|truncate(55) }}</a>
+          </td>
+          <td style="padding:12px 16px;">
+            <span style="font-size:11px;font-weight:700;padding:3px 10px;border-radius:6px;
+              {% if a.category == 'karsilastirma' %}background:#eff6ff;color:#1d4ed8;{% elif a.category == 'inceleme' %}background:#f5eeff;color:#7c3aed;{% else %}background:#f0fdf4;color:#16a34a;{% endif %}">
+              {{ (a.category or 'rehber')|title }}
+            </span>
+          </td>
+          <td style="padding:12px 16px;text-align:center;">
+            {% if a.status == 'published' %}
+            <span style="background:#dcfce7;color:#16a34a;font-size:11px;font-weight:700;padding:3px 10px;border-radius:6px;">Yayında</span>
+            {% else %}
+            <span style="background:#fef3c7;color:#d97706;font-size:11px;font-weight:700;padding:3px 10px;border-radius:6px;">Taslak</span>
+            {% endif %}
+          </td>
+          <td style="padding:12px 16px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:16px;color:var(--text);">{{ a.views or 0 }}</td>
+          <td style="padding:12px 16px;font-size:12px;color:var(--muted);">{{ (a.published_at or a.created_at)[:10] }}</td>
+          <td style="padding:12px 16px;text-align:center;">
+            <a href="/admin/article/new?edit={{ a.id }}" style="color:var(--fire);font-size:12px;font-weight:700;text-decoration:none;">Düzenle</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="text-align:center;padding:60px 20px;">
+    <div style="font-size:48px;margin-bottom:16px;">📝</div>
+    <p style="color:var(--muted);font-size:14px;">Henüz makale yok.</p>
+    <a href="/admin/article/new" style="color:var(--fire);font-weight:700;font-size:14px;text-decoration:none;">İlk makaleyi oluştur →</a>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

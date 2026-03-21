@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}{{ article.title }} — FırsatVakti Blog{% endblock %}
+
+{% block content %}
+<div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
+
+  <a href="/blog" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:24px;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">← Blog'a Dön</a>
+
+  <!-- KAPAK GÖRSELI + BAŞLIK HERO -->
+  {% if article.cover_image %}
+  <div style="position:relative;border-radius:22px;overflow:hidden;margin-bottom:28px;min-height:280px;">
+    <img src="{{ article.cover_image }}" alt="{{ article.title }}" style="width:100%;height:360px;object-fit:cover;display:block;">
+    <div style="position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.72) 0%,rgba(0,0,0,.18) 55%,transparent 100%);"></div>
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:28px 28px 24px;">
+      {% if article.category %}
+      <span style="display:inline-flex;align-items:center;gap:5px;margin-bottom:10px;font-size:11px;font-weight:700;padding:4px 12px;border-radius:6px;
+        {% if article.category == 'karsilastirma' %}background:rgba(29,78,216,.85);color:#bfdbfe;{% elif article.category == 'inceleme' %}background:rgba(124,58,237,.85);color:#ede9fe;{% else %}background:rgba(22,163,74,.85);color:#bbf7d0;{% endif %}
+        backdrop-filter:blur(4px);">
+        {% if article.category == 'karsilastirma' %}⚖️{% elif article.category == 'inceleme' %}🔍{% else %}📘{% endif %}
+        {{ article.category|title }}
+      </span>
+      {% endif %}
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(26px,4vw,42px);letter-spacing:.5px;line-height:1.15;color:#fff;margin:0 0 12px;text-shadow:0 2px 8px rgba(0,0,0,.4);">{{ article.title }}</h1>
+      <div style="display:flex;align-items:center;gap:14px;font-size:12px;color:rgba(255,255,255,.75);font-weight:600;flex-wrap:wrap;">
+        <span>✍️ {{ article.author_name or 'Admin' }}</span>
+        <span>📅 {{ article.published_at[:10] if article.published_at else '' }}</span>
+        <span>👁 {{ article.views or 0 }} görüntüleme</span>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <!-- Kapak yok — başlık bloğu -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px 28px 24px;margin-bottom:28px;">
+    {% if article.category %}
+    <span style="display:inline-flex;align-items:center;gap:5px;margin-bottom:12px;font-size:11px;font-weight:700;padding:4px 12px;border-radius:6px;
+      {% if article.category == 'karsilastirma' %}background:#eff6ff;color:#1d4ed8;{% elif article.category == 'inceleme' %}background:#f5eeff;color:#7c3aed;{% else %}background:#f0fdf4;color:#16a34a;{% endif %}">
+      {% if article.category == 'karsilastirma' %}⚖️{% elif article.category == 'inceleme' %}🔍{% else %}📘{% endif %}
+      {{ article.category|title }}
+    </span>
+    {% endif %}
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(26px,4vw,42px);letter-spacing:.5px;line-height:1.15;color:var(--text);margin:0 0 14px;">{{ article.title }}</h1>
+    <div style="display:flex;align-items:center;gap:16px;font-size:13px;color:var(--muted);font-weight:500;flex-wrap:wrap;">
+      <span>✍️ {{ article.author_name or 'Admin' }}</span>
+      <span>📅 {{ article.published_at[:10] if article.published_at else '' }}</span>
+      <span>👁 {{ article.views or 0 }} görüntüleme</span>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- İÇERİK -->
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:36px 36px 32px;">
+    <div class="article-body">{{ article.body_html|safe }}</div>
+  </div>
+
+  <!-- ETİKETLER -->
+  {% if article.tags %}
+  <div style="margin-top:18px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;">
+    <span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-right:4px;">Etiketler:</span>
+    {% for tag in article.tags.split(',') %}
+    <span style="padding:5px 14px;background:var(--bg3);border:1.5px solid var(--border);color:var(--muted);font-size:12px;font-weight:600;border-radius:99px;">{{ tag.strip() }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- İLİŞKİLİ ÜRÜNLER -->
+  {% if article.products %}
+  <div style="margin-top:24px;background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:24px;">
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);margin:0 0 16px;display:flex;align-items:center;gap:8px;">
+      <span style="width:32px;height:32px;background:linear-gradient(135deg,var(--fire),var(--fire2));border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;">📦</span>
+      YAZIDA GEÇEN ÜRÜNLER
+    </h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;">
+      {% for p in article.products %}
+      {% if p.title %}
+      <a href="{{ p.source_url or '#' }}" target="_blank" rel="nofollow" style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;text-decoration:none;transition:all .15s;" onmouseover="this.style.borderColor='var(--fire)';this.style.transform='translateY(-1px)'" onmouseout="this.style.borderColor='var(--border)';this.style.transform='none'">
+        {% if p.image_url %}
+        <img src="{{ p.image_url }}" alt="" style="width:44px;height:44px;border-radius:9px;object-fit:contain;background:var(--bg2);flex-shrink:0;">
+        {% endif %}
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.title|truncate(45) }}</div>
+          <div style="font-size:11px;color:var(--muted);font-weight:500;margin-top:2px;">{{ p.platform|title }}</div>
+        </div>
+        {% if p.current_price %}
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:var(--fire);flex-shrink:0;">{{ "%.0f"|format(p.current_price) }} TL</span>
+        {% endif %}
+      </a>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- BLOG'A DÖN (alt) -->
+  <div style="margin-top:28px;display:flex;justify-content:center;">
+    <a href="/blog" style="display:inline-flex;align-items:center;gap:8px;padding:11px 24px;background:var(--bg2);border:1.5px solid var(--border);border-radius:12px;font-size:13px;font-weight:700;color:var(--muted);text-decoration:none;transition:all .15s;" onmouseover="this.style.borderColor='var(--fire)';this.style.color='var(--fire)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+      ← Tüm Yazılara Dön
+    </a>
+  </div>
+
+</div>
+
+<style>
+/* Article typography */
+.article-body {
+  font-size: 15px;
+  color: var(--text);
+  line-height: 1.85;
+}
+.article-body h1,.article-body h2,.article-body h3,.article-body h4 {
+  font-family: 'Bebas Neue', sans-serif;
+  letter-spacing: .5px;
+  color: var(--text);
+  margin: 1.6em 0 .6em;
+  line-height: 1.2;
+}
+.article-body h1 { font-size: 2em; }
+.article-body h2 { font-size: 1.55em; border-bottom: 2px solid var(--border); padding-bottom: .35em; }
+.article-body h3 { font-size: 1.25em; }
+.article-body h4 { font-size: 1.05em; font-family: 'DM Sans', sans-serif; font-weight: 800; }
+.article-body p { margin: 0 0 1.2em; }
+.article-body a { color: var(--fire); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.article-body a:hover { opacity: .8; }
+.article-body ul,.article-body ol { padding-left: 1.5em; margin: 0 0 1.2em; }
+.article-body li { margin-bottom: .4em; }
+.article-body ul li::marker { color: var(--fire); }
+.article-body blockquote {
+  border-left: 4px solid var(--fire);
+  margin: 1.4em 0;
+  padding: 12px 20px;
+  background: rgba(244,80,28,.05);
+  border-radius: 0 12px 12px 0;
+  font-style: italic;
+  color: var(--muted);
+}
+.article-body code {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: .88em;
+  font-family: monospace;
+  color: var(--fire);
+}
+.article-body pre {
+  background: var(--bg3);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  margin: 1.2em 0;
+}
+.article-body pre code { background: none; border: none; padding: 0; color: var(--text); font-size: .9em; }
+.article-body img {
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1.5px solid var(--border);
+  margin: 1em 0;
+}
+.article-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.2em 0;
+  font-size: 14px;
+}
+.article-body th { background: var(--bg3); font-weight: 700; }
+.article-body th,.article-body td { padding: 10px 14px; border: 1px solid var(--border); text-align: left; }
+.article-body hr { border: none; border-top: 2px solid var(--border); margin: 2em 0; }
+</style>
+{% endblock %}

@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block title %}Ayarlar — FırsatVakti{% endblock %}
+
+{% block content %}
+<div style="max-width:860px;margin:0 auto;">
+
+  <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;letter-spacing:1px;color:var(--text);margin:0 0 24px;">⚙️ AYARLAR</h1>
+
+  {% if request.query_params.get('saved') %}
+  <div style="background:#f0fdf4;border:1.5px solid rgba(34,197,94,.25);border-radius:12px;padding:12px 18px;margin-bottom:20px;display:flex;align-items:center;gap:10px;">
+    <span style="font-size:18px;">✅</span>
+    <span style="color:#166534;font-size:14px;font-weight:600;">Ayarlar kaydedildi.</span>
+  </div>
+  {% endif %}
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+    <!-- SOL: BİLDİRİM AYARLARI -->
+    <div style="grid-column:1/2;">
+      <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 6px;">📲 BİLDİRİM AYARLARI</h2>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 20px;font-weight:500;">İndirim bildirimlerini Telegram üzerinden al.</p>
+
+        <!-- Telegram bilgi kutusu -->
+        <div style="background:#f0f8ff;border:1.5px solid rgba(34,197,250,.25);border-radius:12px;padding:14px 16px;margin-bottom:20px;font-size:13px;color:#0369a1;">
+          📲 Chat ID'nizi öğrenmek için Telegram'da <strong>@userinfobot</strong>'a mesaj gönderin.
+        </div>
+
+        <form method="post" action="/settings/telegram">
+          <!-- Telegram Chat ID -->
+          <div style="margin-bottom:16px;">
+            <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:.5px;">TELEGRAM CHAT ID</label>
+            <input type="text" name="tg_chat_id" value="{{ tg.chat_id if tg else '' }}" placeholder="123456789"
+                   style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:11px 14px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:all .2s;box-sizing:border-box;"
+                   onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff'"
+                   onblur="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
+          </div>
+
+          <!-- Min İndirim Oranı -->
+          <div style="margin-bottom:16px;">
+            <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:.5px;">
+              MİNİMUM İNDİRİM ORANI
+              <span id="discountVal" style="color:var(--fire);margin-left:6px;">%{{ (notify.min_discount if notify else (tg.min_discount_pct if tg else 10)) }}</span>
+            </label>
+            <input type="range" name="min_discount"
+                   value="{{ notify.min_discount if notify else (tg.min_discount_pct if tg else 10) }}"
+                   min="5" max="80" step="5"
+                   oninput="document.getElementById('discountVal').textContent='%'+this.value"
+                   style="width:100%;accent-color:var(--fire);height:6px;cursor:pointer;">
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:4px;font-weight:600;">
+              <span>%5</span><span>%20</span><span>%40</span><span>%60</span><span>%80</span>
+            </div>
+            <p style="font-size:12px;color:var(--muted);margin:8px 0 0;font-weight:500;">
+              Bu oran "Nasıl Çalışır" bölümünde de gösterilir. Fiyat bu kadar düşünce bildirim alırsın.
+            </p>
+          </div>
+
+          <!-- Platformlar -->
+          <div style="margin-bottom:20px;">
+            <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px;letter-spacing:.5px;">TAKİP EDİLECEK PLATFORMLAR</label>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;">
+              {% set active_plats = (notify.platforms if notify else (tg.platforms if tg else 'amazon,trendyol,n11')).split(',') %}
+              {% for p, emoji, color in [('amazon','🟠','#e47911'),('trendyol','🔴','#e85c28'),('n11','🟣','#7c2db8'),('hepsiburada','🟡','#e85500')] %}
+              <label style="cursor:pointer;">
+                <input type="checkbox" name="platforms" value="{{ p }}"
+                       {{ 'checked' if p in active_plats else '' }}
+                       style="display:none;" class="plat-cb" data-plat="{{ p }}">
+                <span class="plat-tag" data-plat="{{ p }}"
+                      style="display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:99px;font-size:13px;font-weight:600;border:1.5px solid var(--border);background:var(--bg3);color:#555;transition:all .15s;cursor:pointer;
+                      {% if p in active_plats %}background:{{ color }}1a;border-color:{{ color }};color:{{ color }};{% endif %}">
+                  {{ emoji }} {{ p|title }}
+                </span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+
+          <!-- Telegram Aktif -->
+          <div style="margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--bg3);border-radius:12px;">
+            <div>
+              <div style="font-size:14px;font-weight:700;color:var(--text);">Telegram Bildirimleri</div>
+              <div style="font-size:12px;color:var(--muted);font-weight:500;">Chat ID girilmişse aktif edilebilir</div>
+            </div>
+            <label style="position:relative;width:44px;height:24px;cursor:pointer;">
+              <input type="checkbox" name="tg_active" value="1"
+                     {{ 'checked' if notify and notify.tg_active else '' }}
+                     style="opacity:0;width:0;height:0;" id="tgToggle">
+              <span id="tgTrack" style="position:absolute;inset:0;background:{% if notify and notify.tg_active %}var(--fire){% else %}var(--bg4){% endif %};border-radius:99px;transition:background .2s;">
+                <span id="tgThumb" style="position:absolute;top:3px;left:{% if notify and notify.tg_active %}23px{% else %}3px{% endif %};width:18px;height:18px;background:#fff;border-radius:50%;transition:left .2s;box-shadow:0 1px 4px rgba(0,0,0,.2);"></span>
+              </span>
+            </label>
+          </div>
+
+          <button type="submit" class="btn-add" style="width:100%;border:none;cursor:pointer;justify-content:center;padding:13px;font-size:15px;border-radius:12px;">
+            Ayarları Kaydet →
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- SAĞ: TAKİP EDİLEN ÜRÜNLER -->
+    <div style="grid-column:2/3;">
+      <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 6px;">📦 TAKİP ETTİĞİM ÜRÜNLER</h2>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 20px;font-weight:500;">Eklediğin ürünlerin güncel fiyatları</p>
+
+        {% if tracked %}
+        <div style="display:flex;flex-direction:column;gap:10px;max-height:520px;overflow-y:auto;padding-right:4px;">
+          {% for p in tracked %}
+          <a href="/product/{{ p.id }}" style="text-decoration:none;display:flex;align-items:center;gap:12px;padding:12px;background:var(--bg3);border-radius:14px;border:1.5px solid transparent;transition:all .2s;"
+             onmouseover="this.style.borderColor='var(--fire)';this.style.background='#fff9f7'"
+             onmouseout="this.style.borderColor='transparent';this.style.background='var(--bg3)'">
+            <!-- Ürün görseli -->
+            <div style="width:52px;height:52px;flex-shrink:0;background:var(--bg2);border-radius:10px;overflow:hidden;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;">
+              {% if p.image_url %}
+              <img src="{{ p.image_url }}" alt="" style="width:100%;height:100%;object-fit:contain;padding:4px;">
+              {% else %}
+              <span style="font-size:24px;">🛍</span>
+              {% endif %}
+            </div>
+            <!-- Bilgi -->
+            <div style="flex:1;min-width:0;">
+              <p style="font-size:12px;font-weight:600;color:var(--text);margin:0 0 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                {{ (p.title or 'Yükleniyor…')|truncate(45) }}
+              </p>
+              <!-- Platform badge -->
+              <span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;margin-right:6px;
+                {% if p.platform=='amazon' %}background:#fff8ee;color:#9a4d00;{% elif p.platform=='trendyol' %}background:#fff2ee;color:#b83810;{% elif p.platform=='n11' %}background:#f5eeff;color:#5e1da0;{% else %}background:#fff5ee;color:#b84000;{% endif %}">
+                {{ p.platform|title }}
+              </span>
+              <!-- Fiyat -->
+              {% if p.current_price %}
+              <span style="font-size:12px;font-weight:700;color:var(--text);">{{ "%.0f"|format(p.current_price) }} TL</span>
+              {% endif %}
+              <!-- Fırsat varsa -->
+              {% if p.deal_active and p.discount_pct %}
+              <span style="font-size:11px;font-weight:700;color:#16a34a;background:#f0fdf4;padding:2px 7px;border-radius:6px;margin-left:4px;">
+                ↓%{{ p.discount_pct|int }}
+              </span>
+              {% endif %}
+            </div>
+            <!-- Ok -->
+            <svg width="14" height="14" fill="none" stroke="var(--muted)" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </a>
+          {% endfor %}
+        </div>
+
+        <a href="/submit" class="btn-add" style="display:flex;justify-content:center;margin-top:16px;text-decoration:none;border:none;cursor:pointer;padding:11px;font-size:14px;border-radius:12px;">
+          <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          Yeni Ürün Ekle
+        </a>
+
+        {% else %}
+        <div style="text-align:center;padding:40px 20px;">
+          <div style="font-size:48px;margin-bottom:12px;">📭</div>
+          <p style="color:var(--muted);font-size:14px;margin:0 0 20px;font-weight:500;line-height:1.6;">
+            Henüz takip ettiğin ürün yok.<br>Bir ürün linki ekleyerek başla!
+          </p>
+          <a href="/submit" class="btn-add" style="display:inline-flex;text-decoration:none;">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            Link Ekle
+          </a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+  </div><!-- /grid -->
+
+  <!-- REKLAM ALANI — AYARLAR SAYFASI ALT -->
+  <div class="ad-slot ad-banner" style="margin-top:32px;">
+    <span style="font-size:18px;opacity:.3;">📢</span>
+    <span class="ad-slot-label">Reklam Alanı — 728×90</span>
+    <!-- <ins class="adsbygoogle" ...></ins> -->
+  </div>
+
+</div>
+
+<script>
+// Platform toggle rengi
+document.querySelectorAll('.plat-cb').forEach(function(cb) {
+  var colors = {amazon:'#e47911',trendyol:'#e85c28',n11:'#7c2db8',hepsiburada:'#e85500'};
+  var tag = document.querySelector('.plat-tag[data-plat="'+cb.dataset.plat+'"]');
+  cb.addEventListener('change', function() {
+    var c = colors[cb.dataset.plat];
+    if (cb.checked) {
+      tag.style.background = c+'1a'; tag.style.borderColor = c; tag.style.color = c;
+    } else {
+      tag.style.background = 'var(--bg3)'; tag.style.borderColor = 'var(--border)'; tag.style.color = '#555';
+    }
+  });
+  tag.addEventListener('click', function() { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); });
+});
+
+// Toggle switch
+var toggle = document.getElementById('tgToggle');
+if (toggle) {
+  toggle.addEventListener('change', function() {
+    document.getElementById('tgTrack').style.background = this.checked ? 'var(--fire)' : 'var(--bg4)';
+    document.getElementById('tgThumb').style.left = this.checked ? '23px' : '3px';
+  });
+}
+</script>
+
+<!-- Mobil uyum -->
+<style>
+@media(max-width:640px){
+  div[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr!important;}
+  div[style*="grid-column:2/3"]{grid-column:1/-1!important;}
+}
+</style>
+{% endblock %}

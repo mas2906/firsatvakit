@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Gizlilik Politikası — FırsatVakti{% endblock %}
+{% block content %}
+<div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
+
+  <!-- Hero -->
+  <div style="text-align:center;padding:52px 0 40px;">
+    <div style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;background:linear-gradient(135deg,#6366f1,#818cf8);border-radius:18px;font-size:28px;margin-bottom:18px;box-shadow:0 8px 24px rgba(99,102,241,.3);">🔒</div>
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,5vw,46px);letter-spacing:1px;color:var(--text);margin:0 0 10px;">GİZLİLİK POLİTİKASI</h1>
+    <p style="font-size:13px;color:var(--muted);font-weight:500;">Son güncelleme: Mart 2025</p>
+  </div>
+
+  <!-- İçerik -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    {% for num, icon, title, content in [
+      ('01','👤','Toplanan Veriler','Siteye üye olduğunuzda e-posta adresiniz ve şifreniz (bcrypt ile şifrelenmiş) saklanır. Misafir kullanıcılar için yalnızca IP adresi günlük limit takibi amacıyla kullanılır. Telegram bildirim ayarları kullandığınızda chat ID\'niz saklanır.'),
+      ('02','🍪','Çerezler','Oturum yönetimi için zorunlu oturum çerezi kullanılmaktadır. Bu çerez üçüncü taraflarla paylaşılmaz. Reklam veya izleme amaçlı çerez kullanılmamaktadır.'),
+      ('03','🔗','Affiliate Linkler','Sitemizdeki ürün linkleri affiliate (ortak) linkler içerebilir. Bu linkler üzerinden yapılan alışverişlerden komisyon kazanabiliriz. Bu durum ürün fiyatını veya kalitesini etkilemez.'),
+      ('04','🌐','Üçüncü Taraf Hizmetler','Telegram bildirimleri için Telegram API kullanılmaktadır. Fiyat takibi için Amazon, Trendyol, N11 ve Hepsiburada\'nın kamuya açık sayfaları taranmaktadır. Bu platformların gizlilik politikaları kendi siteleri üzerinden incelenebilir.'),
+      ('05','🛡','Veri Güvenliği','Şifreler bcrypt ile hashlenerek saklanır. Veritabanı erişimi sunucu tarafında kısıtlıdır. Kişisel veriler üçüncü taraflarla satılmaz veya paylaşılmaz.'),
+      ('06','✅','Haklarınız','Hesabınızı ve verilerinizi istediğiniz zaman silebilirsiniz. Veri silme talebi için iletişim sayfasından bize ulaşabilirsiniz. KVKK kapsamındaki tüm haklarınız saklıdır.'),
+      ('07','✉️','İletişim','Gizlilik politikamıza ilişkin sorularınız için /contact sayfasından bize ulaşabilirsiniz.')
+    ] %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;padding:24px 24px 24px 20px;display:flex;gap:18px;align-items:flex-start;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;flex-shrink:0;">
+        <div style="width:42px;height:42px;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:18px;">{{ icon }}</div>
+        <span style="font-family:'Bebas Neue',sans-serif;font-size:13px;color:var(--muted);letter-spacing:.5px;">{{ num }}</span>
+      </div>
+      <div style="flex:1;">
+        <h3 style="font-family:'Bebas Neue',sans-serif;font-size:17px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">{{ title }}</h3>
+        <p style="font-size:13px;color:var(--muted);margin:0;font-weight:500;line-height:1.8;">{{ content }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}

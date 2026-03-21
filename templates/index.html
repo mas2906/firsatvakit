@@ -1,0 +1,399 @@
+{% extends "base.html" %}
+{% block title %}FırsatVakti — Anlık Fırsatlar{% endblock %}
+
+{% block content %}
+
+<!-- HERO -->
+<div style="position:relative;overflow:hidden;background:var(--bg2);border:1.5px solid var(--border);border-radius:24px;padding:52px 40px 44px;margin-bottom:24px;text-align:center;">
+
+  <!-- Dekoratif glow -->
+  <div style="position:absolute;top:-80px;left:50%;transform:translateX(-50%);width:600px;height:300px;background:radial-gradient(ellipse,rgba(244,80,28,0.09) 0%,transparent 70%);pointer-events:none;"></div>
+  <div style="position:absolute;bottom:-60px;right:5%;width:250px;height:250px;border-radius:50%;background:radial-gradient(circle,rgba(255,170,0,0.06) 0%,transparent 70%);pointer-events:none;"></div>
+
+  <div style="position:relative;">
+
+    <!-- Canlı rozet -->
+    <div style="display:inline-flex;align-items:center;gap:7px;background:rgba(244,80,28,0.08);border:1.5px solid rgba(244,80,28,0.18);border-radius:99px;padding:5px 16px;margin-bottom:20px;">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--fire);animation:pulse 1.8s ease-in-out infinite;display:inline-block;flex-shrink:0;"></span>
+      <span style="font-size:12px;font-weight:700;color:var(--fire);letter-spacing:.8px;">CANLI TAKİP</span>
+    </div>
+
+    <!-- Başlık -->
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(22px,3vw,38px);letter-spacing:2px;line-height:1;color:var(--text);margin:0 0 16px;">
+      ANLIK <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">FIRSAT</span> TAKİBİ
+    </h1>
+
+    <!-- Alt yazı -->
+    <p style="color:var(--muted);font-size:16px;margin:0 auto 28px;max-width:480px;line-height:1.7;font-weight:500;">
+      Amazon, Trendyol, N11 ve Hepsiburada'daki fiyat düşüşlerini
+      <strong style="color:var(--text);font-weight:700;">anında</strong> keşfet, fırsatı kaçırma.
+    </p>
+
+    <!-- CTA butonları -->
+    <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:32px;">
+      <a href="/submit" class="btn-add" style="padding:12px 28px;font-size:15px;border-radius:12px;">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        Link Ekle
+      </a>
+      <a href="https://t.me/firsatvakti1" target="_blank" class="btn-tg" style="padding:12px 20px;">📲 Telegram</a>
+      <a href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" class="btn-tg" style="padding:12px 20px;background:#25d366;color:#fff;">💬 WhatsApp</a>
+      <a href="/blog" class="btn-tg" style="padding:12px 20px;">📝 Blog</a>
+    </div>
+
+    <!-- İstatistikler -->
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:28px;">
+      {% for icon, num, label, grad in [
+        ('🔥', stats.active_deals, 'Geçerli Fırsat', 'linear-gradient(135deg,#f4501c,#ff7340)'),
+        ('📉', stats.today_drops, 'Bugün Düşen', 'linear-gradient(135deg,#10b981,#34d399)'),
+        ('🔔', stats.watchlist_count, 'Takip Edilen Fırsat', 'linear-gradient(135deg,#6366f1,#818cf8)')
+      ] %}
+      <div style="background:var(--bg3);border:1.5px solid var(--border);border-radius:16px;padding:16px 24px;display:flex;align-items:center;gap:12px;min-width:150px;">
+        <div style="width:40px;height:40px;border-radius:11px;background:{{ grad }};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">{{ icon }}</div>
+        <div style="text-align:left;">
+          <div class="stat-counter" data-target="{{ num }}" style="font-family:'Bebas Neue',sans-serif;font-size:30px;line-height:1;background:{{ grad }};-webkit-background-clip:text;-webkit-text-fill-color:transparent;">0</div>
+          <div style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-top:1px;">{{ label }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+
+    <!-- Platform rozetleri -->
+    <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+      {% for emoji, label in [('🟠','Amazon'),('🔴','Trendyol'),('🟣','N11'),('🟡','Hepsiburada')] %}
+      <span style="display:inline-flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);">{{ emoji }} {{ label }}</span>
+      {% endfor %}
+    </div>
+
+  </div>
+</div>
+
+<style>
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.4)}}
+@media(max-width:640px){
+  div[style*="padding:52px 40px"]{padding:32px 20px 28px!important;}
+}
+</style>
+<script>
+(function(){
+  function animateCounter(el) {
+    var target = parseInt(el.dataset.target) || 0;
+    if (target === 0) { el.textContent = '0'; return; }
+    var duration = 1200;
+    var start = null;
+    function ease(t){ return t < .5 ? 2*t*t : -1+(4-2*t)*t; }
+    function step(ts){
+      if (!start) start = ts;
+      var progress = Math.min((ts - start) / duration, 1);
+      el.textContent = Math.floor(ease(progress) * target);
+      if (progress < 1) requestAnimationFrame(step);
+      else el.textContent = target;
+    }
+    requestAnimationFrame(step);
+  }
+
+  // IntersectionObserver ile ekrana girince başlat
+  var counters = document.querySelectorAll('.stat-counter');
+  if ('IntersectionObserver' in window) {
+    var obs = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (e.isIntersecting) { animateCounter(e.target); obs.unobserve(e.target); }
+      });
+    }, { threshold: 0.3 });
+    counters.forEach(function(c){ obs.observe(c); });
+  } else {
+    counters.forEach(animateCounter);
+  }
+})();
+</script>
+
+<!-- PLATFORM FİLTRELERİ -->
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:0;">
+  <a href="/?sort={{ sort }}" class="filter-pill {{ 'active' if not platform else '' }}">Tümü</a>
+  {% for p, emoji, label in [('amazon','🟠','Amazon'),('trendyol','🔴','Trendyol'),('n11','🟣','N11'),('hepsiburada','🟡','Hepsiburada')] %}
+  <a href="/?platform={{ p }}&sort={{ sort }}&tab={{ tab }}" class="filter-pill {{ 'active' if platform == p else '' }}">{{ emoji }} {{ label }}</a>
+  {% endfor %}
+  <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+    {% for s, icon, label in [('newest','🕐','Yeni'),('discount','📉','İndirim'),('price','💰','Ucuz')] %}
+    <a href="/?platform={{ platform }}&sort={{ s }}&tab={{ tab }}" class="filter-pill {{ 'active' if sort == s else '' }}">{{ icon }} {{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- SEKMELER -->
+<div style="display:flex;gap:0;margin:20px 0 0;border-bottom:2px solid var(--border);overflow-x:auto;">
+  {% for t, icon, label in [('all','🔥','Tüm Fırsatlar'),('top_discount','📉','En Fazla İndirim'),('most_clicked','👁','En Çok Takip'),('cheapest','💰','En Ucuz')] %}
+  <a href="/?platform={{ platform }}&sort={{ sort }}&tab={{ t }}"
+     style="padding:12px 20px;font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap;border-bottom:2.5px solid transparent;margin-bottom:-2px;transition:all .15s;
+     {% if tab == t or (tab == '' and t == 'all') %}color:var(--fire);border-bottom-color:var(--fire);{% else %}color:var(--muted);{% endif %}">
+    {{ icon }} {{ label }}
+  </a>
+  {% endfor %}
+</div>
+
+<div style="margin-top:20px;">
+
+{% if q %}
+<div style="background:#fff8f6;border:1.5px solid rgba(244,80,28,.2);border-radius:12px;padding:12px 18px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;">
+  <span style="font-size:14px;font-weight:600;color:var(--fire);">🔍 "{{ q }}" için {{ deals|length }} sonuç</span>
+  <a href="/" style="font-size:12px;color:var(--muted);font-weight:600;text-decoration:none;padding:4px 10px;background:var(--bg3);border-radius:6px;">✕ Temizle</a>
+</div>
+{% endif %}
+
+{% if deals %}
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px;">
+  {% for d in deals %}
+  <a href="/deal/{{ d.id }}" style="text-decoration:none;color:inherit;{% if d.stock == 'Stok Yok' %}opacity:.55;{% endif %}" class="deal-card">
+    <div class="card-glow"></div>
+    <div class="card-img-wrap">
+      {% if d.image_url %}
+      <img src="{{ d.image_url }}" alt="{{ d.title }}" loading="lazy">
+      {% else %}
+      <span style="font-size:52px;">🛍</span>
+      {% endif %}
+      <div class="fire-badge">-%{{ d.discount_pct|int }}</div>
+      <div class="plat-dot {{ d.platform }}">
+        {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+      </div>
+      {% if d.stock == 'Stok Yok' %}
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;">
+        <span style="background:#dc2626;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:1px;padding:6px 18px;border-radius:10px;box-shadow:0 4px 14px rgba(220,38,38,.4);">TÜKENDİ</span>
+      </div>
+      {% endif %}
+      {% if tab == 'most_clicked' and d.click_count %}
+      <div style="position:absolute;bottom:10px;left:10px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;">👁 {{ d.click_count }}</div>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      <p class="card-title">{{ d.title or 'Yükleniyor…' }}</p>
+      {% if d.rating %}
+      <div class="card-rating">
+        <span class="stars">{% for i in range(d.rating|int) %}★{% endfor %}</span>
+        <span class="rating-val">{{ "%.1f"|format(d.rating) }}</span>
+        {% if d.review_count %}<span class="rating-cnt">({{ "{:,}".format(d.review_count) }})</span>{% endif %}
+      </div>
+      {% endif %}
+      <div class="card-price">
+        <span class="price-new">{{ "%.0f"|format(d.new_price) }}</span>
+        <span style="font-size:13px;color:var(--muted);font-weight:600;">TL</span>
+        <span class="price-old">{{ "%.0f"|format(d.old_price) }} TL</span>
+        <span class="price-save">%{{ d.discount_pct|int }}</span>
+      </div>
+      {% if d.stock == 'Stok Yok' %}
+      <div class="card-btn" style="background:#9ca3af;box-shadow:none;">
+        Stok Tükendi
+      </div>
+      {% else %}
+      <div class="card-btn">
+        Fırsata Git
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </div>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+
+{% if total_pages > 1 %}
+<div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:40px;">
+  {% if page > 1 %}
+  <a href="?platform={{ platform }}&sort={{ sort }}&tab={{ tab }}&page={{ page-1 }}" style="padding:10px 20px;background:var(--bg2);border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;color:var(--text);text-decoration:none;" onmouseover="this.style.borderColor='var(--fire)';this.style.color='var(--fire)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text)'">← Önceki</a>
+  {% endif %}
+  <span style="padding:10px 20px;background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;border-radius:10px;font-family:'Bebas Neue',sans-serif;font-size:16px;">{{ page }} / {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a href="?platform={{ platform }}&sort={{ sort }}&tab={{ tab }}&page={{ page+1 }}" style="padding:10px 20px;background:var(--bg2);border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;color:var(--text);text-decoration:none;" onmouseover="this.style.borderColor='var(--fire)';this.style.color='var(--fire)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text)'">Sonraki →</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div style="text-align:center;padding:80px 20px;">
+  <div style="font-size:64px;margin-bottom:20px;">{% if q %}🔍{% else %}🔥{% endif %}</div>
+  <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:1px;color:var(--text);margin:0 0 10px;">{% if q %}SONUÇ BULUNAMADI{% else %}HENÜZ FIRSAT YOK{% endif %}</h2>
+  <p style="color:var(--muted);font-size:15px;margin:0 0 28px;">{% if q %}"{{ q }}" için eşleşen ürün bulunamadı{% else %}İlk fırsatı sen ekle, takip başlasın!{% endif %}</p>
+  <a href="/submit" class="btn-add" style="display:inline-flex;">
+    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    Link Ekle
+  </a>
+</div>
+{% endif %}
+
+</div>
+<!-- REKLAM ALANI — ANA SAYFA ORTASI (728×90 Leaderboard) -->
+<div class="ad-slot ad-banner" style="margin:40px 0 0;">
+  <span style="font-size:18px;opacity:.3;">📢</span>
+  <span class="ad-slot-label">Reklam Alanı — 728×90</span>
+  <!-- Google AdSense: data-ad-slot buraya -->
+  <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot="XXXXXXXXXX" data-ad-format="auto"></ins> -->
+</div>
+
+{% if not q %}
+<!-- YENİ EKLENENLER -->
+{% if new_deals %}
+<div style="margin-top:48px;padding-top:40px;border-top:1.5px solid var(--border);">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;color:var(--text);margin:0;display:flex;align-items:center;gap:8px;">
+      <span style="width:32px;height:32px;background:linear-gradient(135deg,#10b981,#34d399);border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;">🆕</span>
+      YENİ EKLENENLER
+    </h2>
+    <a href="/?sort=newest" style="font-size:12px;font-weight:700;color:var(--fire);text-decoration:none;display:flex;align-items:center;gap:4px;">
+      Tümünü Gör
+      <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    </a>
+  </div>
+  <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;">
+    {% for d in new_deals %}
+    <a href="/deal/{{ d.id }}" style="text-decoration:none;color:inherit;flex:0 0 160px;{% if d.stock == 'Stok Yok' %}opacity:.55;{% endif %}" class="deal-card">
+      <div class="card-glow"></div>
+      <div class="card-img-wrap" style="height:120px;">
+        {% if d.image_url %}
+        <img src="{{ d.image_url }}" alt="{{ d.title }}" loading="lazy">
+        {% else %}
+        <span style="font-size:40px;">🛍</span>
+        {% endif %}
+        <div class="fire-badge" style="font-size:11px;padding:3px 7px;">-%{{ d.discount_pct|int }}</div>
+        <div class="plat-dot {{ d.platform }}">
+          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+        </div>
+      </div>
+      <div class="card-body" style="padding:10px;">
+        <p class="card-title" style="font-size:12px;-webkit-line-clamp:2;margin-bottom:6px;">{{ d.title or '…' }}</p>
+        <div class="card-price" style="gap:4px;">
+          <span class="price-new" style="font-size:15px;">{{ "%.0f"|format(d.new_price) }}</span>
+          <span style="font-size:11px;color:var(--muted);font-weight:600;">TL</span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- EN ÇOK TAKİP EDİLENLER -->
+{% if popular_deals %}
+<div style="margin-top:32px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;color:var(--text);margin:0;display:flex;align-items:center;gap:8px;">
+      <span style="width:32px;height:32px;background:linear-gradient(135deg,#f4501c,#ff7340);border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;">🔥</span>
+      EN ÇOK TAKİP EDİLENLER
+    </h2>
+    <a href="/?tab=most_clicked" style="font-size:12px;font-weight:700;color:var(--fire);text-decoration:none;display:flex;align-items:center;gap:4px;">
+      Tümünü Gör
+      <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    </a>
+  </div>
+  <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;">
+    {% for d in popular_deals %}
+    <a href="/deal/{{ d.id }}" style="text-decoration:none;color:inherit;flex:0 0 160px;{% if d.stock == 'Stok Yok' %}opacity:.55;{% endif %}" class="deal-card">
+      <div class="card-glow"></div>
+      <div class="card-img-wrap" style="height:120px;">
+        {% if d.image_url %}
+        <img src="{{ d.image_url }}" alt="{{ d.title }}" loading="lazy">
+        {% else %}
+        <span style="font-size:40px;">🛍</span>
+        {% endif %}
+        <div class="fire-badge" style="font-size:11px;padding:3px 7px;">-%{{ d.discount_pct|int }}</div>
+        <div class="plat-dot {{ d.platform }}">
+          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+        </div>
+        {% if d.click_count %}
+        <div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;">👁 {{ d.click_count }}</div>
+        {% endif %}
+      </div>
+      <div class="card-body" style="padding:10px;">
+        <p class="card-title" style="font-size:12px;-webkit-line-clamp:2;margin-bottom:6px;">{{ d.title or '…' }}</p>
+        <div class="card-price" style="gap:4px;">
+          <span class="price-new" style="font-size:15px;">{{ "%.0f"|format(d.new_price) }}</span>
+          <span style="font-size:11px;color:var(--muted);font-weight:600;">TL</span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+<!-- NASIL ÇALIŞIR -->
+<div style="margin-top:56px;padding-top:48px;border-top:1.5px solid var(--border);">
+  <div style="text-align:center;margin-bottom:40px;">
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,4vw,42px);letter-spacing:1px;color:var(--text);margin:0 0 10px;">NASIL ÇALIŞIR?</h2>
+    <p style="color:var(--muted);font-size:15px;font-weight:500;margin:0;">Fırsat takibi hiç bu kadar kolay olmamıştı</p>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px;margin-bottom:48px;">
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:28px 24px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s;" onmouseover="this.style.transform='translateY(-4px)';this.style.boxShadow='0 12px 32px rgba(0,0,0,0.09)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='none'">
+      <div style="position:absolute;top:16px;right:20px;font-family:'Bebas Neue',sans-serif;font-size:52px;color:var(--fire);opacity:.07;line-height:1;">01</div>
+      <div style="width:52px;height:52px;background:var(--fire);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px;box-shadow:0 4px 14px rgba(244,80,28,0.25);">🔗</div>
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">Link Yapıştır</h3>
+      <p style="font-size:14px;color:var(--muted);line-height:1.6;margin:0;font-weight:500;">Amazon, Trendyol veya N11'deki ürün linkini kopyalayıp yapıştır.</p>
+    </div>
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:28px 24px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s;" onmouseover="this.style.transform='translateY(-4px)';this.style.boxShadow='0 12px 32px rgba(0,0,0,0.09)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='none'">
+      <div style="position:absolute;top:16px;right:20px;font-family:'Bebas Neue',sans-serif;font-size:52px;color:#6366f1;opacity:.07;line-height:1;">02</div>
+      <div style="width:52px;height:52px;background:#6366f1;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px;box-shadow:0 4px 14px rgba(99,102,241,0.25);">🤖</div>
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">Otomatik Takip</h3>
+      <p style="font-size:14px;color:var(--muted);line-height:1.6;margin:0;font-weight:500;">Sistem fiyatı her 5 dakikada bir kontrol eder, değişiklikleri kaydeder.</p>
+    </div>
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:28px 24px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s;" onmouseover="this.style.transform='translateY(-4px)';this.style.boxShadow='0 12px 32px rgba(0,0,0,0.09)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='none'">
+      <div style="position:absolute;top:16px;right:20px;font-family:'Bebas Neue',sans-serif;font-size:52px;color:#10b981;opacity:.07;line-height:1;">03</div>
+      <div style="width:52px;height:52px;background:#10b981;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px;box-shadow:0 4px 14px rgba(16,185,129,0.25);">📉</div>
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">İndirim Tespiti</h3>
+      <p style="font-size:14px;color:var(--muted);line-height:1.6;margin:0;font-weight:500;">
+        Fiyat
+        {% if user %}
+          <strong style="color:var(--fire);">%{{ user_min_discount }}</strong> (senin ayarın)
+        {% else %}
+          <strong style="color:var(--fire);">%5</strong>
+        {% endif %}
+        veya daha fazla düştüğünde otomatik olarak fırsat oluşturulur.
+        {% if not user %}<a href="/settings" style="color:var(--fire);font-weight:700;text-decoration:none;">Oranı değiştir →</a>{% endif %}
+      </p>
+    </div>
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:28px 24px;position:relative;overflow:hidden;transition:transform .2s,box-shadow .2s;" onmouseover="this.style.transform='translateY(-4px)';this.style.boxShadow='0 12px 32px rgba(0,0,0,0.09)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='none'">
+      <div style="position:absolute;top:16px;right:20px;font-family:'Bebas Neue',sans-serif;font-size:52px;color:#f59e0b;opacity:.07;line-height:1;">04</div>
+      <div style="width:52px;height:52px;background:#f59e0b;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px;margin-bottom:16px;box-shadow:0 4px 14px rgba(245,158,11,0.25);">🔔</div>
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);margin:0 0 8px;">Anında Bildir</h3>
+      <p style="font-size:14px;color:var(--muted);line-height:1.6;margin:0;font-weight:500;">Telegram kanalından veya siteden fırsatı anında öğren, kaçırma!</p>
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <div style="position:relative;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);border-radius:24px;padding:36px 32px;text-align:center;overflow:hidden;">
+    <!-- Dekoratif arka plan -->
+    <div style="position:absolute;top:-60px;right:-60px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(244,80,28,.3),transparent 70%);pointer-events:none;"></div>
+    <div style="position:absolute;bottom:-40px;left:-40px;width:160px;height:160px;border-radius:50%;background:radial-gradient(circle,rgba(37,211,102,.2),transparent 70%);pointer-events:none;"></div>
+
+    <div style="position:relative;z-index:1;">
+      <div style="display:inline-flex;align-items:center;gap:8px;background:rgba(244,80,28,.15);border:1px solid rgba(244,80,28,.3);border-radius:99px;padding:5px 13px;margin-bottom:16px;">
+        <span style="width:7px;height:7px;border-radius:50%;background:#f4501c;display:inline-block;box-shadow:0 0 8px #f4501c;animation:pulse 1.5s infinite;"></span>
+        <span style="font-size:12px;font-weight:700;color:#f4501c;letter-spacing:1px;">ÜCRETSİZ · KURULUM YOK</span>
+      </div>
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(22px,3vw,34px);letter-spacing:1.5px;color:#fff;margin:0 0 8px;line-height:1.1;">FIRSAT KAÇIRMA,<br>HEMEN BAŞLA</h3>
+      <p style="color:rgba(255,255,255,.6);font-size:13px;font-weight:500;margin:0 auto 24px;max-width:380px;line-height:1.7;">Ürün linkini yapıştır — fiyat düşünce sana haber verelim. Üye olman bile gerekmiyor.</p>
+
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+        <a href="/submit" style="background:linear-gradient(135deg,#f4501c,#e63900);color:#fff;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;padding:11px 22px;border-radius:12px;text-decoration:none;display:inline-flex;align-items:center;gap:8px;box-shadow:0 6px 20px rgba(244,80,28,.4);transition:transform .15s,box-shadow .15s;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 10px 28px rgba(244,80,28,.5)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 6px 20px rgba(244,80,28,.4)'">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          Link Ekle
+        </a>
+        <a href="https://t.me/firsatvakti1" target="_blank" style="background:rgba(255,255,255,.08);color:#fff;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;padding:11px 20px;border-radius:12px;text-decoration:none;display:inline-flex;align-items:center;gap:8px;border:1.5px solid rgba(255,255,255,.15);backdrop-filter:blur(8px);transition:all .15s;" onmouseover="this.style.background='rgba(255,255,255,.15)';this.style.borderColor='rgba(255,255,255,.3)'" onmouseout="this.style.background='rgba(255,255,255,.08)';this.style.borderColor='rgba(255,255,255,.15)'">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="#29b6f6"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8l-1.68 7.92c-.12.56-.44.7-.9.44l-2.5-1.84-1.2 1.16c-.14.14-.26.26-.52.26l.18-2.58 4.7-4.24c.2-.18-.04-.28-.32-.1L7.14 14.4l-2.46-.76c-.54-.16-.54-.54.1-.8l9.62-3.72c.44-.16.84.1.68.68z"/></svg>
+          Telegram
+        </a>
+        <a href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" style="background:rgba(37,211,102,.12);color:#25d366;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;padding:11px 20px;border-radius:12px;text-decoration:none;display:inline-flex;align-items:center;gap:8px;border:1.5px solid rgba(37,211,102,.25);backdrop-filter:blur(8px);transition:all .15s;" onmouseover="this.style.background='rgba(37,211,102,.22)';this.style.borderColor='rgba(37,211,102,.4)'" onmouseout="this.style.background='rgba(37,211,102,.12)';this.style.borderColor='rgba(37,211,102,.25)'">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="#25d366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M11.99 2.009C6.468 2.009 2 6.478 2 12.001c0 1.76.458 3.411 1.258 4.848L2 22l5.31-1.235A9.956 9.956 0 0012 21.993c5.522 0 9.99-4.469 9.99-9.992S17.512 2.009 11.99 2.009zm0 18.324a8.292 8.292 0 01-4.228-1.16l-.303-.18-3.147.731.784-3.047-.197-.312a8.306 8.306 0 01-1.274-4.364c0-4.591 3.737-8.327 8.326-8.327 4.59 0 8.326 3.736 8.326 8.327s-3.736 8.332-8.287 8.332z"/></svg>
+          WhatsApp
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- REKLAM ALANI — ALT BÖLÜM (320×100 Mobil Banner) -->
+  <div class="ad-slot ad-square" style="margin-top:32px;min-height:100px;">
+    <span style="font-size:18px;opacity:.3;">📢</span>
+    <span class="ad-slot-label">Reklam Alanı — 320×100</span>
+    <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot="XXXXXXXXXX" data-ad-format="auto"></ins> -->
+  </div>
+</div>
+
+{% endblock %}
