@@ -45,7 +45,7 @@
       {% for icon, num, label, grad in [
         ('🔥', stats.active_deals, 'Geçerli Fırsat', 'linear-gradient(135deg,#f4501c,#ff7340)'),
         ('📉', stats.today_drops, 'Bugün Düşen', 'linear-gradient(135deg,#10b981,#34d399)'),
-        ('🔔', stats.watchlist_count, 'Takip Edilen Fırsat', 'linear-gradient(135deg,#6366f1,#818cf8)')
+        ('📦', stats.tracked_products_count, 'Takip Edilen Ürün', 'linear-gradient(135deg,#6366f1,#818cf8)')
       ] %}
       <div style="background:var(--bg3);border:1.5px solid var(--border);border-radius:16px;padding:16px 24px;display:flex;align-items:center;gap:12px;min-width:150px;">
         <div style="width:40px;height:40px;border-radius:11px;background:{{ grad }};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">{{ icon }}</div>
@@ -60,8 +60,17 @@
 
     <!-- Platform rozetleri -->
     <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-      {% for emoji, label in [('🟠','Amazon'),('🔴','Trendyol'),('🟣','N11'),('🟡','Hepsiburada')] %}
-      <span style="display:inline-flex;align-items:center;gap:5px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);">{{ emoji }} {{ label }}</span>
+      {% for src, label, count in [
+        ('https://www.google.com/s2/favicons?domain=amazon.com.tr&sz=32','Amazon', stats.amazon_count),
+        ('https://www.google.com/s2/favicons?domain=trendyol.com&sz=32','Trendyol', stats.trendyol_count),
+        ('https://www.google.com/s2/favicons?domain=n11.com&sz=32','N11', stats.n11_count),
+        ('https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada', stats.hepsiburada_count)
+      ] %}
+      <span style="display:inline-flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);">
+        <img src="{{ src }}" width="14" height="14" style="border-radius:3px;object-fit:contain;" alt="{{ label }}">
+        {{ label }}
+        <span style="background:var(--bg4);border-radius:99px;padding:1px 7px;font-size:11px;color:var(--fire);font-weight:700;">{{ count }}</span>
+      </span>
       {% endfor %}
     </div>
 
@@ -110,8 +119,16 @@
 <!-- PLATFORM FİLTRELERİ -->
 <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:0;">
   <a href="/?sort={{ sort }}" class="filter-pill {{ 'active' if not platform else '' }}">Tümü</a>
-  {% for p, emoji, label in [('amazon','🟠','Amazon'),('trendyol','🔴','Trendyol'),('n11','🟣','N11'),('hepsiburada','🟡','Hepsiburada')] %}
-  <a href="/?platform={{ p }}&sort={{ sort }}&tab={{ tab }}" class="filter-pill {{ 'active' if platform == p else '' }}">{{ emoji }} {{ label }}</a>
+  {% for p, src, label in [
+    ('amazon','https://www.google.com/s2/favicons?domain=amazon.com.tr&sz=32','Amazon'),
+    ('trendyol','https://www.google.com/s2/favicons?domain=trendyol.com&sz=32','Trendyol'),
+    ('n11','https://www.google.com/s2/favicons?domain=n11.com&sz=32','N11'),
+    ('hepsiburada','https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada')
+  ] %}
+  <a href="/?platform={{ p }}&sort={{ sort }}&tab={{ tab }}" class="filter-pill {{ 'active' if platform == p else '' }}" style="display:inline-flex;align-items:center;gap:6px;">
+    <img src="{{ src }}" width="14" height="14" style="border-radius:3px;object-fit:contain;" alt="{{ label }}">
+    {{ label }}
+  </a>
   {% endfor %}
   <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
     {% for s, icon, label in [('newest','🕐','Yeni'),('discount','📉','İndirim'),('price','💰','Ucuz')] %}
@@ -179,6 +196,9 @@
         <span class="price-old">{{ "%.0f"|format(d.old_price) }} TL</span>
         <span class="price-save">%{{ d.discount_pct|int }}</span>
       </div>
+      {% if d.last_seen_at %}
+      <div style="font-size:10px;color:var(--muted);margin-top:4px;opacity:.7;">🕐 {{ d.last_seen_at|time_ago }}</div>
+      {% endif %}
       {% if d.stock == 'Stok Yok' %}
       <div class="card-btn" style="background:#9ca3af;box-shadow:none;">
         Stok Tükendi
@@ -220,12 +240,10 @@
 
 </div>
 <!-- REKLAM ALANI — ANA SAYFA ORTASI (728×90 Leaderboard) -->
-<div class="ad-slot ad-banner" style="margin:40px 0 0;">
-  <span style="font-size:18px;opacity:.3;">📢</span>
-  <span class="ad-slot-label">Reklam Alanı — 728×90</span>
-  <!-- Google AdSense: data-ad-slot buraya -->
-  <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot="XXXXXXXXXX" data-ad-format="auto"></ins> -->
-</div>
+<a href="/contact" class="ad-slot ad-banner" style="margin:40px 0 0;text-decoration:none;">
+  <span style="font-size:22px;">📢</span>
+  <span class="ad-slot-label">Buraya reklam verebilirsiniz — İletişime geçin</span>
+</a>
 
 {% if not q %}
 <!-- YENİ EKLENENLER -->
@@ -389,11 +407,10 @@
   </div>
 
   <!-- REKLAM ALANI — ALT BÖLÜM (320×100 Mobil Banner) -->
-  <div class="ad-slot ad-square" style="margin-top:32px;min-height:100px;">
-    <span style="font-size:18px;opacity:.3;">📢</span>
-    <span class="ad-slot-label">Reklam Alanı — 320×100</span>
-    <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXX" data-ad-slot="XXXXXXXXXX" data-ad-format="auto"></ins> -->
-  </div>
+  <a href="/contact" class="ad-slot ad-square" style="margin-top:32px;min-height:100px;text-decoration:none;">
+    <span style="font-size:22px;">📢</span>
+    <span class="ad-slot-label">Buraya reklam verebilirsiniz — İletişime geçin</span>
+  </a>
 </div>
 
 {% endblock %}

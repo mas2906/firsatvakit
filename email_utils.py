@@ -6,16 +6,16 @@ import os, smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-SITE_URL  = os.getenv("SITE_URL", "https://firsatvakti.com")
+SITE_URL = os.getenv("SITE_URL", "https://firsatvakti.com")
 
 
 def send_email(to: str, subject: str, html_body: str) -> bool:
     """E-posta gönder. Başarılıysa True döner."""
+    SMTP_HOST = os.getenv("SMTP_HOST", "")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASS = os.getenv("SMTP_PASS", "")
+    SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
     if not SMTP_HOST or not SMTP_USER:
         print(f"[email] ⚠ SMTP ayarlanmamış — {to} → {subject}")
         return False

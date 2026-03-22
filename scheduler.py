@@ -42,15 +42,18 @@ async def run_all_pending():
 
 
 async def run_active_products():
-    """Aktif ürünleri periyodik tara (fiyat takibi)."""
+    """Aktif ürünleri periyodik tara — watchlist ürünleri önce."""
     db = get_db()
     products = db.execute("""
-        SELECT * FROM products
-        ORDER BY last_seen_at ASC
+        SELECT p.*,
+               CASE WHEN EXISTS(SELECT 1 FROM product_watchlist pw WHERE pw.product_id=p.id) THEN 0 ELSE 1 END as wl_priority
+        FROM products p
+        ORDER BY wl_priority ASC, last_seen_at ASC
         LIMIT 100
     """).fetchall()
 
-    print(f"[scheduler] {len(products)} aktif ürün taranıyor")
+    watchlist_count = sum(1 for p in products if p["wl_priority"] == 0)
+    print(f"[scheduler] {len(products)} ürün taranıyor ({watchlist_count} watchlist öncelikli)")
     for p in products:
         await _scan_product(db, p)
         await asyncio.sleep(1.5)

@@ -48,6 +48,20 @@ app = FastAPI(title="FırsatVakti v2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+def _time_ago(value):
+    if not value:
+        return ""
+    try:
+        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+        diff = int((datetime.utcnow() - dt).total_seconds())
+        if diff < 60:     return "az önce kontrol edildi"
+        if diff < 3600:   return f"{diff//60} dk önce kontrol edildi"
+        if diff < 86400:  return f"{diff//3600} sa önce kontrol edildi"
+        return f"{diff//86400} gün önce kontrol edildi"
+    except:
+        return ""
+templates.env.filters["time_ago"] = _time_ago
+
 from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key=get_secret_key(), max_age=86400 * 7)
 
@@ -109,29 +123,10 @@ async def contact_post(request: Request, name: str = Form(""), email: str = Form
         return templates.TemplateResponse("contact.html", {
             "request": request, "user": user, "error": "Tüm alanları doldurun."})
     # E-posta gönder
-    try:
-        from email_utils import send_password_reset
-        import smtplib, ssl
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        smtp_host = os.getenv("SMTP_HOST", "")
-        smtp_user = os.getenv("SMTP_USER", "")
-        smtp_pass = os.getenv("SMTP_PASS", "")
-        smtp_port = int(os.getenv("SMTP_PORT", 587))
-        if smtp_host and smtp_user:
-            msg = MIMEMultipart()
-            msg["From"] = smtp_user
-            msg["To"] = smtp_user
-            msg["Subject"] = f"[FırsatVakti İletişim] {subject}"
-            body = f"Ad: {name}\nE-posta: {email}\n\nMesaj:\n{message}"
-            msg.attach(MIMEText(body, "plain", "utf-8"))
-            ctx = ssl.create_default_context()
-            with smtplib.SMTP(smtp_host, smtp_port) as s:
-                s.starttls(context=ctx)
-                s.login(smtp_user, smtp_pass)
-                s.sendmail(smtp_user, smtp_user, msg.as_string())
-    except Exception as e:
-        print(f"[contact] E-posta gönderilemedi: {e}")
+    from email_utils import send_email
+    admin_email = os.getenv("ADMIN_EMAIL", os.getenv("SMTP_USER", ""))
+    html_body = f"<p><b>Ad:</b> {name}</p><p><b>E-posta:</b> {email}</p><p><b>Mesaj:</b><br>{message}</p>"
+    send_email(admin_email, f"[FırsatVakti İletişim] {subject}", html_body)
     return templates.TemplateResponse("contact.html", {
         "request": request, "user": user, "sent": True})
 
@@ -154,7 +149,7 @@ async def index(request: Request, platform: str = "", sort: str = "newest", page
     else: order = {"newest":"d.created_at DESC","discount":"d.discount_pct DESC","price":"d.new_price ASC"}.get(sort,"d.created_at DESC")
 
     deals = db.execute(f"""
-        SELECT d.*, p.title, p.image_url, p.rating, p.review_count, p.platform, p.stock,
+        SELECT d.*, p.title, p.image_url, p.rating, p.review_count, p.platform, p.stock, p.last_seen_at,
                (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
         FROM deals d LEFT JOIN products p ON d.product_id = p.id
         INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id = best.max_id
@@ -162,7 +157,7 @@ async def index(request: Request, platform: str = "", sort: str = "newest", page
     """, (*params, per_page, offset)).fetchall()
 
     total = db.execute(f"SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id {where}", params).fetchone()[0]
-    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(DISTINCT product_id) FROM product_watchlist) as tracked_products_count").fetchone()
+    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM products) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
 
     user = current_user(request)
     # Kullanıcının min indirim oranını al
@@ -173,7 +168,7 @@ async def index(request: Request, platform: str = "", sort: str = "newest", page
         if ns: user_min_discount = ns["min_discount"]
 
     new_deals = db.execute("""
-        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock,
+        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
                (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
         FROM deals d LEFT JOIN products p ON d.product_id=p.id
         INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
@@ -181,7 +176,7 @@ async def index(request: Request, platform: str = "", sort: str = "newest", page
     """).fetchall()
 
     popular_deals = db.execute("""
-        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock,
+        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
                (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
         FROM deals d LEFT JOIN products p ON d.product_id=p.id
         INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
@@ -218,7 +213,7 @@ async def search(request: Request, q: str = "", page: int = 1):
         total = db.execute("SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id WHERE d.active=1 AND (p.title LIKE ? OR p.platform LIKE ?)", (kw,kw)).fetchone()[0]
         total_pages = max(1,(total+per_page-1)//per_page)
 
-    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(DISTINCT product_id) FROM product_watchlist) as tracked_products_count").fetchone()
+    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM products) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
     return templates.TemplateResponse("index.html", {
         "request": request, "deals": deals, "platform": "", "sort": "discount",
         "page": page, "total_pages": total_pages, "stats": stats,
