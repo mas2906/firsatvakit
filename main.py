@@ -26,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 
 from db import get_db, init_db
-from scraper_router import detect_platform, enqueue_url, clean_tracking_params, extract_product_id
+from scraper_router import detect_platform, enqueue_url, clean_tracking_params, extract_product_id, is_short_url, resolve_short_url
 from affiliate import build_affiliate_url, make_short_slug
 from telegram_pub import publish_deal
 from security import (verify_password, hash_password, needs_rehash,  # noqa: F401
@@ -61,6 +61,17 @@ def _time_ago(value):
     except:
         return ""
 templates.env.filters["time_ago"] = _time_ago
+
+def _hours_since(value):
+    """Bir tarihten bu yana kaç saat geçti? Freshness kontrolü için."""
+    if not value:
+        return 9999
+    try:
+        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+        return int((datetime.utcnow() - dt).total_seconds() / 3600)
+    except:
+        return 9999
+templates.env.filters["hours_since"] = _hours_since
 
 from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key=get_secret_key(), max_age=86400 * 7)
@@ -265,6 +276,10 @@ async def submit_post(request: Request, background_tasks: BackgroundTasks,
     if not url.startswith("http"):
         return templates.TemplateResponse("submit.html", {"request": request, "error": "Geçerli URL girin.", "user": user, "remaining": remaining, "limit": limit})
 
+    # Kısa linkleri (ty.gl, app.hb.biz) gerçek URL'ye çevir
+    if is_short_url(url):
+        url = await resolve_short_url(url)
+
     platform = detect_platform(url)
     if not platform:
         return templates.TemplateResponse("submit.html", {"request": request, "error": "Desteklenmeyen site.", "user": user, "remaining": remaining, "limit": limit})
@@ -385,6 +400,37 @@ async def unwatch_product(request: Request, product_id: int):
     )
     db.commit()
     return JSONResponse({"watching": False})
+
+
+@app.get("/watchlist", response_class=HTMLResponse)
+async def watchlist_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth", status_code=302)
+    db = get_db()
+    items = db.execute("""
+        SELECT p.*,
+               d.id as deal_id, d.new_price, d.old_price, d.discount_pct, d.active as deal_active,
+               sl.slug,
+               ph.price_value as current_price,
+               pw.created_at as watched_at
+        FROM product_watchlist pw
+        JOIN products p ON pw.product_id = p.id
+        LEFT JOIN (
+            SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id
+        ) best ON best.product_id = p.id
+        LEFT JOIN deals d ON d.id = best.max_id
+        LEFT JOIN short_links sl ON sl.deal_id = d.id
+        LEFT JOIN (
+            SELECT product_id, price_value FROM price_history
+            WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)
+        ) ph ON ph.product_id = p.id
+        WHERE pw.user_id = ?
+        ORDER BY pw.created_at DESC
+    """, (user["id"],)).fetchall()
+    return templates.TemplateResponse("watchlist.html", {
+        "request": request, "user": user, "items": items,
+    })
 
 
 @app.get("/deal/{deal_id}", response_class=HTMLResponse)
@@ -718,9 +764,14 @@ async def settings_get(request: Request):
         ORDER BY sl.submitted_at DESC LIMIT 30
     """, (user["id"],)).fetchall()
 
+    watchlist_count = db.execute(
+        "SELECT COUNT(*) FROM product_watchlist WHERE user_id=?", (user["id"],)
+    ).fetchone()[0]
+
     return templates.TemplateResponse("settings.html", {
         "request": request, "user": user, "tg": tg,
         "notify": notify, "tracked": tracked,
+        "watchlist_count": watchlist_count,
     })
 
 @app.post("/settings/telegram")
@@ -753,7 +804,7 @@ async def settings_tg(request: Request, tg_chat_id: str = Form(""), wa_phone: st
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_panel(request: Request):
+async def admin_panel(request: Request, q: str = ""):
     user = require_admin(request)
     db = get_db()
     stats = db.execute("""SELECT (SELECT COUNT(*) FROM products) as products,
@@ -774,12 +825,45 @@ async def admin_panel(request: Request):
         ORDER BY d.created_at DESC LIMIT 50
     """).fetchall()
     recent_deals = db.execute("SELECT d.*,p.title,p.platform FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status!='pending' ORDER BY d.created_at DESC LIMIT 30").fetchall()
-    products = db.execute("SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count FROM products p ORDER BY p.id DESC LIMIT 50").fetchall()
+    if q:
+        products = db.execute("""
+            SELECT p.*, (SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count
+            FROM products p
+            WHERE p.title LIKE ? OR p.source_url LIKE ?
+            ORDER BY p.id DESC LIMIT 200
+        """, (f"%{q}%", f"%{q}%")).fetchall()
+    else:
+        products = db.execute("SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count FROM products p ORDER BY p.id DESC LIMIT 100").fetchall()
     queue = db.execute("SELECT * FROM scan_queue ORDER BY created_at DESC LIMIT 30").fetchall()
+    # Chart verisi — platform bazlı aktif deal sayısı (her zaman 4 platform)
+    chart_raw = {r["platform"]: r["cnt"] for r in db.execute("""
+        SELECT p.platform, COUNT(*) as cnt
+        FROM deals d JOIN products p ON d.product_id=p.id
+        WHERE d.active=1 GROUP BY p.platform
+    """).fetchall()}
+    _platforms = ["amazon", "trendyol", "n11", "hepsiburada"]
+    chart_labels = [p.capitalize() for p in _platforms]
+    chart_values = [chart_raw.get(p, 0) for p in _platforms]
+
+    # Son 7 günlük deal akışı — boş günler 0 olarak gösterilsin
+    from datetime import date, timedelta
+    daily_raw = {r["day"]: r["cnt"] for r in db.execute("""
+        SELECT DATE(created_at) as day, COUNT(*) as cnt
+        FROM deals WHERE created_at >= datetime('now','-7 days')
+        GROUP BY day ORDER BY day
+    """).fetchall()}
+    today = date.today()
+    daily_labels = [(today - timedelta(days=6-i)).isoformat() for i in range(7)]
+    daily_values = [daily_raw.get(d, 0) for d in daily_labels]
+
     return templates.TemplateResponse("admin.html", {
         "request": request, "user": user, "stats": stats,
         "pending_deals": pending_deals,
         "recent_deals": recent_deals, "products": products, "queue": queue,
+        "wa_channel_url": os.getenv("WA_CHANNEL_URL", ""),
+        "chart_labels": chart_labels, "chart_values": chart_values,
+        "daily_labels": daily_labels, "daily_values": daily_values,
+        "search_q": q,
     })
 
 # ── Deal Onaylama (affiliate link ile) ────────────────────────
@@ -790,6 +874,10 @@ async def admin_approve_deal(deal_id: int, request: Request,
     db = get_db()
     deal = db.execute("SELECT d.*, p.title, p.image_url, p.platform FROM deals d JOIN products p ON d.product_id=p.id WHERE d.id=?", (deal_id,)).fetchone()
     if not deal:
+        return RedirectResponse("/admin", status_code=302)
+
+    # Zaten onaylanmışsa tekrar yayın yapma
+    if deal["status"] == "approved":
         return RedirectResponse("/admin", status_code=302)
 
     aff = affiliate_url.strip() if affiliate_url.strip() else None
@@ -806,8 +894,17 @@ async def admin_approve_deal(deal_id: int, request: Request,
     prod_dict["deal_id"] = deal_id
     await publish_deal(db, deal_id, prod_dict, deal["new_price"], deal["old_price"], deal["discount_pct"], slug)
 
+    # WhatsApp paylaşım metni oluştur
+    title   = (prod_dict.get("title") or "Ürün").strip()[:80]
+    pct     = deal["discount_pct"]
+    old_p   = int(deal["old_price"])
+    new_p   = int(deal["new_price"])
+    link    = f"https://firsatvakti.com/go/{slug}"
+    wa_text = f"🔥 %{int(pct)} İNDİRİM!\n\n🛍 {title}\n\n💰 {old_p:,} TL → {new_p:,} TL\n\n👉 {link}\n\n🌐 firsatvakti.com".replace(",", ".")
+
+    from urllib.parse import quote
     print(f"[admin] ✔ Deal #{deal_id} onaylandı ve yayınlandı")
-    return RedirectResponse("/admin", status_code=302)
+    return RedirectResponse(f"/admin?wa_text={quote(wa_text)}", status_code=302)
 
 # ── Deal Reddetme ─────────────────────────────────────────────
 @app.post("/admin/deal/{deal_id}/reject")

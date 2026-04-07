@@ -6,6 +6,27 @@ import re
 from datetime import datetime
 from urllib.parse import urlparse
 
+# Bilinen kısa URL domainleri
+SHORT_URL_HOSTS = {"ty.gl", "app.hb.biz"}
+
+
+def is_short_url(url: str) -> bool:
+    """Kısa link (ty.gl, app.hb.biz vb.) mi?"""
+    h = urlparse(url).netloc.lower()
+    return any(h == s or h.endswith("." + s) for s in SHORT_URL_HOSTS)
+
+
+async def resolve_short_url(url: str) -> str:
+    """Kısa URL'yi redirect takip ederek gerçek URL'ye çevir."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10,
+                                     headers={"User-Agent": "Mozilla/5.0"}) as client:
+            r = await client.head(url)
+            return str(r.url)
+    except Exception:
+        return url
+
 
 def detect_platform(url: str) -> str | None:
     """URL'den platform tespit et. None = desteklenmiyor."""
@@ -103,6 +124,15 @@ def clean_tracking_params(url: str, platform: str) -> str:
         m = re.search(r"(/dp/[A-Z0-9]{10})", parsed.path)
         if m:
             return f"https://www.amazon.com.tr{m.group(1)}"
+
+    # N11 için ?magaza= ve diğer satıcı parametrelerini kaldır — genel ürün sayfasına yönlendir
+    if platform == "n11":
+        n11_remove = {"magaza", "magaza_id", "seller", "sellerid"}
+        clean = {k: v for k, v in clean.items() if k.lower() not in n11_remove}
+        return urlunparse((
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, urlencode(clean, doseq=True), ""
+        ))
 
     return urlunparse((
         parsed.scheme, parsed.netloc, parsed.path,
