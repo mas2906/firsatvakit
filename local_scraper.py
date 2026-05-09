@@ -1,120 +1,148 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-FırsatVakti — Local Scraper
-Kendi bilgisayarında çalışır, VPS'deki ana uygulamadan iş alır ve sonuçları gönderir.
-
-Kurulum:
-  pip install -r requirements.txt
-  playwright install chromium
-
-Kullanım:
-  python3 local_scraper.py
-
-.env dosyasında şunları ayarla:
-  SITE_URL=https://firsatvakti.com        # VPS'deki sitenin adresi
-  SCRAPER_SERVICE_KEY=gizli-anahtar      # API anahtarı (her iki tarafta aynı olmalı)
-  FRONTEND_WEBHOOK_KEY=gizli-anahtar    # Webhook anahtarı (her iki tarafta aynı olmalı)
-"""
+# WSL Local Scraper — her platform kendi bağımsız worker pool'unda çalışır
 
 import asyncio
+import logging
 import os
 import sys
-import time
-
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
-SITE_URL          = os.getenv("SITE_URL", "http://localhost:8000").rstrip("/")
-API_KEY           = os.getenv("SCRAPER_SERVICE_KEY", "")
-WEBHOOK_KEY       = os.getenv("FRONTEND_WEBHOOK_KEY", "")
-POLL_INTERVAL     = int(os.getenv("POLL_INTERVAL", "30"))   # saniye
-MAX_CONCURRENT    = int(os.getenv("MAX_CONCURRENT", "2"))    # aynı anda max iş
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+log = logging.getLogger("local_scraper")
 
-sys.path.insert(0, os.path.dirname(__file__))
+BASE_URL      = os.getenv("BASE_URL", "https://firsatvakti.com")
+API_KEY       = os.getenv("SCRAPER_SERVICE_KEY", "firsatvakti-scraper-key")
+WEBHOOK_KEY   = os.getenv("FRONTEND_WEBHOOK_KEY", "firsatvakti-webhook-key")
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "3"))
+
+# Her platform bağımsız — birbirini bloklamaz
+PLATFORM_CONFIG = {
+    "amazon":      {"concurrent": 2, "batch": 4},
+    "trendyol":    {"concurrent": 4, "batch": 6},
+    "n11":         {"concurrent": 2, "batch": 4},
+    "hepsiburada": {"concurrent": 1, "batch": 2},
+}
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scrapers.router import scrape_product
+from scrapers.cdp_base import BrowserPool
 
 
-async def fetch_pending_jobs() -> list:
-    """Ana uygulamadan bekleyen scrape işlerini al."""
-    url = f"{SITE_URL}/api/pending-jobs"
-    headers = {"X-Api-Key": API_KEY}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, headers=headers)
-        if r.status_code == 200:
-            return r.json()
-        print(f"[poll] ✘ HTTP {r.status_code}: {r.text[:100]}")
-        return []
+async def process_job(job, client, sem, pool):
+    async with sem:
+        pid        = job["product_id"]
+        url        = job["url"]
+        platform   = job["platform"]
+        price_only = job.get("price_only", False)
 
-
-async def send_result(product_id: int, url: str, platform: str, data: dict):
-    """Scrape sonucunu ana uygulamaya webhook ile gönder."""
-    webhook_url = f"{SITE_URL}/api/scraper-webhook"
-    headers = {"X-Webhook-Key": WEBHOOK_KEY, "Content-Type": "application/json"}
-    payload = {"product_id": product_id, "url": url, "platform": platform, "data": data}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(webhook_url, json=payload, headers=headers)
-            if r.status_code == 200:
-                print(f"[webhook] ✔ #{product_id} gönderildi")
+        log.info(f"[{platform}] Scraping #{pid}{' [fiyat]' if price_only else ''}")
+        try:
+            data = await asyncio.wait_for(
+                scrape_product(url, platform, pool=pool, price_only=price_only),
+                timeout=60,
+            )
+            if data and data.get("price"):
+                title = (data.get("title") or "")[:50]
+                log.info(f"[{platform}] ✔ #{pid} fiyat={data['price']} stok={data.get('stock','-')} title={title!r}")
             else:
-                print(f"[webhook] ✘ #{product_id} HTTP {r.status_code}: {r.text[:100]}")
-    except Exception as e:
-        print(f"[webhook] ✘ #{product_id} bağlantı hatası: {e}")
+                log.warning(f"[{platform}] ✘ #{pid} veri yok — url={url[:60]}")
+            await send_webhook(client, pid, url, platform, data or {})
+        except asyncio.TimeoutError:
+            log.error(f"[{platform}] TIMEOUT #{pid} — url={url[:60]}")
+            await send_webhook(client, pid, url, platform, {"error": "timeout"})
+        except Exception as e:
+            log.error(f"[{platform}] HATA #{pid}: {e}")
+            await send_webhook(client, pid, url, platform, {"error": str(e)})
 
 
-async def scrape_job(job: dict):
-    """Tek bir ürünü tara."""
-    product_id = job["product_id"]
-    url        = job["url"]
-    platform   = job["platform"]
-    print(f"[scraper] #{product_id} tarıyor: {platform} — {url[:60]}")
+async def poll_platform(platform: str, cfg: dict, client: httpx.AsyncClient, pool):
+    """Tek platform için bağımsız polling döngüsü."""
+    concurrent = cfg["concurrent"]
+    batch      = cfg["batch"]
+    sem        = asyncio.Semaphore(concurrent)
+    running: set[asyncio.Task] = set()
 
-    try:
-        from scrapers.router import scrape_product
-        data = await scrape_product(url, platform)
-        if data:
-            print(f"[scraper] ✔ #{product_id} title={data.get('title','')[:40]!r} price={data.get('price')}")
-            await send_result(product_id, url, platform, data)
-        else:
-            print(f"[scraper] ✘ #{product_id} veri alınamadı")
-            await send_result(product_id, url, platform, {})
-    except Exception as e:
-        print(f"[scraper] ✘ #{product_id} hata: {e}")
-        await send_result(product_id, url, platform, {})
-
-
-async def run_loop():
-    """Ana polling döngüsü."""
-    print(f"[local_scraper] Başlatıldı")
-    print(f"  Site URL   : {SITE_URL}")
-    print(f"  Polling    : her {POLL_INTERVAL} saniyede bir")
-    print(f"  Max eş zamanlı: {MAX_CONCURRENT}")
-    print()
-
-    sem = asyncio.Semaphore(MAX_CONCURRENT)
-
-    async def bounded_scrape(job):
-        async with sem:
-            await scrape_job(job)
+    log.info(f"[{platform}] Worker başladı — concurrent={concurrent} batch={batch}")
+    _empty_count = 0
 
     while True:
         try:
-            jobs = await fetch_pending_jobs()
-            if jobs:
-                print(f"[poll] {len(jobs)} iş alındı")
-                await asyncio.gather(*[bounded_scrape(j) for j in jobs])
-            else:
-                print(f"[poll] Bekleyen iş yok — {POLL_INTERVAL}sn bekleniyor...")
-        except KeyboardInterrupt:
-            print("\n[local_scraper] Durduruluyor...")
-            break
-        except Exception as e:
-            print(f"[poll] Hata: {e}")
+            running.difference_update({t for t in running if t.done()})
+            free = concurrent - len(running)
 
-        await asyncio.sleep(POLL_INTERVAL)
+            if free == 0:
+                await asyncio.sleep(1)
+                continue
+
+            limit = min(free, batch)
+            r = await client.get(
+                f"{BASE_URL}/api/pending-jobs?platform={platform}&limit={limit}",
+                headers={"X-Api-Key": API_KEY},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                log.warning(f"[{platform}] Poll failed: {r.status_code}")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+            jobs = r.json()
+            if not jobs:
+                _empty_count += 1
+                if _empty_count % 10 == 1:
+                    log.info(f"[{platform}] Kuyruk boş (poll #{_empty_count})")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+            _empty_count = 0
+
+            log.info(f"[{platform}] {len(jobs)} iş alındı ({len(running)} çalışıyor)")
+            for job in jobs:
+                task = asyncio.create_task(process_job(job, client, sem, pool))
+                running.add(task)
+                task.add_done_callback(running.discard)
+
+            await asyncio.sleep(0.5)
+
+        except Exception as e:
+            log.error(f"[{platform}] Poll hatası: {e}")
+            await asyncio.sleep(POLL_INTERVAL)
+
+
+async def send_webhook(client, product_id, url, platform, data):
+    payload = {"product_id": product_id, "url": url, "platform": platform, "data": data}
+    try:
+        r = await client.post(
+            f"{BASE_URL}/api/scraper-webhook",
+            json=payload,
+            headers={"X-Webhook-Key": WEBHOOK_KEY},
+            timeout=10,
+        )
+        log.info(f"[{platform}] Webhook {r.status_code} #{product_id}")
+    except Exception as e:
+        log.error(f"[{platform}] Webhook failed #{product_id}: {e}")
+
+
+async def main():
+    total_pages = sum(c["concurrent"] for c in PLATFORM_CONFIG.values())
+    log.info(f"WSL Local Scraper başladı — {len(PLATFORM_CONFIG)} platform, toplam {total_pages} slot")
+    for p, cfg in PLATFORM_CONFIG.items():
+        log.info(f"  {p}: concurrent={cfg['concurrent']} batch={cfg['batch']}")
+
+    pool = BrowserPool(max_pages=total_pages)
+    try:
+        await pool.start()
+        log.info("[BrowserPool] Hazır")
+        async with httpx.AsyncClient() as client:
+            await asyncio.gather(*[
+                poll_platform(p, cfg, client, pool)
+                for p, cfg in PLATFORM_CONFIG.items()
+            ])
+    finally:
+        await pool.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(run_loop())
+    asyncio.run(main())

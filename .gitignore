@@ -4,3 +4,4 @@
 *.db-wal
 __pycache__/
 .venv/
+scraper_venv/

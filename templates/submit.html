@@ -81,7 +81,7 @@
     <form method="post" action="/submit">
       <label style="display:block;font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px;letter-spacing:.3px;">ÜRÜN LİNKİ</label>
       <div style="display:flex;gap:10px;">
-        <input type="url" name="url" required
+        <input type="text" name="url" required
                placeholder="https://www.amazon.com.tr/dp/..."
                style="flex:1;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:all .2s;"
                onfocus="this.style.borderColor='var(--fire)';this.style.background='#fff';this.style.boxShadow='0 0 0 3px rgba(244,80,28,.10)'"
@@ -113,10 +113,37 @@
     </form>
 
     <script>
-    document.querySelectorAll('.xplat-cb').forEach(cb=>{
-      cb.addEventListener('change',()=>{
-        document.getElementById('xplat_val').value=[...document.querySelectorAll('.xplat-cb:checked')].map(e=>e.dataset.p).join(',');
+    const platPatterns = {
+      amazon: /amazon\.com\.tr/,
+      trendyol: /trendyol\.com/,
+      n11: /n11\.com/,
+      hepsiburada: /hepsiburada\.com/,
+    };
+
+    function updateXplatVal() {
+      document.getElementById('xplat_val').value =
+        [...document.querySelectorAll('.xplat-cb:checked')].map(e=>e.dataset.p).join(',');
+    }
+
+    function autoSelectPlatforms(url) {
+      let src = null;
+      for (const [p, rx] of Object.entries(platPatterns)) {
+        if (rx.test(url)) { src = p; break; }
+      }
+      document.querySelectorAll('.xplat-cb').forEach(cb => {
+        cb.checked = src ? cb.dataset.p !== src : false;
       });
+      updateXplatVal();
+    }
+
+    const urlInput = document.querySelector('input[name="url"]');
+    urlInput.addEventListener('input', () => autoSelectPlatforms(urlInput.value));
+    urlInput.addEventListener('paste', e => {
+      setTimeout(() => autoSelectPlatforms(urlInput.value), 50);
+    });
+
+    document.querySelectorAll('.xplat-cb').forEach(cb=>{
+      cb.addEventListener('change', updateXplatVal);
     });
     </script>
     {% endif %}

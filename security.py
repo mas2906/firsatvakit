@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Güvenlik modülü — FırsatVakti v2: bcrypt, rate limiting, migrasyon."""
 
-import os, secrets, time, hashlib, re
+import os, secrets, time, hashlib, re, html
 from datetime import datetime
 from typing import Optional
 
@@ -88,5 +88,6 @@ def get_secret_key() -> str:
 def sanitize_comment(text: str, max_len: int = 2000) -> str:
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'<[^>]+>', '', text)   # HTML tag'ları sil
+    text = html.escape(text)              # Kalan < > & " ' karakterlerini escape et
     return text.strip()[:max_len]

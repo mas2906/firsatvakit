@@ -6,16 +6,29 @@ Yenilikler: bcrypt güvenlik, çapraz platform arama, yorum sistemi, SEO blog, s
 """
 
 import os, json, secrets, string, time
+import logging
+import httpx
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-from email_utils import send_password_reset
+from config import (
+    INDEX_CACHE_TTL_SECS, RATE_LIMIT_WINDOW_SECS, RATE_LIMIT_MAX_REQUESTS,
+)
+
+log = logging.getLogger("main")
+
+from email_utils import send_password_reset, send_price_alert
 
 SCRAPER_SERVICE_URL = os.getenv("SCRAPER_SERVICE_URL", "")
 SCRAPER_SERVICE_KEY = os.getenv("SCRAPER_SERVICE_KEY", "")
 WEBHOOK_KEY         = os.getenv("FRONTEND_WEBHOOK_KEY", "")
 USE_LOCAL_SCRAPER   = os.getenv("USE_LOCAL_SCRAPER", "false").lower() == "true"
+
+if not SCRAPER_SERVICE_KEY:
+    print("⚠️  SCRAPER_SERVICE_KEY tanımlı değil — /api/pending-jobs herkese açık!")
+if not WEBHOOK_KEY:
+    print("⚠️  FRONTEND_WEBHOOK_KEY tanımlı değil — /api/scraper-webhook herkese açık!")
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -28,7 +41,7 @@ import uvicorn
 from db import get_db, init_db
 from scraper_router import detect_platform, enqueue_url, clean_tracking_params, extract_product_id, is_short_url, resolve_short_url
 from affiliate import build_affiliate_url, make_short_slug
-from telegram_pub import publish_deal
+from telegram_pub import publish_deal, notify_pending_approval
 from security import (verify_password, hash_password, needs_rehash,  # noqa: F401
                       migrate_password_on_login, check_login_allowed,
                       record_login_attempt, record_login_attempt_db, get_secret_key)
@@ -73,8 +86,77 @@ def _hours_since(value):
         return 9999
 templates.env.filters["hours_since"] = _hours_since
 
+def _price_tr(value):
+    """3798.9 → '3.798,90'  (Türk fiyat formatı)"""
+    try:
+        v = float(value)
+        formatted = f"{v:,.2f}"          # '3,798.90'
+        return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    except (TypeError, ValueError):
+        return value
+templates.env.filters["price_tr"] = _price_tr
+
 from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(SessionMiddleware, secret_key=get_secret_key(), max_age=86400 * 7)
+
+# ── CSRF cookie middleware ─────────────────────────────────────
+@app.middleware("http")
+async def csrf_cookie_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if "csrftoken" not in request.cookies:
+        token = secrets.token_hex(32)
+        response.set_cookie(
+            "csrftoken", token,
+            samesite="lax", httponly=False, max_age=86400 * 7,
+        )
+    return response
+
+# ── Rate limiting (in-memory, IP bazlı) ──────────────────────
+_rate_store: dict = {}
+_RATE_CLEANUP_INTERVAL = 300  # 5 dakikada bir stale key temizle
+_rate_last_cleanup = 0.0
+
+def _is_rate_limited(ip: str, action: str) -> bool:
+    """True döndürürse istek engellenir."""
+    global _rate_last_cleanup
+    limit  = RATE_LIMIT_MAX_REQUESTS.get(action, 10)
+    window = RATE_LIMIT_WINDOW_SECS
+    now    = time.time()
+    key    = f"{ip}:{action}"
+    _rate_store.setdefault(key, [])
+    _rate_store[key] = [t for t in _rate_store[key] if now - t < window]
+    if not _rate_store[key]:
+        del _rate_store[key]
+        return False
+    if len(_rate_store[key]) >= limit:
+        return True
+    _rate_store[key].append(now)
+    # Periyodik temizlik: window dışına çıkmış tüm boş key'leri sil
+    if now - _rate_last_cleanup > _RATE_CLEANUP_INTERVAL:
+        _rate_last_cleanup = now
+        stale = [k for k, ts in _rate_store.items() if not any(now - t < window for t in ts)]
+        for k in stale:
+            del _rate_store[k]
+    return False
+
+# ── CSRF doğrulama ────────────────────────────────────────────
+def _verify_csrf(request: Request, csrf_token: str) -> bool:
+    cookie = request.cookies.get("csrftoken", "")
+    if not cookie or not csrf_token:
+        return False
+    return secrets.compare_digest(cookie, csrf_token)
+
+# ── Ana sayfa cache (TTL bazlı) ───────────────────────────────
+_index_cache: dict = {}   # key → {"data": ..., "ts": float}
+
+def _cache_get(key: str):
+    entry = _index_cache.get(key)
+    if entry and (time.time() - entry["ts"]) < INDEX_CACHE_TTL_SECS:
+        return entry["data"]
+    return None
+
+def _cache_set(key: str, data):
+    _index_cache[key] = {"data": data, "ts": time.time()}
 
 # ═══════════════════════════════════════════════════════════════
 # YARDIMCI
@@ -128,7 +210,12 @@ async def contact_get(request: Request):
 
 @app.post("/contact", response_class=HTMLResponse)
 async def contact_post(request: Request, name: str = Form(""), email: str = Form(""),
-                        subject: str = Form(""), message: str = Form("")):
+                        subject: str = Form(""), message: str = Form(""), csrf_token: str = Form("")):
+    ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(ip, "contact"):
+        return templates.TemplateResponse("contact.html", {"request": request, "user": current_user(request), "error": "Çok fazla istek. Lütfen bekleyin."})
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("contact.html", {"request": request, "user": current_user(request), "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
     user = current_user(request)
     if not name or not email or not message:
         return templates.TemplateResponse("contact.html", {
@@ -136,7 +223,8 @@ async def contact_post(request: Request, name: str = Form(""), email: str = Form
     # E-posta gönder
     from email_utils import send_email
     admin_email = os.getenv("ADMIN_EMAIL", os.getenv("SMTP_USER", ""))
-    html_body = f"<p><b>Ad:</b> {name}</p><p><b>E-posta:</b> {email}</p><p><b>Mesaj:</b><br>{message}</p>"
+    from html import escape as _he
+    html_body = f"<p><b>Ad:</b> {_he(name)}</p><p><b>E-posta:</b> {_he(email)}</p><p><b>Mesaj:</b><br>{_he(message)}</p>"
     send_email(admin_email, f"[FırsatVakti İletişim] {subject}", html_body)
     return templates.TemplateResponse("contact.html", {
         "request": request, "user": user, "sent": True})
@@ -157,51 +245,73 @@ async def index(request: Request, platform: str = "", sort: str = "newest", page
     if tab == "top_discount": order = "d.discount_pct DESC"
     elif tab == "most_clicked": order = "click_count DESC"
     elif tab == "cheapest": order = "d.new_price ASC"
+    elif tab == "today": order = "d.created_at DESC"; where += " AND DATE(d.created_at)=DATE('now')"
     else: order = {"newest":"d.created_at DESC","discount":"d.discount_pct DESC","price":"d.new_price ASC"}.get(sort,"d.created_at DESC")
 
     deals = db.execute(f"""
         SELECT d.*, p.title, p.image_url, p.rating, p.review_count, p.platform, p.stock, p.last_seen_at,
-               (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
+               (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count,
+               (SELECT pgm.group_id FROM product_group_members pgm WHERE pgm.product_id=d.product_id LIMIT 1) as compare_group_id,
+               (SELECT p2.platform FROM products p2
+                JOIN product_group_members pgm2 ON p2.id=pgm2.product_id
+                JOIN (SELECT product_id, price_value FROM price_history WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=p2.id
+                WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
+                AND (p2.stock IS NULL OR p2.stock != 'Stok Yok')
+                ORDER BY lp.price_value ASC LIMIT 1) as best_compare_platform,
+               (SELECT MIN(lp.price_value) FROM product_group_members pgm2
+                JOIN products p2x ON p2x.id=pgm2.product_id
+                JOIN (SELECT product_id, price_value FROM price_history WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=pgm2.product_id
+                WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
+                AND (p2x.stock IS NULL OR p2x.stock != 'Stok Yok')) as best_compare_price
         FROM deals d LEFT JOIN products p ON d.product_id = p.id
         INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id = best.max_id
         {where.replace("WHERE","AND")} ORDER BY {order} LIMIT ? OFFSET ?
     """, (*params, per_page, offset)).fetchall()
 
     total = db.execute(f"SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id {where}", params).fetchone()[0]
-    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM products) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
+
+    # Pahalı sorgular cache'lenir (60s TTL) — platform/sort/tab'a bağlı değil
+    shared = _cache_get("index_shared")
+    if shared is None:
+        stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM product_groups) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
+        new_deals = db.execute("""
+            SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
+                   (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
+            FROM deals d LEFT JOIN products p ON d.product_id=p.id
+            INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
+            WHERE d.active=1 ORDER BY d.created_at DESC LIMIT 8
+        """).fetchall()
+        popular_deals = db.execute("""
+            SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
+                   (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
+            FROM deals d LEFT JOIN products p ON d.product_id=p.id
+            INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
+            WHERE d.active=1 ORDER BY click_count DESC LIMIT 8
+        """).fetchall()
+        ticker = get_ticker_items(db)
+        shared = {
+            "stats": dict(stats) if stats else {},
+            "new_deals": [dict(r) for r in new_deals],
+            "popular_deals": [dict(r) for r in popular_deals],
+            "ticker_items": [dict(r) for r in ticker],
+        }
+        _cache_set("index_shared", shared)
 
     user = current_user(request)
-    # Kullanıcının min indirim oranını al
     user_min_discount = 5
     if user:
         ensure_notify_table(db)
         ns = db.execute("SELECT min_discount FROM notify_settings WHERE user_id=?", (user["id"],)).fetchone()
         if ns: user_min_discount = ns["min_discount"]
 
-    new_deals = db.execute("""
-        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
-               (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
-        FROM deals d LEFT JOIN products p ON d.product_id=p.id
-        INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
-        WHERE d.active=1 ORDER BY d.created_at DESC LIMIT 8
-    """).fetchall()
-
-    popular_deals = db.execute("""
-        SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,
-               (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count
-        FROM deals d LEFT JOIN products p ON d.product_id=p.id
-        INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
-        WHERE d.active=1 ORDER BY click_count DESC LIMIT 8
-    """).fetchall()
-
     meta = build_meta_tags("index")
     return templates.TemplateResponse("index.html", {
         "request": request, "deals": deals, "platform": platform, "sort": sort,
         "tab": tab, "page": page, "total_pages": max(1,(total+per_page-1)//per_page),
-        "stats": stats, "user": user, "q": "",
-        "ticker_items": get_ticker_items(db), "meta": meta,
+        "stats": shared["stats"], "user": user, "q": "",
+        "ticker_items": shared["ticker_items"], "meta": meta,
         "user_min_discount": user_min_discount,
-        "new_deals": new_deals, "popular_deals": popular_deals,
+        "new_deals": shared["new_deals"], "popular_deals": shared["popular_deals"],
     })
 
 # ═══════════════════════════════════════════════════════════════
@@ -224,7 +334,7 @@ async def search(request: Request, q: str = "", page: int = 1):
         total = db.execute("SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id WHERE d.active=1 AND (p.title LIKE ? OR p.platform LIKE ?)", (kw,kw)).fetchone()[0]
         total_pages = max(1,(total+per_page-1)//per_page)
 
-    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM products) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
+    stats = db.execute("SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals, (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops, (SELECT COUNT(*) FROM product_watchlist) as watchlist_count, (SELECT COUNT(*) FROM product_groups) as tracked_products_count, (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count, (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count, (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count, (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count").fetchone()
     return templates.TemplateResponse("index.html", {
         "request": request, "deals": deals, "platform": "", "sort": "discount",
         "page": page, "total_pages": total_pages, "stats": stats,
@@ -263,16 +373,26 @@ async def submit_get(request: Request):
 
 @app.post("/submit", response_class=HTMLResponse)
 async def submit_post(request: Request, background_tasks: BackgroundTasks,
-                      url: str = Form(...), cross_search_platforms: str = Form("")):
+                      url: str = Form(...), cross_search_platforms: str = Form(""), csrf_token: str = Form("")):
     user = current_user(request)
     db = get_db()
     ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(ip, "submit"):
+        return templates.TemplateResponse("submit.html", {"request": request, "user": user, "error": "Çok fazla istek gönderildi. Lütfen bekleyin."})
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("submit.html", {"request": request, "user": user, "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
     if user and user["role"] == "admin": count, limit = 0, 999999
     elif user: count = get_today_submit_count(db, user_id=user["id"]); limit = MEMBER_DAILY_LIMIT
     else: count = get_today_submit_count(db, ip=ip); limit = GUEST_DAILY_LIMIT
     remaining = max(0, limit - count)
 
     url = url.strip()
+    # "Ürün Adı https://..." formatında yapıştırıldıysa URL kısmını çıkar
+    if not url.startswith("http"):
+        import re as _re
+        m = _re.search(r"(https?://\S+)", url)
+        if m:
+            url = m.group(1)
     if not url.startswith("http"):
         return templates.TemplateResponse("submit.html", {"request": request, "error": "Geçerli URL girin.", "user": user, "remaining": remaining, "limit": limit})
 
@@ -316,24 +436,45 @@ async def submit_post(request: Request, background_tasks: BackgroundTasks,
             "remaining": 0, "limit": limit, "limit_reached": True,
             "error": f"Günlük limit ({limit}). Yarın tekrar dene!" if user else f"Misafir limiti ({limit}). Üye ol!"})
 
-    product_id = enqueue_url(db, url, platform)
-    await _dispatch_scrape(product_id, url, platform, background_tasks)
-
-    # v2: Çapraz platform arama
-    if cross_search_platforms:
-        plats = [p.strip() for p in cross_search_platforms.split(",") if p.strip()]
-        background_tasks.add_task(_run_cross_search, product_id, plats)
-
-    log_submit(db, user_id=user["id"] if user else None, ip=ip, product_id=product_id)
-    return templates.TemplateResponse("submit.html", {
-        "request": request, "success": f"Link eklendi! {platform.title()} taranıyor...",
-        "product_id": product_id, "product_url": f"/product/{product_id}",
-        "user": user, "remaining": max(0,limit-count-1), "limit": limit,
-    })
+    # Admin ise direkt tarama, diğerleri onay kuyruğuna gider
+    if user and user["role"] == "admin":
+        product_id = enqueue_url(db, url, platform)
+        # cross_search_platforms formdan geldiyse onu kullan, yoksa tüm diğer platformlar
+        if cross_search_platforms:
+            plats = [p.strip() for p in cross_search_platforms.split(",") if p.strip()]
+        else:
+            plats = [p for p in ["amazon", "trendyol", "hepsiburada", "n11"] if p != platform]
+        await _dispatch_scrape(product_id, url, platform, background_tasks, cross_search_plats=plats)
+        log_submit(db, user_id=user["id"], ip=ip, product_id=product_id)
+    else:
+        # Onay kuyruğuna ekle
+        db.execute(
+            "INSERT INTO link_queue(url, platform, user_id, ip, status, submitted_at) VALUES(?,?,?,?,'pending',?)",
+            (clean_url, platform, user["id"] if user else None, ip, now_str())
+        )
+        db.commit()
+        log_submit(db, user_id=user["id"] if user else None, ip=ip)
+    if user and user["role"] == "admin":
+        return templates.TemplateResponse("submit.html", {
+            "request": request, "success": f"Link eklendi! {platform.title()} taranıyor...",
+            "product_id": product_id, "product_url": f"/product/{product_id}",
+            "user": user, "remaining": max(0, limit-count-1), "limit": limit,
+        })
+    else:
+        return templates.TemplateResponse("submit.html", {
+            "request": request,
+            "success": f"Linkin alındı! Admin onayından sonra {platform.title()} taranacak.",
+            "user": user, "remaining": max(0, limit-count-1), "limit": limit,
+        })
 
 async def _run_cross_search(product_id, platforms=None):
+    # Scrape tamamlanana kadar bekle (maks 90s)
     import asyncio
-    await asyncio.sleep(10)
+    for _ in range(18):
+        await asyncio.sleep(5)
+        row = get_db().execute("SELECT title FROM products WHERE id=?", (product_id,)).fetchone()
+        if row and row["title"]:
+            break
     await cross_search_product(get_db(), product_id, platforms)
 
 # ═══════════════════════════════════════════════════════════════
@@ -484,6 +625,28 @@ async def compare_page(request: Request, group_id: int):
     db = get_db()
     data = generate_comparison_data(db, group_id)
     if not data: raise HTTPException(404, "Karşılaştırma bulunamadı")
+
+    # Aktif deal olan ürünler → 5 dk, olmayanlar → 2 saat eşiği
+    threshold_active = (datetime.utcnow() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    threshold_normal = (datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    for p in data.get("products", []):
+        has_active_deal = db.execute(
+            "SELECT 1 FROM deals WHERE product_id=? AND active=1 LIMIT 1", (p["id"],)
+        ).fetchone()
+        threshold = threshold_active if has_active_deal else threshold_normal
+        last = p.get("last_seen_at") or ""
+        if last < threshold:
+            existing = db.execute(
+                "SELECT id FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')",
+                (p["id"],)
+            ).fetchone()
+            if not existing:
+                db.execute(
+                    "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',3,?)",
+                    (p["id"], p["source_url"], p["platform"], now_str())
+                )
+    db.commit()
+
     meta = build_meta_tags("comparison", {"name": data["group"]["name"],
            "platform_count": data["platform_count"], "image_url": data["group"].get("image_url")})
     return templates.TemplateResponse("compare.html", {
@@ -519,7 +682,12 @@ async def register_get(request: Request):
     return templates.TemplateResponse("auth.html", {"request": request, "mode": "register"})
 
 @app.post("/register", response_class=HTMLResponse)
-async def register_post(request: Request, username: str = Form(...), email: str = Form(...), password: str = Form(...)):
+async def register_post(request: Request, username: str = Form(...), email: str = Form(...), password: str = Form(...), csrf_token: str = Form("")):
+    ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(ip, "register"):
+        return templates.TemplateResponse("auth.html", {"request": request, "mode": "register", "error": "Çok fazla deneme. Lütfen bekleyin."})
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("auth.html", {"request": request, "mode": "register", "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
     db = get_db()
     if db.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "register", "error": "Bu e-posta zaten kayıtlı."})
@@ -537,9 +705,14 @@ async def login_get(request: Request):
     return templates.TemplateResponse("auth.html", {"request": request, "mode": "login"})
 
 @app.post("/login", response_class=HTMLResponse)
-async def login_post(request: Request, email: str = Form(...), password: str = Form(...)):
+async def login_post(request: Request, email: str = Form(...), password: str = Form(...), csrf_token: str = Form("")):
     db = get_db()
     ip = request.client.host if request.client else "unknown"
+
+    if _is_rate_limited(ip, "login"):
+        return templates.TemplateResponse("auth.html", {"request": request, "mode": "login", "error": "Çok fazla deneme. Lütfen bekleyin."})
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("auth.html", {"request": request, "mode": "login", "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
 
     allowed, wait = check_login_allowed(email)
     if not allowed:
@@ -547,6 +720,8 @@ async def login_post(request: Request, email: str = Form(...), password: str = F
             "error": f"Çok fazla hatalı deneme. {wait//60} dk sonra tekrar dene."})
 
     user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    if user and not user["password_hash"]:
+        return templates.TemplateResponse("auth.html", {"request": request, "mode": "login", "error": "Bu hesap Google ile oluşturulmuş. Aşağıdaki Google butonu ile giriş yap."})
     if not user or not verify_password(password, user["password_hash"]):
         record_login_attempt(email, False)
         record_login_attempt_db(db, email, ip, False)
@@ -565,6 +740,97 @@ async def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/", status_code=302)
 
+
+# ═══════════════════════════════════════════════════════════════
+# GOOGLE OAUTH
+# ═══════════════════════════════════════════════════════════════
+
+_GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
+
+def _google_redirect_uri(request: Request) -> str:
+    base = os.getenv("BASE_URL", "https://firsatvakti.com")
+    return f"{base}/auth/google/callback"
+
+
+@app.get("/auth/google")
+async def google_login(request: Request):
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    if not client_id:
+        return RedirectResponse("/login?error=google_not_configured", status_code=302)
+    state = secrets.token_hex(16)
+    request.session["oauth_state"] = state
+    params = {
+        "client_id": client_id,
+        "redirect_uri": _google_redirect_uri(request),
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+    }
+    from urllib.parse import urlencode
+    return RedirectResponse(f"{_GOOGLE_AUTH_URL}?{urlencode(params)}", status_code=302)
+
+
+@app.get("/auth/google/callback")
+async def google_callback(request: Request, code: str = None, state: str = None, error: str = None):
+    if error or not code:
+        return RedirectResponse("/login", status_code=302)
+
+    saved_state = request.session.pop("oauth_state", None)
+    if not saved_state or saved_state != state:
+        return RedirectResponse("/login", status_code=302)
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            token_r = await client.post(_GOOGLE_TOKEN_URL, data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": _google_redirect_uri(request),
+                "grant_type": "authorization_code",
+            })
+            token_r.raise_for_status()
+            access_token = token_r.json().get("access_token")
+
+            info_r = await client.get(_GOOGLE_USERINFO_URL,
+                                      headers={"Authorization": f"Bearer {access_token}"})
+            info_r.raise_for_status()
+            info = info_r.json()
+    except Exception:
+        return RedirectResponse("/login", status_code=302)
+
+    google_id = info.get("id")
+    email = info.get("email", "")
+    name = info.get("name") or email.split("@")[0]
+
+    if not google_id or not email:
+        return RedirectResponse("/login", status_code=302)
+
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE google_id=?", (google_id,)).fetchone()
+    if not user:
+        user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if user:
+            db.execute("UPDATE users SET google_id=? WHERE id=?", (google_id, user["id"]))
+            db.commit()
+        else:
+            cur = db.execute(
+                "INSERT INTO users(username,email,password_hash,google_id,role,created_at) VALUES(?,?,?,?,?,?)",
+                (name, email, "", google_id, "user", now_str())
+            )
+            db.commit()
+            user = db.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=302)
+
+
 # ═══════════════════════════════════════════════════════════════
 # ŞİFRE SIFIRLAMA
 # ═══════════════════════════════════════════════════════════════
@@ -574,7 +840,9 @@ async def forgot_password_get(request: Request):
     return templates.TemplateResponse("forgot_password.html", {"request": request})
 
 @app.post("/forgot-password", response_class=HTMLResponse)
-async def forgot_password_post(request: Request, email: str = Form(...)):
+async def forgot_password_post(request: Request, email: str = Form(...), csrf_token: str = Form("")):
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("forgot_password.html", {"request": request, "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE email=?", (email.strip().lower(),)).fetchone()
     # Güvenlik: kullanıcı yoksa da başarı mesajı göster (enumeration'ı önlemek için)
@@ -607,7 +875,9 @@ async def reset_password_get(request: Request, token: str):
 
 @app.post("/reset-password/{token}", response_class=HTMLResponse)
 async def reset_password_post(request: Request, token: str,
-                               password: str = Form(...), password2: str = Form(...)):
+                               password: str = Form(...), password2: str = Form(...), csrf_token: str = Form("")):
+    if not _verify_csrf(request, csrf_token):
+        return templates.TemplateResponse("reset_password.html", {"request": request, "token": token, "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
     db = get_db()
     row = db.execute(
         "SELECT * FROM password_reset_tokens WHERE token=? AND used=0 AND expires_at > ?",
@@ -707,8 +977,11 @@ async def admin_article_new(request: Request):
 async def admin_article_save(request: Request, article_id: int = Form(0),
                               title: str = Form(...), summary: str = Form(""),
                               body_html: str = Form(...), category: str = Form("rehber"),
-                              tags: str = Form(""), status: str = Form("draft")):
+                              tags: str = Form(""), status: str = Form("draft"),
+                              csrf_token: str = Form("")):
     user = require_admin(request)
+    if not _verify_csrf(request, csrf_token):
+        raise HTTPException(403, "Geçersiz CSRF token")
     db = get_db()
     if article_id:
         update_article(db, article_id, title=title, summary=summary,
@@ -730,13 +1003,23 @@ async def sitemap():
 async def robots():
     return Response(content="User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: https://firsatvakti.com/sitemap.xml\n", media_type="text/plain")
 
+# Google Search Console domain doğrulama
+# Search Console'dan aldığın dosya adını GOOGLE_SITE_VERIFICATION env'e ekle
+# Örnek: GOOGLE_SITE_VERIFICATION=googleabc123def456.html
+_gsc_token = os.getenv("GOOGLE_SITE_VERIFICATION", "")
+if _gsc_token:
+    @app.get(f"/{_gsc_token}")
+    async def google_site_verification():
+        token = _gsc_token.replace(".html", "")
+        return Response(content=f"google-site-verification: {token}", media_type="text/html")
+
 # ═══════════════════════════════════════════════════════════════
 # AYARLAR
 # ═══════════════════════════════════════════════════════════════
 
 def ensure_notify_table(db):
     db.execute("""CREATE TABLE IF NOT EXISTS notify_settings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE REFERENCES users(id),
+        id SERIAL PRIMARY KEY, user_id INTEGER UNIQUE REFERENCES users(id),
         tg_chat_id TEXT DEFAULT '', wa_phone TEXT DEFAULT '', min_discount INTEGER DEFAULT 10,
         platforms TEXT DEFAULT 'amazon,trendyol,n11', tg_active INTEGER DEFAULT 0,
         wa_active INTEGER DEFAULT 0, updated_at TEXT)""")
@@ -752,16 +1035,19 @@ async def settings_get(request: Request):
 
     # Kullanıcının takip ettiği ürünler (submit_log üzerinden)
     tracked = db.execute("""
-        SELECT p.*, ph.price_value as current_price,
-               d.discount_pct, d.new_price, d.old_price, d.active as deal_active,
-               sl.submitted_at
-        FROM submit_log sl
-        JOIN products p ON sl.product_id = p.id
-        LEFT JOIN (SELECT product_id, MAX(price_value) as price_value FROM price_history GROUP BY product_id) ph ON ph.product_id = p.id
-        LEFT JOIN (SELECT product_id, discount_pct, new_price, old_price, active FROM deals WHERE active=1 ORDER BY id DESC LIMIT 1) d ON d.product_id = p.id
-        WHERE sl.user_id=? AND sl.product_id IS NOT NULL
-        GROUP BY p.id
-        ORDER BY sl.submitted_at DESC LIMIT 30
+        SELECT * FROM (
+            SELECT DISTINCT ON (p.id)
+                   p.*, ph.price_value as current_price,
+                   d.discount_pct, d.new_price, d.old_price, d.active as deal_active,
+                   sl.submitted_at
+            FROM submit_log sl
+            JOIN products p ON sl.product_id = p.id
+            LEFT JOIN (SELECT product_id, MAX(price_value) as price_value FROM price_history GROUP BY product_id) ph ON ph.product_id = p.id
+            LEFT JOIN (SELECT product_id, discount_pct, new_price, old_price, active FROM deals WHERE active=1 ORDER BY id DESC LIMIT 1) d ON d.product_id = p.id
+            WHERE sl.user_id=? AND sl.product_id IS NOT NULL
+            ORDER BY p.id, sl.submitted_at DESC
+        ) sub
+        ORDER BY submitted_at DESC LIMIT 30
     """, (user["id"],)).fetchall()
 
     watchlist_count = db.execute(
@@ -809,22 +1095,43 @@ async def admin_panel(request: Request, q: str = ""):
     db = get_db()
     stats = db.execute("""SELECT (SELECT COUNT(*) FROM products) as products,
         (SELECT COUNT(*) FROM deals) as deals, (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,
-        (SELECT COUNT(*) FROM deals WHERE status='pending') as pending_deals,
+        (SELECT COUNT(*) FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')) as pending_deals,
         (SELECT COUNT(*) FROM users) as users, (SELECT COUNT(*) FROM clicks) as clicks,
-        (SELECT COUNT(*) FROM scan_queue WHERE status='pending') as queue_pending,
+        (SELECT COUNT(*) FROM scan_queue WHERE status IN ('pending','processing')) as queue_pending,
         (SELECT COUNT(*) FROM comments) as comments,
         (SELECT COUNT(*) FROM articles) as articles,
-        (SELECT COUNT(*) FROM product_groups) as groups
+        (SELECT COUNT(*) FROM product_groups) as groups,
+        (SELECT COUNT(*) FROM link_queue WHERE status='pending') as pending_links,
+        (SELECT COUNT(*) FROM scan_queue WHERE status='dead') as dead_queue,
+        (SELECT COUNT(*) FROM scraper_errors WHERE occurred_at > datetime('now','-24 hours')) as errors_24h
     """).fetchone()
-    # Onay bekleyen deal'lar
+    pending_links = db.execute("""
+        SELECT lq.*, u.username FROM link_queue lq
+        LEFT JOIN users u ON lq.user_id = u.id
+        WHERE lq.status = 'pending'
+        ORDER BY lq.submitted_at DESC LIMIT 100
+    """).fetchall()
+    scraper_errors = db.execute("""
+        SELECT se.*, p.title, p.platform FROM scraper_errors se
+        LEFT JOIN products p ON se.product_id = p.id
+        ORDER BY se.occurred_at DESC LIMIT 50
+    """).fetchall()
+    # Onay bekleyen deal'lar (aynı gruptaki diğer platformda aktif deal varsa işaretle)
     pending_deals = db.execute("""
-        SELECT d.*, p.title, p.platform, p.image_url, p.source_url, sl.slug
+        SELECT d.*, p.title, p.platform, p.image_url, p.source_url, sl.slug,
+               (SELECT GROUP_CONCAT(p2.platform || '|' || d2.id || '|' || CAST(d2.new_price AS INTEGER))
+                FROM product_group_members pgm1
+                JOIN product_group_members pgm2 ON pgm1.group_id = pgm2.group_id AND pgm2.product_id != pgm1.product_id
+                JOIN products p2 ON pgm2.product_id = p2.id
+                JOIN deals d2 ON d2.product_id = p2.id AND d2.active = 1
+                WHERE pgm1.product_id = d.product_id AND p2.platform != p.platform
+               ) as other_active_deals
         FROM deals d JOIN products p ON d.product_id=p.id
         LEFT JOIN short_links sl ON sl.deal_id=d.id
-        WHERE d.status='pending'
+        WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')
         ORDER BY d.created_at DESC LIMIT 50
     """).fetchall()
-    recent_deals = db.execute("SELECT d.*,p.title,p.platform FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status!='pending' ORDER BY d.created_at DESC LIMIT 30").fetchall()
+    recent_deals = db.execute("SELECT d.*,p.title,p.platform FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status!='pending' ORDER BY d.created_at DESC LIMIT 10").fetchall()
     if q:
         products = db.execute("""
             SELECT p.*, (SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count
@@ -833,8 +1140,8 @@ async def admin_panel(request: Request, q: str = ""):
             ORDER BY p.id DESC LIMIT 200
         """, (f"%{q}%", f"%{q}%")).fetchall()
     else:
-        products = db.execute("SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count FROM products p ORDER BY p.id DESC LIMIT 100").fetchall()
-    queue = db.execute("SELECT * FROM scan_queue ORDER BY created_at DESC LIMIT 30").fetchall()
+        products = db.execute("SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count FROM products p ORDER BY p.id DESC LIMIT 10").fetchall()
+    queue = db.execute("SELECT * FROM scan_queue ORDER BY created_at DESC LIMIT 10").fetchall()
     # Chart verisi — platform bazlı aktif deal sayısı (her zaman 4 platform)
     chart_raw = {r["platform"]: r["cnt"] for r in db.execute("""
         SELECT p.platform, COUNT(*) as cnt
@@ -856,6 +1163,7 @@ async def admin_panel(request: Request, q: str = ""):
     daily_labels = [(today - timedelta(days=6-i)).isoformat() for i in range(7)]
     daily_values = [daily_raw.get(d, 0) for d in daily_labels]
 
+    bulk_result = request.session.pop("bulk_result", None)
     return templates.TemplateResponse("admin.html", {
         "request": request, "user": user, "stats": stats,
         "pending_deals": pending_deals,
@@ -864,6 +1172,9 @@ async def admin_panel(request: Request, q: str = ""):
         "chart_labels": chart_labels, "chart_values": chart_values,
         "daily_labels": daily_labels, "daily_values": daily_values,
         "search_q": q,
+        "pending_links": pending_links,
+        "scraper_errors": scraper_errors,
+        "bulk_result": bulk_result,
     })
 
 # ── Deal Onaylama (affiliate link ile) ────────────────────────
@@ -916,6 +1227,40 @@ async def admin_reject_deal(deal_id: int, request: Request):
     print(f"[admin] ✘ Deal #{deal_id} reddedildi")
     return RedirectResponse("/admin", status_code=302)
 
+# ── Scraper Hataları Temizle ──────────────────────────────────
+@app.post("/admin/clear-errors")
+async def admin_clear_errors(request: Request):
+    require_admin(request)
+    db = get_db()
+    db.execute("DELETE FROM scraper_errors")
+    db.commit()
+    return RedirectResponse("/admin", status_code=302)
+
+# ── Link Kuyruğu Onay / Red ───────────────────────────────────
+@app.post("/admin/link/{link_id}/approve")
+async def admin_approve_link(link_id: int, request: Request, background_tasks: BackgroundTasks):
+    require_admin(request)
+    db = get_db()
+    lq = db.execute("SELECT * FROM link_queue WHERE id=?", (link_id,)).fetchone()
+    if not lq or lq["status"] != "pending":
+        return RedirectResponse("/admin", status_code=302)
+    db.execute("UPDATE link_queue SET status='approved', reviewed_at=? WHERE id=?", (now_str(), link_id))
+    db.commit()
+    product_id = enqueue_url(db, lq["url"], lq["platform"])
+    await _dispatch_scrape(product_id, lq["url"], lq["platform"], background_tasks)
+    background_tasks.add_task(_run_cross_search, product_id)
+    print(f"[admin] ✔ Link #{link_id} onaylandı, ürün #{product_id} taranıyor")
+    return RedirectResponse("/admin", status_code=302)
+
+@app.post("/admin/link/{link_id}/reject")
+async def admin_reject_link(link_id: int, request: Request):
+    require_admin(request)
+    db = get_db()
+    db.execute("UPDATE link_queue SET status='rejected', reviewed_at=? WHERE id=?", (now_str(), link_id))
+    db.commit()
+    print(f"[admin] ✘ Link #{link_id} reddedildi")
+    return RedirectResponse("/admin", status_code=302)
+
 @app.post("/admin/deal/{deal_id}/toggle")
 async def admin_toggle_deal(deal_id: int, request: Request):
     require_admin(request); db = get_db()
@@ -930,9 +1275,33 @@ async def admin_delete_deal(deal_id: int, request: Request):
     db.execute("DELETE FROM deals WHERE id=?", (deal_id,)); db.commit()
     return RedirectResponse("/admin", status_code=302)
 
-@app.post("/admin/product/{product_id}/delete")
-async def admin_delete_product(product_id: int, request: Request):
-    require_admin(request); db = get_db()
+@app.post("/admin/group/{group_id}/remove/{product_id}")
+async def admin_remove_from_group(group_id: int, product_id: int, request: Request):
+    """Ürünü gruptan çıkar (ürünü silmez). Yanlış çapraz arama eşleşmelerini düzeltmek için."""
+    require_admin(request)
+    db = get_db()
+    # Sil değil, 'removed' olarak işaretle — cross_search tekrar ekleyemez (UNIQUE constraint)
+    db.execute(
+        "UPDATE product_group_members SET match_type='removed', added_at=? WHERE group_id=? AND product_id=?",
+        (now_str(), group_id, product_id)
+    )
+    # Aktif (removed olmayan) üye sayısını kontrol et
+    remaining = db.execute(
+        "SELECT COUNT(*) FROM product_group_members WHERE group_id=? AND match_type != 'removed'",
+        (group_id,)
+    ).fetchone()[0]
+    if remaining == 0:
+        db.execute("DELETE FROM product_group_members WHERE group_id=?", (group_id,))
+        db.execute("DELETE FROM product_groups WHERE id=?", (group_id,))
+        db.commit()
+        log.info(f"[admin] Ürün #{product_id} grup #{group_id}'den kaldırıldı, grup silindi")
+        return RedirectResponse("/", status_code=302)
+    db.commit()
+    log.info(f"[admin] Ürün #{product_id} grup #{group_id}'den kaldırıldı (blocklist)")
+    return RedirectResponse(f"/compare/{group_id}", status_code=302)
+
+
+def _delete_product_cascade(db, product_id: int) -> None:
     dids = [r["id"] for r in db.execute("SELECT id FROM deals WHERE product_id=?", (product_id,)).fetchall()]
     for did in dids:
         db.execute("DELETE FROM short_links WHERE deal_id=?", (did,))
@@ -940,9 +1309,21 @@ async def admin_delete_product(product_id: int, request: Request):
     db.execute("DELETE FROM deals WHERE product_id=?", (product_id,))
     db.execute("DELETE FROM price_history WHERE product_id=?", (product_id,))
     db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
+    db.execute("DELETE FROM comment_votes WHERE comment_id IN (SELECT id FROM comments WHERE product_id=?)", (product_id,))
     db.execute("DELETE FROM comments WHERE product_id=?", (product_id,))
     db.execute("DELETE FROM product_group_members WHERE product_id=?", (product_id,))
-    db.execute("DELETE FROM products WHERE id=?", (product_id,)); db.commit()
+    db.execute("DELETE FROM product_watchlist WHERE product_id=?", (product_id,))
+    db.execute("DELETE FROM article_products WHERE product_id=?", (product_id,))
+    db.execute("DELETE FROM scraper_errors WHERE product_id=?", (product_id,))
+    db.execute("DELETE FROM submit_log WHERE product_id=?", (product_id,))
+    db.execute("DELETE FROM products WHERE id=?", (product_id,))
+    db.commit()
+
+
+@app.post("/admin/product/{product_id}/delete")
+async def admin_delete_product(product_id: int, request: Request):
+    require_admin(request); db = get_db()
+    _delete_product_cascade(db, product_id)
     return RedirectResponse("/admin", status_code=302)
 
 # ── Scan state (admin progress tracking) ──────────────────────
@@ -951,89 +1332,94 @@ _SCAN_STATE: dict = {"running": False, "current": 0, "total": 0, "title": "", "p
 @app.get("/api/scan-status")
 async def scan_status(request: Request):
     require_admin(request)
-    return JSONResponse(_SCAN_STATE)
-
-async def _admin_scan_with_progress():
-    """Admin paneli için ilerleme takipli tarama."""
-    import asyncio
-    from scrapers.router import scrape_product
-    global _SCAN_STATE
-
     db = get_db()
-    pending = db.execute("""
-        SELECT sq.product_id, p.source_url, p.platform, p.title
-        FROM scan_queue sq JOIN products p ON p.id = sq.product_id
-        WHERE sq.status IN ('pending','failed')
-        ORDER BY sq.priority ASC, sq.created_at ASC
-        LIMIT 200
-    """).fetchall()
-
-    # Aktif ürünler de ekle
-    active = db.execute("""
-        SELECT id as product_id, source_url, platform, title FROM products
-        ORDER BY last_seen_at ASC LIMIT 200
-    """).fetchall()
-
-    all_items = list(pending) + [r for r in active if r["product_id"] not in {p["product_id"] for p in pending}]
-    total = len(all_items)
-
-    _SCAN_STATE.update({"running": True, "current": 0, "total": total, "title": "", "platform": "", "done": 0, "failed": 0, "errors": []})
-
-    for i, row in enumerate(all_items, 1):
-        pid      = row["product_id"]
-        url      = row["source_url"]
-        platform = row["platform"]
-        title    = row["title"] or url[:60]
-
-        _SCAN_STATE.update({"current": i, "title": title, "platform": platform})
-
-        try:
-            data = await asyncio.wait_for(scrape_product(url, platform), timeout=75)
-            if data:
-                await _save_scraped_data(pid, data)
-                _SCAN_STATE["done"] += 1
-                db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now_str(), pid))
-            else:
-                _SCAN_STATE["failed"] += 1
-                _SCAN_STATE["errors"].append({"pid": pid, "title": title, "platform": platform, "reason": "Veri alınamadı"})
-                db.execute("UPDATE scan_queue SET status='failed',updated_at=? WHERE product_id=?", (now_str(), pid))
-            db.commit()
-        except asyncio.TimeoutError:
-            _SCAN_STATE["failed"] += 1
-            _SCAN_STATE["errors"].append({"pid": pid, "title": title, "platform": platform, "reason": "Zaman aşımı (75s)"})
-            db.execute("UPDATE scan_queue SET status='failed',updated_at=? WHERE product_id=?", (now_str(), pid))
-            db.commit()
-            print(f"[admin-scan] Timeout #{pid}")
-        except Exception as e:
-            _SCAN_STATE["failed"] += 1
-            _SCAN_STATE["errors"].append({"pid": pid, "title": title, "platform": platform, "reason": str(e)[:120]})
-            print(f"[admin-scan] Hata #{pid}: {e}")
-
-        await asyncio.sleep(1.5)
-
-    _SCAN_STATE["running"] = False
-    print(f"[admin-scan] Tamamlandı — {_SCAN_STATE['done']} başarılı / {_SCAN_STATE['failed']} başarısız")
+    queue_pending = db.execute("SELECT COUNT(*) FROM scan_queue WHERE status IN ('pending','processing')").fetchone()[0]
+    return JSONResponse({**_SCAN_STATE, "queue_pending": queue_pending})
 
 @app.post("/admin/scan/run")
-async def admin_run_scan(request: Request, background_tasks: BackgroundTasks):
+async def admin_run_scan(request: Request):
+    """Stale/failed işleri pending'e çekip WSL scraper'ın almasını sağla."""
     require_admin(request)
-    if not _SCAN_STATE["running"]:
-        background_tasks.add_task(_admin_scan_with_progress)
-    return RedirectResponse("/admin?scan=started", status_code=302)
+    db = get_db()
+    # processing ama 5 dakikadır güncellenmemiş → pending'e al
+    stale = db.execute("""
+        UPDATE scan_queue SET status='pending', updated_at=?
+        WHERE status='processing' AND updated_at < datetime('now', '-5 minutes')
+    """, (now_str(),)).rowcount
+    # failed → pending'e al (WSL yeniden denesin)
+    failed = db.execute("""
+        UPDATE scan_queue SET status='pending', updated_at=?
+        WHERE status='failed'
+    """, (now_str(),)).rowcount
+    db.commit()
+    print(f"[admin-reset] stale={stale} failed={failed} → pending'e alındı")
+    return RedirectResponse("/admin", status_code=302)
+
+BULK_ADD_LIMIT = 200
+
+@app.post("/admin/bulk-add")
+async def admin_bulk_add(request: Request, background_tasks: BackgroundTasks,
+                         urls: str = Form("")):
+    require_admin(request)
+    db = get_db()
+    lines = [u.strip() for u in urls.splitlines() if u.strip()]
+    if len(lines) > BULK_ADD_LIMIT:
+        lines = lines[:BULK_ADD_LIMIT]
+
+    added, skipped, errors = 0, 0, []
+    import re as _re
+    for raw_url in lines:
+        # "Ürün Adı https://..." formatında gelirse URL kısmını çıkar
+        if not raw_url.startswith("http"):
+            m = _re.search(r"(https?://\S+)", raw_url)
+            raw_url = m.group(1) if m else raw_url
+
+        if is_short_url(raw_url):
+            raw_url = await resolve_short_url(raw_url)
+
+        platform = detect_platform(raw_url)
+        if not platform:
+            errors.append(f"Desteklenmeyen site: {raw_url[:80]}")
+            continue
+
+        clean = clean_tracking_params(raw_url, platform)
+        is_new = db.execute("SELECT id FROM products WHERE source_url=?", (clean,)).fetchone() is None
+        try:
+            product_id = enqueue_url(db, clean, platform)
+            cross_plats = [p for p in ["amazon", "trendyol", "hepsiburada", "n11"] if p != platform]
+            await _dispatch_scrape(product_id, clean, platform, background_tasks, cross_search_plats=cross_plats)
+            if is_new:
+                added += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors.append(f"{raw_url[:60]}: {exc}")
+
+    request.session["bulk_result"] = {
+        "added": added,
+        "skipped": skipped,
+        "errors": errors,
+        "total": len(lines),
+    }
+    return RedirectResponse("/admin#bulk-add", status_code=302)
 
 # ═══════════════════════════════════════════════════════════════
 # ARKA PLAN TARAMA
 # ═══════════════════════════════════════════════════════════════
 
-async def _dispatch_scrape(product_id: int, url: str, platform: str, background_tasks):
+async def _dispatch_scrape(product_id: int, url: str, platform: str, background_tasks,
+                           cross_search_plats: list = None):
     """Scraper servis varsa oraya gönder, USE_LOCAL_SCRAPER=true ise kuyruğa bırak, yoksa lokal çalıştır."""
     if SCRAPER_SERVICE_URL:
         background_tasks.add_task(_remote_scrape, product_id, url, platform)
     elif USE_LOCAL_SCRAPER:
-        # local_scraper.py ayrı süreçte çalışıp /api/pending-jobs'tan alacak
-        pass
+        # İş zaten scan_queue'ya eklendi (enqueue_url tarafından).
+        # WSL'deki local_scraper.py /api/pending-jobs'ı poll ederek çekecek.
+        log.debug(f"[dispatch] #{product_id} scan_queue'da bekliyor (USE_LOCAL_SCRAPER=true)")
     else:
         background_tasks.add_task(scrape_and_save, product_id, url, platform)
+    if cross_search_plats:
+        background_tasks.add_task(_run_cross_search, product_id, cross_search_plats)
 
 
 async def _remote_scrape(product_id: int, url: str, platform: str):
@@ -1083,99 +1469,303 @@ async def scrape_and_save(product_id: int, url: str, platform: str):
 async def pending_jobs(request: Request):
     """Local scraper bu endpoint'i polling yaparak bekleyen işleri alır."""
     key = request.headers.get("X-Api-Key", "")
-    if SCRAPER_SERVICE_KEY and key != SCRAPER_SERVICE_KEY:
-        raise HTTPException(401, "Geçersiz API anahtarı")
+    if SCRAPER_SERVICE_KEY:
+        if key != SCRAPER_SERVICE_KEY:
+            raise HTTPException(401, "Geçersiz API anahtarı")
+    elif (request.client.host if request.client else "") not in ("127.0.0.1", "::1"):
+        raise HTTPException(401, "SCRAPER_SERVICE_KEY tanımlı değil")
+    try:
+        limit = max(1, min(int(request.query_params.get("limit", 10)), 30))
+    except (ValueError, TypeError):
+        limit = 10
+    priority_param = request.query_params.get("priority")
+    extra_conds, extra_vals = [], []
+    if priority_param is not None:
+        try:
+            extra_conds.append("sq.priority = ?")
+            extra_vals.append(int(priority_param))
+        except (ValueError, TypeError):
+            pass
+    _KNOWN = {"amazon", "trendyol", "hepsiburada", "n11"}
+    platform_param = request.query_params.get("platform", "")
+    if platform_param in _KNOWN:
+        extra_conds.append("p.platform = ?")
+        extra_vals.append(platform_param)
+    extra_sql = "".join(f" AND {c}" for c in extra_conds)
     db = get_db()
-    rows = db.execute("""
-        SELECT sq.product_id, p.source_url, p.platform
-        FROM scan_queue sq
-        JOIN products p ON p.id = sq.product_id
-        WHERE sq.status = 'pending'
-        ORDER BY sq.created_at ASC
-        LIMIT 10
-    """).fetchall()
-    # Alınan işleri "processing" olarak işaretle (tekrar alınmasın)
-    ids = [r["product_id"] for r in rows]
-    if ids:
+    rows = db.execute(
+        f"""SELECT sq.id AS sq_id, sq.product_id, sq.priority, p.source_url, p.platform, p.last_seen_at
+            FROM scan_queue sq
+            JOIN products p ON p.id = sq.product_id
+            WHERE sq.status = 'pending'{extra_sql}
+            ORDER BY sq.priority ASC, sq.created_at ASC
+            LIMIT ?""",
+        extra_vals + [limit]
+    ).fetchall()
+    # Alınan işleri "processing" olarak işaretle — sq.id ile, product_id ile DEĞİL
+    sq_ids = [r["sq_id"] for r in rows]
+    if sq_ids:
         db.execute(
-            f"UPDATE scan_queue SET status='processing', updated_at=? WHERE product_id IN ({','.join('?'*len(ids))})",
-            [now_str()] + ids
+            f"UPDATE scan_queue SET status='processing', updated_at=? WHERE id IN ({','.join('?'*len(sq_ids))})",
+            [now_str()] + sq_ids
         )
         db.commit()
-    return JSONResponse([{"product_id": r["product_id"], "url": r["source_url"], "platform": r["platform"]} for r in rows])
+    return JSONResponse([{"product_id": r["product_id"], "url": r["source_url"], "platform": r["platform"], "priority": r["priority"], "last_seen_at": r["last_seen_at"]} for r in rows])
+
+
+@app.post("/api/reset-stale-jobs")
+async def reset_stale_jobs(request: Request):
+    """Processing kalan işleri pending'e döndür. force=true → süre sınırı olmadan tümünü sıfırla."""
+    key = request.headers.get("X-Api-Key", "")
+    if SCRAPER_SERVICE_KEY:
+        if key != SCRAPER_SERVICE_KEY:
+            raise HTTPException(401, "Geçersiz API anahtarı")
+    elif (request.client.host if request.client else "") not in ("127.0.0.1", "::1"):
+        raise HTTPException(401, "SCRAPER_SERVICE_KEY tanımlı değil")
+    force = (request.query_params.get("force", "false").lower() == "true")
+    db = get_db()
+    if force:
+        cur = db.execute(
+            "UPDATE scan_queue SET status='pending', updated_at=? WHERE status IN ('processing','done','failed')",
+            (now_str(),)
+        )
+    else:
+        cur = db.execute("""
+            UPDATE scan_queue SET status='pending', updated_at=?
+            WHERE status='processing' AND updated_at < datetime('now', '-10 minutes')
+        """, (now_str(),))
+    db.commit()
+    return JSONResponse({"reset": cur.rowcount, "force": force})
 
 
 @app.post("/api/scraper-webhook")
-async def scraper_webhook(request: Request):
-    """Scraper servisi (VPS) bu endpoint'e sonuçları gönderir."""
+async def scraper_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Scraper servisi webhook (timeout 5s, log metrics)."""
+    import time
+    start = time.time()
+
     key = request.headers.get("X-Webhook-Key", "")
     if WEBHOOK_KEY and key != WEBHOOK_KEY:
-        raise HTTPException(401, "Geçersiz webhook anahtarı")
+        raise HTTPException(401, "Invalid webhook key")
 
     body = await request.json()
     product_id = body.get("product_id")
-    data       = body.get("data", {})
-    url        = body.get("url", "")
-    platform   = body.get("platform", "")
+    data = body.get("data", {})
+    url = body.get("url", "")
+    platform = body.get("platform", "")
 
-    if not product_id or not data:
-        raise HTTPException(400, "product_id ve data gerekli")
+    if not product_id:
+        raise HTTPException(400, "product_id required")
 
-    if data.get("error"):
-        db = get_db()
-        db.execute("UPDATE scan_queue SET status='failed',updated_at=? WHERE product_id=?",
-                   (now_str(), product_id))
-        db.commit()
-        return {"ok": False, "error": data["error"]}
+    log.info(f"[webhook] {product_id} {platform} started ({time.time()-start:.1f}s)")
 
-    # scrape_and_save'in veri kaydetme kısmını çalıştır
-    await _save_scraped_data(product_id, data)
-    return {"ok": True}
+    # Background DB save (hızlı response)
+    background_tasks.add_task(_save_scraped_data_async, product_id, data, url, platform)
+
+    log.info(f"[webhook] {product_id} done ({time.time()-start:.1f}s)")
+    return {"ok": True, "processed": True}
+
+async def _save_scraped_data_async(product_id, data, url, platform):
+    """Background scraped data save."""
+    try:
+        await _save_scraped_data(product_id, data)
+    except Exception as e:
+        log.error(f"[webhook-bg] {product_id} error: {e}")
+
+
+def _smart_price_analysis(db, product_id: int, price: float, prev_price: float):
+    """
+    İnsan gibi düşünen fiyat analizi.
+    Returns: (is_genuine_deal: bool, ref_price: float, reason: str)
+    """
+    rows = db.execute(
+        "SELECT price_value, scraped_at FROM price_history "
+        "WHERE product_id=? AND scraped_at >= datetime('now','-90 days') "
+        "ORDER BY scraped_at ASC", (product_id,)
+    ).fetchall()
+    prices = [r[0] for r in rows]
+
+    if len(prices) < 3:
+        return price < prev_price, prev_price, "veri az"
+
+    sorted_p = sorted(prices)
+    median = sorted_p[len(sorted_p) // 2]
+
+    # 1. Outlier tespiti: medyandan %45+ sapan ve ≤2 kez görülen fiyatları çıkar
+    def _seen_count(p, ps):
+        return sum(1 for x in ps if abs(x - p) / max(p, 1) < 0.03)
+
+    clean = [p for p in prices if
+             abs(p - median) / max(median, 1) <= 0.45 or _seen_count(p, prices) > 2]
+    if not clean:
+        clean = prices
+    clean_sorted = sorted(clean)
+
+    # 2. "Normal fiyat" = en çok tekrar eden fiyat aralığı (±%5 tolerans)
+    best_p, best_cnt = clean[0], 0
+    for p in clean:
+        cnt = sum(1 for x in clean if abs(x - p) / max(p, 1) < 0.05)
+        if cnt > best_cnt:
+            best_cnt, best_p = cnt, p
+    modal_price = best_p
+
+    # 3. Yapay enflasyon tespiti: son 14 günde fiyat suni yükseldiyse
+    #    spike öncesi kararlı fiyatı referans al
+    cutoff_14 = db.execute("SELECT datetime('now','-14 days')").fetchone()[0]
+    recent_14 = [r[0] for r in rows if r[1] >= cutoff_14]
+    pre_spike_price = None
+    if len(recent_14) >= 2 and recent_14[-1] > prev_price:
+        # Mevcut prev_price (son kayıt) spike ise, ondan önceki kararlı fiyatı bul
+        older = [p for p in clean if p < prev_price * 0.90]
+        if older:
+            pre_spike_price = max(older)
+
+    # Referans fiyat: spike tespiti > modal > max(clean)
+    ref_price = pre_spike_price or modal_price or max(clean_sorted)
+    if ref_price <= price:
+        ref_price = prev_price
+
+    # 4. Gerçek indirim: şu anki fiyat temiz geçmişin alt %30'unda mı?
+    p30 = clean_sorted[max(0, int(len(clean_sorted) * 0.30) - 1)]
+    if price >= p30:
+        return False, ref_price, f"tarihsel dusuk degil (esik={p30:.0f})"
+
+    return True, ref_price, "gercek indirim"
 
 
 async def _save_scraped_data(product_id: int, data: dict):
-    """Scraping sonucunu veritabanına kaydet (hem lokal hem webhook için ortak)."""
+    """Scraping sonucunu işle: fiyat geçmişi, deal yönetimi, Telegram + email bildirimleri."""
     db = get_db()
+    now = now_str()
+    stock = data.get("stock")
+
     db.execute("""UPDATE products SET title=COALESCE(?,title), image_url=COALESCE(?,image_url),
         description=COALESCE(?,description), rating=COALESCE(?,rating),
         review_count=COALESCE(?,review_count), brand=COALESCE(?,brand),
         barcode=COALESCE(?,barcode), stock=COALESCE(?,stock), last_seen_at=? WHERE id=?""",
                (data.get("title"), data.get("image_url"), data.get("description"),
                 data.get("rating"), data.get("review_count"), data.get("brand"),
-                data.get("barcode"), data.get("stock"), now_str(), product_id))
+                data.get("barcode"), stock, now, product_id))
 
     price = data.get("price")
-    if price:
-        prev = db.execute("SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
-                          (product_id,)).fetchone()
-        if prev and prev["price_value"] == price:
+    if not price or price <= 0:
+        db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now, product_id))
+        db.commit()
+        return
+
+    # Stok yoksa fiyatı kaydet ama deal oluşturma
+    stock_lower = (stock or "").lower()
+    if stock == "Stok Yok" or any(kw in stock_lower for kw in [
+        "mevcut değil", "tükendi", "stokta yok", "out of stock", "sold out", "unavailable"
+    ]):
+        prev_s = db.execute("SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
+                            (product_id,)).fetchone()
+        if not prev_s or prev_s["price_value"] != price:
+            db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,?,?)",
+                       (product_id, price, "TRY", now))
+        for d in db.execute("SELECT id FROM deals WHERE product_id=? AND active=1", (product_id,)).fetchall():
+            db.execute("UPDATE deals SET active=0, expires_at=? WHERE id=?", (now, d["id"]))
+            log.info(f"[webhook] ⏹ Deal #{d['id']} kapatıldı — stok yok")
+        db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now, product_id))
+        db.commit()
+        return
+
+    prev = db.execute("SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
+                      (product_id,)).fetchone()
+    if prev and prev["price_value"] == price:
+        db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now, product_id))
+        db.commit()
+        return
+
+    db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,?,?)",
+               (product_id, price, "TRY", now))
+
+    if prev and prev["price_value"] and price < prev["price_value"]:
+        is_deal, old_price, reason = _smart_price_analysis(db, product_id, price, prev["price_value"])
+        if not is_deal:
+            db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now, product_id))
             db.commit()
+            log.info(f"[webhook] ⏭ #{product_id} deal degil: {reason}")
             return
-        db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,?,?)",
-                   (product_id, price, "TRY", now_str()))
-        if prev and prev["price_value"] and price < prev["price_value"]:
-            pct = (prev["price_value"] - price) / prev["price_value"] * 100
-            if pct >= 5:
-                existing = db.execute("SELECT id FROM deals WHERE product_id=? AND status IN ('pending','approved') ORDER BY id DESC LIMIT 1",
-                                      (product_id,)).fetchone()
-                if existing:
-                    db.execute("UPDATE deals SET old_price=?,new_price=?,discount_pct=?,created_at=? WHERE id=?",
-                               (prev["price_value"], price, round(pct, 1), now_str(), existing["id"]))
-                else:
-                    slug = make_short_slug()
-                    cur = db.execute("INSERT INTO deals(product_id,old_price,new_price,discount_pct,active,status,created_at) VALUES(?,?,?,?,0,'pending',?)",
-                                     (product_id, prev["price_value"], price, round(pct, 1), now_str()))
+
+        pct = (old_price - price) / old_price * 100
+
+        if pct > 90:
+            log.warning(f"[webhook] ⚠ #{product_id} %{pct:.0f} indirim şüpheli (>90), deal oluşturulmadı")
+        elif stock != "Stokta Var" and pct > 75:
+            log.warning(f"[webhook] ⚠ #{product_id} %{pct:.0f} indirim + stok={stock!r} şüpheli, atlandı")
+        elif pct >= 5:
+            existing_deal = db.execute("""
+                SELECT d.id, sl.slug FROM deals d
+                LEFT JOIN short_links sl ON sl.deal_id = d.id
+                WHERE d.product_id=? AND d.status IN ('pending','approved')
+                ORDER BY d.id DESC LIMIT 1
+            """, (product_id,)).fetchone()
+
+            if existing_deal:
+                deal_id = existing_deal["id"]
+                db.execute("UPDATE deals SET old_price=?,new_price=?,discount_pct=?,created_at=? WHERE id=?",
+                           (old_price, price, round(pct, 1), now, deal_id))
+                if not existing_deal["slug"]:
                     db.execute("INSERT INTO short_links(deal_id,slug,created_at) VALUES(?,?,?)",
-                               (cur.lastrowid, slug, now_str()))
-                db.commit()
+                               (deal_id, make_short_slug(), now))
+            else:
+                slug = make_short_slug()
+                cart_disc = 1 if data.get("cart_discount") else 0
+                cur = db.execute(
+                    "INSERT INTO deals(product_id,old_price,new_price,discount_pct,active,status,cart_discount,created_at) "
+                    "VALUES(?,?,?,?,0,'pending',?,?)",
+                    (product_id, old_price, price, round(pct, 1), cart_disc, now)
+                )
+                deal_id = cur.lastrowid
+                db.execute("INSERT INTO short_links(deal_id,slug,created_at) VALUES(?,?,?)", (deal_id, slug, now))
 
-        for deal in db.execute("SELECT id, new_price FROM deals WHERE product_id=? AND active=1",
-                                (product_id,)).fetchall():
-            if price > deal["new_price"] * 1.02:
-                db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?",
-                           (now_str(), deal["id"]))
+            db.commit()
+            log.info(f"[webhook] 📋 Deal #{deal_id} onay bekliyor: #{product_id} %{pct:.1f}")
 
-    db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now_str(), product_id))
+            if not existing_deal:
+                try:
+                    pending_count = db.execute("SELECT COUNT(*) FROM deals WHERE status='pending'").fetchone()[0]
+                    prod_row = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+                    if prod_row:
+                        prod_dict = dict(prod_row)
+                        prod_dict["deal_id"] = deal_id
+                        await notify_pending_approval(deal_id, prod_dict, price, old_price, round(pct, 1), pending_count)
+                except Exception as e:
+                    log.warning(f"[webhook] Telegram bildirimi hatası: {e}")
+
+                try:
+                    import os as _os
+                    site_url = _os.getenv("SITE_URL", "https://firsatvakti.com")
+                    prod_t = db.execute("SELECT title FROM products WHERE id=?", (product_id,)).fetchone()
+                    title_str = (prod_t["title"] or f"Ürün #{product_id}") if prod_t else f"Ürün #{product_id}"
+                    group_row = db.execute("SELECT group_id FROM product_group_members WHERE product_id=?",
+                                          (product_id,)).fetchone()
+                    gids = [r["product_id"] for r in db.execute(
+                        "SELECT product_id FROM product_group_members WHERE group_id=?",
+                        (group_row["group_id"],)).fetchall()] if group_row else [product_id]
+                    ph = ",".join("?" * len(gids))
+                    watchers = db.execute(
+                        f"SELECT DISTINCT u.email, u.username FROM product_watchlist pw "
+                        f"JOIN users u ON pw.user_id=u.id WHERE pw.product_id IN ({ph})", gids
+                    ).fetchall()
+                    for w in watchers:
+                        try:
+                            send_price_alert(to=w["email"], username=w["username"], product_title=title_str,
+                                            old_price=old_price, new_price=price, pct=pct,
+                                            deal_url=f"{site_url}/deal/{deal_id}")
+                        except Exception as e:
+                            log.warning(f"[webhook] Email hatası ({w['email']}): {e}")
+                except Exception as e:
+                    log.warning(f"[webhook] Watchlist bildirimi hatası: {e}")
+
+    for deal in db.execute("SELECT id, new_price FROM deals WHERE product_id=? AND active=1",
+                           (product_id,)).fetchall():
+        if price > deal["new_price"] * 1.02:
+            db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?", (now, deal["id"]))
+            log.info(f"[webhook] ⏹ Deal #{deal['id']} kapandı — fiyat yükseldi")
+
+    db.execute("UPDATE scan_queue SET status='done',updated_at=? WHERE product_id=?", (now, product_id))
     db.commit()
 
 
@@ -1193,6 +1783,18 @@ async def api_stats():
     return dict(get_db().execute("""SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,
         (SELECT COUNT(*) FROM products) as products, (SELECT COUNT(*) FROM clicks) as total_clicks,
         (SELECT COUNT(*) FROM product_groups) as comparisons""").fetchone())
+
+@app.get("/health")
+async def health():
+    """Uptime monitörü / load balancer için sağlık kontrolü."""
+    try:
+        db = get_db()
+        db.execute("SELECT 1").fetchone()
+        db_status = "ok"
+    except Exception as e:
+        db_status = f"error: {e}"
+    return JSONResponse({"status": "ok" if db_status == "ok" else "degraded", "db": db_status})
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

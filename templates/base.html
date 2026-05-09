@@ -4,6 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}FırsatVakti — En İyi Fırsatlar{% endblock %}</title>
+  <meta name="description" content="{% block description %}Amazon, Trendyol, N11 ve Hepsiburada'daki fiyat düşüşlerini anlık takip et. Ücretsiz fiyat karşılaştırma ve indirim bildirimi servisi.{% endblock %}">
+  <meta property="og:title" content="{% block og_title %}FırsatVakti — Anlık Fırsat Takibi{% endblock %}">
+  <meta property="og:description" content="{% block og_description %}Amazon, Trendyol, N11 ve Hepsiburada'daki en iyi fırsatları kaçırma.{% endblock %}">
+  <meta property="og:type" content="{{ meta.og_type if meta and meta.og_type else 'website' }}">
+  <meta property="og:site_name" content="FırsatVakti">
+  <meta property="og:url" content="https://firsatvakti.com{{ request.url.path }}">
+  {% if meta and meta.og_image %}<meta property="og:image" content="{{ meta.og_image }}">{% endif %}
+  <meta name="twitter:card" content="{{ 'summary_large_image' if meta and meta.og_image else 'summary' }}">
+  <meta name="twitter:title" content="{% block twitter_title %}{{ meta.title if meta and meta.title else 'FırsatVakti' }}{% endblock %}">
+  <meta name="twitter:description" content="{{ meta.description if meta and meta.description else '' }}">
+  {% if meta and meta.og_image %}<meta name="twitter:image" content="{{ meta.og_image }}">{% endif %}
+  <link rel="canonical" href="https://firsatvakti.com{{ request.url.path }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
@@ -184,6 +196,27 @@
     /* Tema geçiş animasyonu */
     *, *::before, *::after { transition: background-color .2s, border-color .2s, color .1s; }
     img, svg, .btn-add, .card-btn, .fire-badge, .plat-dot, .user-avatar, .ticker-wrap { transition: none !important; }
+
+    /* MOBİL NAVBAR */
+    @media(max-width:640px) {
+      .nav-blog-link { display: none !important; }
+      .nav-links { gap: 4px; }
+      .btn-add { padding: 8px 12px; font-size: 13px; }
+      .nav-link { padding: 7px 10px; font-size: 13px; }
+    }
+
+    /* DEALS GRID */
+    .deals-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
+
+    /* MOBİL DEALS GRID — 3 sütun */
+    @media(max-width:640px) {
+      .deals-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .deals-grid .card-body { padding: 8px; }
+      .deals-grid .card-title { font-size: 11px; min-height: 32px; }
+      .deals-grid .card-price { gap: 4px; margin-bottom: 8px; }
+      .deals-grid .card-btn { font-size: 11px; padding: 7px 4px; }
+      .deals-grid .card-img-wrap img { padding: 8px; }
+    }
   </style>
 
   <!-- Tema: sayfa yüklenmeden önce uygula (flash önleme) -->
@@ -193,6 +226,7 @@
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
+  {% block extra_head %}{% endblock %}
 </head>
 <body>
 
@@ -237,7 +271,7 @@
     </div>
 
     <div class="nav-links">
-      <a href="/blog" class="nav-link">📝 Blog</a>
+      <a href="/blog" class="nav-link nav-blog-link">📝 Blog</a>
       <a href="/submit" class="btn-add">
         <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
         Link Ekle
@@ -384,6 +418,25 @@ function toggleTheme() {
 (function(){
   var t = localStorage.getItem('fv-theme') || 'light';
   document.getElementById('themeIcon').textContent = t === 'dark' ? '☀️' : '🌙';
+})();
+
+// CSRF: tüm POST formlarına otomatik hidden input ekle
+(function(){
+  function getCookie(name){
+    var v='; '+document.cookie, p=v.split('; '+name+'=');
+    if(p.length===2) return p.pop().split(';').shift();
+  }
+  document.addEventListener('DOMContentLoaded',function(){
+    var token=getCookie('csrftoken');
+    if(!token) return;
+    document.querySelectorAll('form[method="post"],form[method="POST"]').forEach(function(f){
+      if(!f.querySelector('input[name="csrf_token"]')){
+        var inp=document.createElement('input');
+        inp.type='hidden'; inp.name='csrf_token'; inp.value=token;
+        f.appendChild(inp);
+      }
+    });
+  });
 })();
 </script>
 </body>

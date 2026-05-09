@@ -1,5 +1,26 @@
 {% extends "base.html" %}
-{% block title %}{{ deal.title or 'Fırsat' }} — FırsatVakti{% endblock %}
+{% block title %}%{{ deal.discount_pct|int }} İndirim — {{ (deal.title or 'Fırsat')[:60] }} | FırsatVakti{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org/",
+  "@type": "Product",
+  "name": {{ deal.title | tojson }},
+  {% if deal.image_url %}"image": {{ deal.image_url | tojson }},{% endif %}
+  "description": "{{ deal.platform|title }}'da %{{ deal.discount_pct|int }} indirim. {{ (deal.title or '')|replace('"','') }}",
+  {% if deal.rating %}"aggregateRating": {"@type":"AggregateRating","ratingValue":"{{ '%.1f'|format(deal.rating) }}"{% if deal.review_count %},"reviewCount":"{{ deal.review_count }}"{% endif %}},{% endif %}
+  "offers": {
+    "@type": "Offer",
+    "url": "https://firsatvakti.com/deal/{{ deal.id }}",
+    "priceCurrency": "TRY",
+    "price": "{{ '%.2f'|format(deal.new_price) }}",
+    "availability": "{% if deal.active %}https://schema.org/InStock{% else %}https://schema.org/OutOfStock{% endif %}",
+    "seller": {"@type": "Organization", "name": {{ deal.platform|title | tojson }}}
+  }
+}
+</script>
+{% endblock %}
 
 {% block content %}
 
@@ -61,13 +82,13 @@
       {% endif %}
       <div style="background:linear-gradient(135deg,{% if deal.active %}#fff8f6{% else %}#f5f5f5{% endif %},#fff);border:1.5px solid {% if deal.active %}rgba(244,80,28,.15){% else %}var(--border){% endif %};border-radius:16px;padding:20px 24px;margin-bottom:20px;{% if not deal.active %}opacity:.6;{% endif %}">
         <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
-          <span style="font-family:'Bebas Neue',sans-serif;font-size:44px;color:{% if deal.active %}var(--fire){% else %}var(--muted){% endif %};line-height:1;letter-spacing:.5px;{% if not deal.active %}text-decoration:line-through;{% endif %}">{{ "%.0f"|format(deal.new_price) }}<span style="font-size:20px;"> TL</span></span>
-          <span style="font-size:16px;color:var(--muted);text-decoration:line-through;font-weight:500;">{{ "%.0f"|format(deal.old_price) }} TL</span>
+          <span style="font-family:'Bebas Neue',sans-serif;font-size:44px;color:{% if deal.active %}var(--fire){% else %}var(--muted){% endif %};line-height:1;letter-spacing:.5px;{% if not deal.active %}text-decoration:line-through;{% endif %}">{{ deal.new_price|price_tr }}<span style="font-size:20px;"> TL</span></span>
+          <span style="font-size:16px;color:var(--muted);text-decoration:line-through;font-weight:500;">{{ deal.old_price|price_tr }} TL</span>
           <span style="background:{% if deal.active %}linear-gradient(135deg,var(--fire),var(--fire2)){% else %}#9ca3af{% endif %};color:#fff;font-family:'Bebas Neue',sans-serif;font-size:18px;padding:4px 12px;border-radius:9px;letter-spacing:.5px;">-%{{ deal.discount_pct|int }}</span>
         </div>
         {% if deal.active %}
         <div style="font-size:14px;color:#16a34a;font-weight:700;">
-          🎉 {{ "%.0f"|format(deal.old_price - deal.new_price) }} TL tasarruf
+          🎉 {{ (deal.old_price - deal.new_price)|price_tr }} TL tasarruf
         </div>
         {% else %}
         <div style="font-size:13px;color:var(--muted);font-weight:600;">Bu indirim artık geçerli değil</div>
@@ -133,14 +154,14 @@
         <svg id="priceChart" width="100%" height="100%" style="overflow:visible;"></svg>
         <div id="chartTip" style="display:none;position:absolute;background:var(--text);color:#fff;font-size:12px;font-weight:700;padding:5px 9px;border-radius:7px;pointer-events:none;white-space:nowrap;z-index:10;box-shadow:0 4px 14px rgba(0,0,0,.2);"></div>
         <!-- Y ekseni etiketleri -->
-        <div style="position:absolute;left:4px;top:18px;font-size:10px;color:var(--muted);font-weight:600;">{{ "%.0f"|format(max_p) }}</div>
-        <div style="position:absolute;left:4px;bottom:30px;font-size:10px;color:#16a34a;font-weight:600;">{{ "%.0f"|format(min_p) }}</div>
+        <div style="position:absolute;left:4px;top:18px;font-size:10px;color:var(--muted);font-weight:600;">{{ max_p|price_tr }}</div>
+        <div style="position:absolute;left:4px;bottom:30px;font-size:10px;color:#16a34a;font-weight:600;">{{ min_p|price_tr }}</div>
       </div>
 
       <!-- Min / Max bilgisi -->
       <div style="display:flex;align-items:center;gap:16px;margin-top:14px;font-size:12px;font-weight:600;">
-        <span style="color:#16a34a;">🟢 En düşük: {{ "%.0f"|format(min_p) }} TL</span>
-        <span style="color:var(--muted);">🔴 En yüksek: {{ "%.0f"|format(max_p) }} TL</span>
+        <span style="color:#16a34a;">🟢 En düşük: {{ min_p|price_tr }} TL</span>
+        <span style="color:var(--muted);">🔴 En yüksek: {{ max_p|price_tr }} TL</span>
         <span style="color:var(--muted);margin-left:auto;font-size:11px;">{{ history|length }} fiyat noktası</span>
       </div>
     </div>

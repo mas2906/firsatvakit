@@ -101,7 +101,15 @@
     <!-- SAĞ: TAKİP EDİLEN ÜRÜNLER -->
     <div style="grid-column:2/3;">
       <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
-        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 6px;">📦 TAKİP ETTİĞİM ÜRÜNLER</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px;">
+          <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">📦 TAKİP ETTİĞİM ÜRÜNLER</h2>
+          <a href="/watchlist" style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;">
+            🔔 Fiyat Takip Listem
+            {% if watchlist_count %}
+            <span style="background:rgba(255,255,255,0.25);border-radius:6px;padding:1px 7px;">{{ watchlist_count }}</span>
+            {% endif %}
+          </a>
+        </div>
         <p style="font-size:13px;color:var(--muted);margin:0 0 20px;font-weight:500;">Eklediğin ürünlerin güncel fiyatları</p>
 
         {% if tracked %}
@@ -130,7 +138,7 @@
               </span>
               <!-- Fiyat -->
               {% if p.current_price %}
-              <span style="font-size:12px;font-weight:700;color:var(--text);">{{ "%.0f"|format(p.current_price) }} TL</span>
+              <span style="font-size:12px;font-weight:700;color:var(--text);">{{ p.current_price|price_tr }} TL</span>
               {% endif %}
               <!-- Fırsat varsa -->
               {% if p.deal_active and p.discount_pct %}

@@ -9,6 +9,7 @@
 
   <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:32px;">
     <form action="/admin/article/save" method="post">
+      <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrftoken', '') }}">
       {% if article %}<input type="hidden" name="article_id" value="{{ article.id }}">{% endif %}
 
       <div style="margin-bottom:18px;">

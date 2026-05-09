@@ -55,7 +55,12 @@ def _n11_affiliate(url: str) -> str:
     """N11 affiliate linki."""
     parsed = urlparse(url)
     params = parse_qs(parsed.query, keep_blank_values=False)
-    params["partnerId"] = [N11_AFFILIATE_ID]
+    # magaza= parametresini kaldır — affiliate link her zaman genel ürün sayfasına gitsin
+    for k in list(params.keys()):
+        if k.lower() in {"magaza", "magaza_id", "seller", "sellerid"}:
+            del params[k]
+    partner_id = N11_AFFILIATE_ID.strip()
+    params["partnerId"] = [partner_id]
     new_query = urlencode(params, doseq=True)
     return urlunparse((
         parsed.scheme, parsed.netloc, parsed.path,

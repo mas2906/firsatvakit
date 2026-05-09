@@ -1,810 +1,652 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Hepsiburada scraper — güçlendirilmiş çok katmanlı yaklaşım.
-
-Katmanlar:
-1) Dahili JSON API (SKU varsa)
-2) curl_cffi (gerçek Chrome TLS fingerprint)
-3) httpx (yalnızca zayıf fallback)
-4) Playwright persistent context + warmup
-
-Not:
-- Bu sürüm anti-bot engellerini "garanti" aşmaz.
-- Ama istek ritmi, session ısınması ve fallback zinciri iyileştirildi.
-"""
 
 import re
 import json
-import time
-import importlib.util
-import random
 import asyncio
-from pathlib import Path
+import random
+import logging
 from typing import Optional
-
-import httpx
 from bs4 import BeautifulSoup
-from scrapers.utils import UA_POOL, parse_price_tr, normalize_image_url
 
-try:
-    from curl_cffi.requests import AsyncSession as CurlSession
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    CURL_CFFI_AVAILABLE = False
-    print("[hepsiburada] ⚠ curl_cffi yüklü değil → pip install curl_cffi")
-
-HTTPX_HTTP2_AVAILABLE = importlib.util.find_spec("h2") is not None
-if not HTTPX_HTTP2_AVAILABLE:
-    print("[hepsiburada] ⚠ h2 yüklü değil → httpx HTTP/1.1 modunda çalışacak")
-
-
-HB_SEMAPHORE = asyncio.Semaphore(1)
-HB_LAST_REQUEST_TS = 0.0
-HB_MIN_DELAY = 2.5
-HB_MAX_DELAY = 6.0
-HB_STATE_DIR = Path(".hb_browser_state")
-HB_STATE_DIR.mkdir(exist_ok=True)
-
-
-def _hb_normalize_image(raw: str | None) -> Optional[str]:
-    """Hepsiburada görsel URL'lerini normalize eder."""
-    if not raw:
-        return None
-    raw = raw.strip()
-    if raw.startswith("//"):
-        return "https:" + raw
-    if raw.startswith("http"):
-        return raw
-    # /s/... → productimages CDN'e çevir
-    if raw.startswith("/s/"):
-        return f"https://productimages.hepsiburada.net{raw}"
-    return None
-
-
-async def scrape_hepsiburada(url: str) -> Optional[dict]:
-    await _hb_wait_turn()
-    sku = _extract_sku(url)
-
-    if sku:
-        print(f"[hepsiburada] SKU={sku} → API deneniyor...")
-        data = await _via_api(sku)
-        if data:
-            if not data.get("title"):
-                data["title"] = _title_from_url(url)
-            print(f"[hepsiburada/api] ✔ title={data['title']!r} price={data['price']}")
-            return data
-
-    if CURL_CFFI_AVAILABLE:
-        print("[hepsiburada] API başarısız → curl_cffi deneniyor...")
-        data = await _via_curl_cffi(url)
-        if data:
-            if not data.get("title"):
-                data["title"] = _title_from_url(url)
-            print(f"[hepsiburada/curl_cffi] ✔ title={data['title']!r} price={data['price']}")
-            return data
-    else:
-        print("[hepsiburada] curl_cffi yüklü değil.")
-
-    print("[hepsiburada] curl_cffi başarısız/yok → httpx deneniyor...")
-    data = await _via_httpx(url)
-    if data:
-        if not data.get("title"):
-            data["title"] = _title_from_url(url)
-        print(f"[hepsiburada/httpx] ✔ title={data['title']!r} price={data['price']}")
-        return data
-
-    print("[hepsiburada] httpx başarısız → Playwright deneniyor...")
-    data = await _via_playwright(url)
-    if data:
-        if not data.get("title"):
-            data["title"] = _title_from_url(url)
-        print(f"[hepsiburada/playwright] ✔ title={data['title']!r} price={data['price']}")
-        return data
-
-    print("[hepsiburada] ✗ Tüm yöntemler başarısız.")
-    return None
-
-
-def _title_from_url(url: str) -> str:
-    """URL slug'ından okunabilir başlık üret. Son çare fallback."""
-    path = url.split("?")[0].rstrip("/").split("/")[-1]
-    # pm-HB... kısmını kaldır
-    path = re.sub(r"-pm-HB[A-Z0-9]+$", "", path, flags=re.IGNORECASE)
-    title = path.replace("-", " ").title()
-    return title if len(title) > 5 else ""
-
-
-def _extract_sku(url: str) -> Optional[str]:
-    """URL'den HB SKU çıkar. Format: HBC00005HO0L2 (alfanümerik)."""
-    m = re.search(r"pm-(HB[A-Z0-9]{8,})", url) or re.search(r"(HB[A-Z0-9]{8,})", url)
-    return m.group(1) if m else None
-
-
-async def _hb_wait_turn() -> None:
-    global HB_LAST_REQUEST_TS
-    async with HB_SEMAPHORE:
-        now = time.monotonic()
-        elapsed = now - HB_LAST_REQUEST_TS
-        target_delay = random.uniform(HB_MIN_DELAY, HB_MAX_DELAY)
-        wait_needed = target_delay - elapsed
-        if wait_needed > 0:
-            await asyncio.sleep(wait_needed)
-        HB_LAST_REQUEST_TS = time.monotonic()
-
-
-def _is_blocked(text: str) -> bool:
-    if not text:
-        return False
-    t = text.lower()
-    markers = [
-        "hbblockandcaptcha",
-        "captcha",
-        "access denied",
-        "forbidden",
-        "/captcha/",
-        "robot olmadığınızı",
-        "robot olmadığınıza",
-    ]
-    return any(marker in t for marker in markers)
-
-
-def _parse_html(soup: BeautifulSoup) -> tuple:
-    title = price = image_url = rating = None
-
-    # ── 1) __NEXT_DATA__ (en güvenilir kaynak) ──────────────
-    next_data = _extract_next_data(soup)
-    if next_data:
-        title, price, image_url, rating = _parse_next_data(next_data)
-        if title and price:
-            return title, price, image_url, rating
-
-    # ── 2) window.__INITIAL_STATE__ veya hbProductDetail ────
-    for script in soup.find_all("script"):
-        txt = script.string or ""
-        # window.__INITIAL_STATE__
-        if "__INITIAL_STATE__" in txt or "hbProductDetail" in txt:
-            t, p, i, r = _parse_state_script(txt)
-            title = title or t
-            price = price or p
-            image_url = image_url or i
-            rating = rating or r
-
-    # ── 3) JSON-LD ─────────────────────────────────────────
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            raw = script.string or script.get_text() or ""
-            if not raw.strip():
-                continue
-            data = json.loads(raw)
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        t, p, i, r = _extract_jsonld_product(item)
-                        title = title or t
-                        price = price or p
-                        image_url = image_url or i
-                        rating = rating or r
-            elif isinstance(data, dict):
-                t, p, i, r = _extract_jsonld_product(data)
-                title = title or t
-                price = price or p
-                image_url = image_url or i
-                rating = rating or r
-        except Exception:
-            pass
-
-    # ── 4) HTML selektörleri (fallback) ────────────────────
-    if not title:
-        for sel in [
-            "h1.product-name",
-            "h1[data-test-id='product-name']",
-            "h1[data-test-id='title']",
-            "h1[itemprop='name']",
-            "span[data-test-id='product-name']",
-            "[class*='product-name']",
-            "[class*='pdp-product-title']",
-            "[class*='product-title']",
-            "meta[property='og:title']",
-            "meta[name='twitter:title']",
-            "h1",
-        ]:
-            el = soup.select_one(sel)
-            if el:
-                t = el.get("content") if el.name == "meta" else el.get_text(strip=True)
-                if t and len(t) > 3:
-                    title = t
-                    break
-
-    if not price:
-        for sel in [
-            "[data-test-id='price-current-price']",
-            "[data-test-id='default-price']",
-            "[data-test-id='final-price']",
-            "span[itemprop='price']",
-            "[itemprop='price']",
-            "[class*='price-value']",
-            "[class*='currentPrice']",
-            "[class*='product-price'] span",
-        ]:
-            el = soup.select_one(sel)
-            if el:
-                val = el.get("content") or el.get_text(" ", strip=True)
-                price = parse_price_tr(val)
-                if price and price > 0:
-                    break
-
-    if not image_url:
-        for sel in [
-            "img#ht-product-picture",
-            "img.product-image",
-            "img[itemprop='image']",
-            "img[data-test-id='product-image-image']",
-            "img[class*='product']",
-            "meta[property='og:image']",
-        ]:
-            el = soup.select_one(sel)
-            if el:
-                if el.name == "meta":
-                    raw = el.get("content")
-                else:
-                    raw = el.get("src") or el.get("data-src") or el.get("data-original")
-                image_url = _hb_normalize_image(raw)
-                if image_url:
-                    break
-
-    # ── 5) productimages.hepsiburada.net regex fallback ───
-    if not image_url:
-        html_text = str(soup)
-        # Büyük boyutlu görseli tercih et (424-600), yoksa herhangi birini al
-        m = re.search(
-            r'(https://productimages\.hepsiburada\.net/s/\d+/424-600/[^\s"\'<>]+\.jpg)(?:/format:webp)?',
-            html_text
-        )
-        if not m:
-            m = re.search(
-                r'(https://productimages\.hepsiburada\.net/s/\d+/\d+-\d+/[^\s"\'<>]+\.jpg)(?:/format:webp)?',
-                html_text
-            )
-        if m:
-            image_url = m.group(1)
-
-    # ── 6) Regex fallback — fiyat HTML'de gizliyse ────────
-    if not price:
-        html_text = str(soup)
-        m = re.search(r'"(?:price|salePrice|finalPrice|currentPrice)"[:\s]*(\d+(?:\.\d+)?)', html_text)
-        if m:
-            try:
-                p = float(m.group(1))
-                price = p / 100 if p > 100000 else p
-            except:
-                pass
-
-    return title, price, image_url, rating
-
-
-def _extract_next_data(soup: BeautifulSoup) -> Optional[dict]:
-    """__NEXT_DATA__ script tag'inden JSON çıkar."""
-    script = soup.find("script", {"id": "__NEXT_DATA__"})
-    if script and script.string:
-        try:
-            return json.loads(script.string)
-        except:
-            pass
-    # id olmadan da dene
-    for s in soup.find_all("script"):
-        txt = s.string or ""
-        if '"props":' in txt and '"pageProps":' in txt and len(txt) > 500:
-            try:
-                return json.loads(txt)
-            except:
-                pass
-    return None
-
-
-def _parse_next_data(data: dict) -> tuple:
-    """__NEXT_DATA__ JSON'undan ürün bilgisi çıkar."""
-    title = price = image_url = rating = None
-
-    try:
-        # props.pageProps altında ürün verisi
-        page_props = data.get("props", {}).get("pageProps", {})
-
-        # Hepsiburada farklı key'ler kullanabiliyor
-        product = (
-            page_props.get("product") or
-            page_props.get("productDetail") or
-            page_props.get("initialProduct") or
-            page_props.get("data", {}).get("product") if isinstance(page_props.get("data"), dict) else None
-        )
-
-        if not product and isinstance(page_props, dict):
-            # Derin arama: herhangi bir "product" key'i
-            product = _deep_find_key(page_props, ["product", "productDetail", "item"])
-
-        if not isinstance(product, dict):
-            return title, price, image_url, rating
-
-        title = (product.get("name") or product.get("displayName") or
-                 product.get("productName") or product.get("title") or
-                 product.get("shortName") or product.get("fullName"))
-
-        # Fiyat — birçok olası path
-        price = _extract_hb_price(product)
-
-        # Görsel
-        images = product.get("images") or product.get("productImages") or []
-        if isinstance(images, list) and images:
-            first = images[0]
-            if isinstance(first, dict):
-                raw = first.get("url") or first.get("src") or first.get("path") or first.get("original")
-            elif isinstance(first, str):
-                raw = first
-            else:
-                raw = None
-            image_url = _hb_normalize_image(raw)
-
-        if not image_url:
-            image_url = _hb_normalize_image(
-                product.get("image") or product.get("imageUrl") or product.get("mainImage")
-            )
-
-        # Rating
-        rating_val = product.get("averageRating") or product.get("rating")
-        if rating_val:
-            try:
-                rating = float(str(rating_val).replace(",", "."))
-            except:
-                pass
-
-    except Exception as e:
-        print(f"[hepsiburada] __NEXT_DATA__ parse hatası: {e}")
-
-    return title, price, image_url, rating
-
-
-def _extract_hb_price(product: dict) -> Optional[float]:
-    """Hepsiburada JSON'undan fiyat çıkar — birçok path dener."""
-
-    # Direkt fiyat alanları
-    for key in ["salePrice", "price", "finalPrice", "currentPrice",
-                "discountedPrice", "displayPrice"]:
-        val = product.get(key)
-        if val not in (None, "", 0):
-            try:
-                p = float(str(val).replace(",", "."))
-                return p / 100 if p > 100000 else p
-            except:
-                pass
-
-    # listings içinden
-    listings = product.get("listings") or product.get("variants") or []
-    if isinstance(listings, list):
-        for lst in listings:
-            if not isinstance(lst, dict):
-                continue
-            for key in ["price", "finalPrice", "salePrice", "originalPrice"]:
-                val = lst.get(key)
-                if val not in (None, "", 0):
-                    try:
-                        p = float(str(val).replace(",", "."))
-                        return p / 100 if p > 100000 else p
-                    except:
-                        pass
-
-    # offers altında
-    offers = product.get("offers") or {}
-    if isinstance(offers, list) and offers:
-        offers = offers[0]
-    if isinstance(offers, dict):
-        for key in ["price", "lowPrice", "salePrice"]:
-            val = offers.get(key)
-            if val not in (None, "", 0):
-                try:
-                    p = float(str(val).replace(",", "."))
-                    return p / 100 if p > 100000 else p
-                except:
-                    pass
-
-    # priceInfo altında
-    price_info = product.get("priceInfo") or product.get("priceData") or {}
-    if isinstance(price_info, dict):
-        for key in ["price", "salePrice", "finalPrice", "value"]:
-            val = price_info.get(key)
-            if val not in (None, "", 0):
-                try:
-                    p = float(str(val).replace(",", "."))
-                    return p / 100 if p > 100000 else p
-                except:
-                    pass
-
-    return None
-
-
-def _parse_state_script(txt: str) -> tuple:
-    """window.__INITIAL_STATE__ veya inline JSON'dan ürün bilgisi çıkar."""
-    title = price = image_url = rating = None
-    try:
-        # JSON bloğunu bul
-        for pattern in [
-            r'__INITIAL_STATE__\s*=\s*(\{.+?\});',
-            r'hbProductDetail\s*=\s*(\{.+?\});',
-            r'"product"\s*:\s*(\{.+?\})\s*[,;]',
-        ]:
-            m = re.search(pattern, txt, re.DOTALL)
-            if m:
-                data = json.loads(m.group(1))
-                product = data.get("product") or data
-                if isinstance(product, dict):
-                    title = product.get("name") or product.get("displayName")
-                    price = _extract_hb_price(product)
-                    images = product.get("images") or []
-                    if images:
-                        first = images[0]
-                        image_url = first.get("url") if isinstance(first, dict) else first
-                    rating_val = product.get("averageRating")
-                    if rating_val:
-                        try: rating = float(rating_val)
-                        except: pass
-                    if title and price:
-                        break
-    except:
-        pass
-    return title, price, image_url, rating
-
-
-def _deep_find_key(obj: dict, keys: list, depth: int = 0):
-    """Dict içinde belirtilen key'lerden birini recursive bul."""
-    if depth > 4:
-        return None
-    for k in keys:
-        if k in obj and isinstance(obj[k], dict):
-            return obj[k]
-    for v in obj.values():
-        if isinstance(v, dict):
-            result = _deep_find_key(v, keys, depth + 1)
-            if result:
-                return result
-    return None
-
-
-def _extract_jsonld_product(data: dict) -> tuple:
-    title = data.get("name")
-    offers = data.get("offers", {})
-    if isinstance(offers, list) and offers:
-        offers = offers[0]
-    p_val = None
-    if isinstance(offers, dict):
-        p_val = offers.get("price") or offers.get("lowPrice")
-
-    price = None
-    if p_val not in (None, ""):
-        try:
-            price = float(str(p_val).replace(",", "."))
-        except Exception:
-            price = parse_price_tr(str(p_val))
-
-    image_url = data.get("image")
-    if isinstance(image_url, list) and image_url:
-        image_url = image_url[0]
-    image_url = normalize_image_url(image_url if isinstance(image_url, str) else None)
-
-    rating = None
-    agg = data.get("aggregateRating", {})
-    if isinstance(agg, dict) and agg.get("ratingValue") not in (None, ""):
-        try:
-            rating = float(str(agg.get("ratingValue")).replace(",", "."))
-        except Exception:
-            rating = None
-
-    return title, price, image_url, rating
-
-
-async def _via_api(sku: str) -> Optional[dict]:
-    api_headers = {
-        "User-Agent": random.choice(UA_POOL),
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.hepsiburada.com/",
-        "Origin": "https://www.hepsiburada.com",
-        "Accept-Language": "tr-TR,tr;q=0.9",
-    }
-    endpoints = [
-        f"https://www.hepsiburada.com/api/product/detail/listing/{sku}",
-        f"https://www.hepsiburada.com/api/product/{sku}",
-        f"https://www.hepsiburada.com/api/product-detail/{sku}",
-    ]
-
-    for api_url in endpoints:
-        try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True, http2=HTTPX_HTTP2_AVAILABLE) as client:
-                r = await client.get(api_url, headers=api_headers)
-            if r.status_code != 200:
-                continue
-
-            data = r.json()
-            product = data.get("product") or data.get("data") or data.get("result") or data
-            # Nested data yapıları
-            if isinstance(product, dict) and "product" in product:
-                product = product["product"]
-            if not isinstance(product, dict):
-                continue
-
-            title = (product.get("name") or product.get("displayName") or
-                 product.get("productName") or product.get("title") or
-                 product.get("shortName") or product.get("fullName"))
-            price = _extract_hb_price(product)
-
-            images = product.get("images") or product.get("productImages") or []
-            image_url = None
-            if isinstance(images, list) and images:
-                first = images[0]
-                if isinstance(first, dict):
-                    raw = first.get("url") or first.get("src") or first.get("path") or first.get("original")
-                elif isinstance(first, str):
-                    raw = first
-                else:
-                    raw = None
-                image_url = _hb_normalize_image(raw)
-            if not image_url:
-                image_url = _hb_normalize_image(product.get("image") or product.get("imageUrl") or product.get("mainImage"))
-
-            rating_val = product.get("averageRating") or product.get("rating")
-            try:
-                rating = float(rating_val) if rating_val not in (None, "") else None
-            except Exception:
-                rating = None
-            reviews = product.get("ratingCount") or product.get("reviewCount")
-
-            if title and price:
-                return {
-                    "title": title,
-                    "price": price,
-                    "image_url": image_url,
-                    "rating": rating,
-                    "review_count": int(reviews) if reviews else None,
-                }
-        except Exception as e:
-            print(f"[hepsiburada/api] {api_url} → {e}")
-
-    return None
-
-
-async def _via_curl_cffi(url: str) -> Optional[dict]:
-    impersonate_versions = ["chrome124", "chrome123", "chrome120"]
-    impersonate = random.choice(impersonate_versions)
-
-    try:
-        async with CurlSession(impersonate=impersonate) as session:
-            try:
-                await session.get(
-                    "https://www.hepsiburada.com/",
-                    headers={"Accept-Language": "tr-TR,tr;q=0.9"},
-                    timeout=20,
-                )
-                await asyncio.sleep(random.uniform(0.8, 2.0))
-            except Exception:
-                pass
-
-            r = await session.get(
-                url,
-                headers={
-                    "Accept-Language": "tr-TR,tr;q=0.9",
-                    "Referer": "https://www.hepsiburada.com/",
-                    "Upgrade-Insecure-Requests": "1",
-                },
-                timeout=30,
-            )
-
-        if r.status_code == 200 and not _is_blocked(r.text):
-            html_text = r.text
-
-            def _parse_curl():
-                soup = BeautifulSoup(html_text, "html.parser")
-                t, p, i, r_ = _parse_html(soup)
-                if not p:
-                    for pat in [
-                        r'"(?:finalPrice|salePrice|currentPrice|price)":\s*"?([\d]+(?:[.,]\d+)?)"?',
-                        r'data-price="([\d]+(?:[.,]\d+)?)"',
-                        r'content="([\d]+(?:\.\d+)?)"[^>]*itemprop="price"',
-                        r'id="offering-baseFiyat"[^>]*>\s*([\d.,]+)',
-                    ]:
-                        m = re.search(pat, html_text)
-                        if m:
-                            p = parse_price_tr(m.group(1))
-                            if p:
-                                break
-                return t, p, i, r_, soup.find("script", id="__NEXT_DATA__") is not None
-
-            title, price, image_url, rating, has_next = await asyncio.to_thread(_parse_curl)
-
-            if title:
-                return {
-                    "title": title,
-                    "price": price,
-                    "image_url": image_url,
-                    "rating": rating,
-                    "review_count": None,
-                }
-            print(f"[hepsiburada/curl_cffi] Sayfa geldi ama parse edilemedi (title={title!r}, price={price}) — __NEXT_DATA__={'var' if has_next else 'yok'}")
+from scrapers.utils import (
+    UA_POOL,
+    MOBILE_UA_POOL,
+    MOBILE_VIEWPORTS,
+    MOBILE_STEALTH_SCRIPT,
+    RateLimiter,
+    STEALTH_SCRIPT,
+    parse_price_tr_clean,
+    get_stealth_headers,
+)
+
+log = logging.getLogger("hb_v11")
+
+# ==========================================
+# CONFIG
+# ==========================================
+_limiter = RateLimiter(min_delay=1.2, max_delay=3.5)
+HB_LOCK = asyncio.Semaphore(2)
+
+
+# ==========================================
+# ENTRY
+# ==========================================
+async def scrape_hepsiburada(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
+    async with HB_LOCK:
+        result = await _run(url, pool)
+        if price_only and result:
+            return {k: result[k] for k in ("price", "stock", "cart_discount") if k in result}
+        return result
+
+
+# ==========================================
+# CORE
+# ==========================================
+async def _run(url: str, pool=None):
+
+    async def worker(page):
+
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            window.chrome = { runtime: {} };
+        """)
+
+        if use_mobile:
+            await page.add_init_script(MOBILE_STEALTH_SCRIPT)
         else:
-            print(f"[hepsiburada/curl_cffi] Başarısız: status={r.status_code} blocked={_is_blocked(getattr(r, 'text', ''))}")
-    except Exception as e:
-        print(f"[hepsiburada/curl_cffi] Hata: {e}")
+            await page.add_init_script(STEALTH_SCRIPT)
 
-    return None
+        await _limiter.wait()
 
+        try:
+            log.info(f"[HB V11] Açılıyor: {url}")
 
-async def _via_httpx(url: str) -> Optional[dict]:
-    headers = {
-        "User-Agent": random.choice(UA_POOL),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-        "Referer": "https://www.hepsiburada.com/",
-    }
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=45000
+            )
 
-    try:
-        limits = httpx.Limits(max_connections=2, max_keepalive_connections=1)
-        async with httpx.AsyncClient(
-            headers=headers,
-            timeout=30,
-            follow_redirects=True,
-            http2=HTTPX_HTTP2_AVAILABLE,
-            limits=limits,
-        ) as client:
+            # Fiyat elementinin DOM'a gelmesini bekle (sabit timeout yerine)
             try:
-                await client.get("https://www.hepsiburada.com/")
-                await asyncio.sleep(random.uniform(1.0, 2.5))
+                await page.wait_for_selector(
+                    '[data-test-id="default-price"], [data-test-id="checkout-price"], [data-test-id="price"]',
+                    timeout=8000
+                )
             except Exception:
-                pass
+                await page.wait_for_timeout(3500)
 
-            r = await client.get(url)
+            html = await page.content()
 
-        if r.status_code == 200 and not _is_blocked(r.text):
-            html_text = r.text
+            data = await _parse(page, html)
 
-            def _parse_httpx():
-                soup = BeautifulSoup(html_text, "html.parser")
-                t, p, i, r_ = _parse_html(soup)
-                if not p:
-                    for pat in [
-                        r'"(?:finalPrice|salePrice|currentPrice|price)":\s*"?([\d]+(?:[.,]\d+)?)"?',
-                        r'data-price="([\d]+(?:[.,]\d+)?)"',
-                        r'content="([\d]+(?:\.\d+)?)"[^>]*itemprop="price"',
-                    ]:
-                        m = re.search(pat, html_text)
-                        if m:
-                            p = parse_price_tr(m.group(1))
-                            if p:
-                                break
-                return t, p, i, r_, soup.find("script", id="__NEXT_DATA__") is not None
+            if data:
+                log.info(f"[HB V11] ✔ {data.get('title', '')[:60]} | {data.get('price')}")
+                return data
 
-            title, price, image_url, rating, has_next = await asyncio.to_thread(_parse_httpx)
-            if title:
-                return {
-                    "title": title,
-                    "price": price,
-                    "image_url": image_url,
-                    "rating": rating,
-                    "review_count": None,
-                }
-            print(f"[hepsiburada/httpx] Sayfa geldi ama parse edilemedi (title={title!r}, price={price}) — __NEXT_DATA__={'var' if has_next else 'yok'}")
             return None
 
-        if r.status_code == 403 or _is_blocked(r.text):
-            print("[hepsiburada/httpx] 403 / block / captcha algılandı")
-        else:
-            print(f"[hepsiburada/httpx] Başarısız: status={r.status_code}")
-    except Exception as e:
-        print(f"[hepsiburada/httpx] Hata: {type(e).__name__}: {e}")
+        except Exception as e:
+            log.error(f"[HB V10] Hata: {e}")
+            return None
 
-    return None
+    use_mobile = False  # pool modunda desktop (pool kendi context'ini yönetir)
 
+    if pool:
+        page = await pool.acquire()
+        try:
+            return await worker(page)
+        finally:
+            await pool.release(page)
 
-async def _via_playwright(url: str) -> Optional[dict]:
-    try:
-        from playwright.async_api import async_playwright
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
         try:
             from playwright_stealth import Stealth
             _stealth = Stealth()
-        except ImportError:
+        except Exception:
             _stealth = None
-            print("[hepsiburada/playwright] playwright-stealth yüklü değil")
 
-        pw_ctx = async_playwright()
-        if _stealth:
-            pw_ctx = _stealth.use_async(pw_ctx)
+        browser = await p.chromium.launch(
+            headless=True,
+            channel="chrome",
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
 
-        async with pw_ctx as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--disable-infobars",
-                    "--window-size=1366,768",
-                ],
-            )
-            ctx = await browser.new_context(
-                user_agent=random.choice(UA_POOL),
+        # %35 ihtimalle mobil UA kullan
+        use_mobile = random.random() < 0.35
+        if use_mobile:
+            _ua = random.choice(MOBILE_UA_POOL)
+            vw, vh, dpr = random.choice(MOBILE_VIEWPORTS)
+            context = await browser.new_context(
+                user_agent=_ua,
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
-                viewport={"width": 1366, "height": 768},
-                extra_http_headers={
-                    "Accept-Language": "tr-TR,tr;q=0.9",
-                    "Upgrade-Insecure-Requests": "1",
-                },
+                viewport={"width": vw, "height": vh},
+                device_scale_factor=dpr,
+                is_mobile=True,
+                has_touch=True,
+                extra_http_headers=get_stealth_headers(_ua),
             )
-            page = await ctx.new_page()
+            log.info(f"[HB] Mobil mod: {vw}x{vh} DPR={dpr}")
+        else:
+            _ua = random.choice(UA_POOL)
+            context = await browser.new_context(
+                user_agent=_ua,
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                viewport={"width": 1920, "height": 1080},
+                extra_http_headers=get_stealth_headers(_ua),
+            )
 
-            try:
-                await page.goto("https://www.hepsiburada.com/", wait_until="domcontentloaded", timeout=45000)
-                await page.wait_for_timeout(random.randint(800, 2000))
-                await page.mouse.move(random.randint(200, 800), random.randint(200, 500))
-                await page.wait_for_timeout(random.randint(300, 800))
-            except Exception:
-                pass
+        page = await context.new_page()
+        if _stealth:
+            await _stealth.apply_stealth_async(page)
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(random.randint(1200, 2800))
-            try:
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                await page.wait_for_timeout(random.randint(400, 900))
-            except Exception:
-                pass
-
-            content = await page.content()
-            page_title = await page.title()
+        try:
+            return await worker(page)
+        finally:
             await browser.close()
 
-            if _is_blocked(content):
-                print(f"[hepsiburada/playwright] Güvenlik engeli aşılamadı (title={page_title!r})")
-                return None
 
-            _pt = page_title
+# ==========================================
+# PARSER (V11 - JSON-FIRST PRICE ENGINE)
+# ==========================================
+async def _parse(page, html: str):
 
-            def _parse_pw():
-                soup = BeautifulSoup(content, "html.parser")
-                t, p, i, r_ = _parse_html(soup)
-                if not p:
-                    for pat in [
-                        r'"(?:finalPrice|salePrice|currentPrice|price)":\s*"?([\d]+(?:[.,]\d+)?)"?',
-                        r'data-price="([\d]+(?:[.,]\d+)?)"',
-                        r'content="([\d]+(?:\.\d+)?)"[^>]*itemprop="price"',
-                    ]:
-                        m = re.search(pat, content)
-                        if m:
-                            p = parse_price_tr(m.group(1))
-                            if p:
-                                break
-                if not t and _pt:
-                    t2 = re.sub(r'\s*[-|]\s*.+$', '', _pt).strip()
-                    if len(t2) > 5:
-                        t = t2
-                return t, p, i, r_, soup.find("script", id="__NEXT_DATA__") is not None
+    soup = BeautifulSoup(html, "html.parser")
 
-            title, price, image_url, rating, has_next = await asyncio.to_thread(_parse_pw)
-            if title:
-                return {
-                    "title": title,
-                    "price": price,
-                    "image_url": image_url,
-                    "rating": rating,
-                    "review_count": None,
+    title = None
+    image = None
+    price = None
+    stock = "Bilinmiyor"
+    cart_discount = False
+
+    # ==================================================
+    # 0. JS page evaluation — en güvenilir yöntem
+    # ==================================================
+    try:
+        js_price = await page.evaluate("""
+            () => {
+                const paths = [
+                    () => window.productState?.product?.price?.finalPrice,
+                    () => window.productState?.product?.price?.value,
+                    () => window.productState?.product?.price?.discountedPrice,
+                    () => window.productState?.product?.price?.currentPrice,
+                    () => window.productState?.product?.buyBoxInfo?.priceInfo?.finalPrice,
+                    () => window.productState?.product?.buyBoxInfo?.price,
+                    () => window.__INITIAL_STATE__?.product?.price?.finalPrice,
+                    () => window.__INITIAL_STATE__?.product?.price?.value,
+                ];
+                for (const fn of paths) {
+                    try {
+                        const v = fn();
+                        if (v && typeof v === 'number' && v > 10) return v;
+                        if (v && typeof v === 'string') {
+                            const n = parseFloat(v.replace(/\\./g,'').replace(',','.'));
+                            if (n > 10) return n;
+                        }
+                    } catch(e) {}
                 }
+                return null;
+            }
+        """)
+        if js_price:
+            price = float(js_price)
+    except Exception:
+        pass
 
-            print(f"[hepsiburada/playwright] Parse edilemedi (title={title!r}, price={price}, page_title={page_title!r}) — __NEXT_DATA__={'var' if has_next else 'yok'}")
+    # DEBUG: hangi window değişkenleri var, DOM fiyat elementleri ne döndürüyor
+    try:
+        debug_info = await page.evaluate("""
+            () => {
+                const win_keys = Object.keys(window).filter(k =>
+                    /state|product|price|hb|data/i.test(k) && typeof window[k] === 'object'
+                );
+                const price_els = {};
+                [
+                    '[data-test-id="default-price"]',
+                    '[data-test-id="checkout-price"]',
+                    '[data-test-id="price"]',
+                    '[data-test-id="price-value"]',
+                    '[class*="price"]',
+                    'span[itemprop="price"]',
+                    'meta[itemprop="price"]',
+                ].forEach(sel => {
+                    const el = document.querySelector(sel);
+                    if (el) price_els[sel] = el.tagName === 'META'
+                        ? el.getAttribute('content')
+                        : el.innerText?.trim().slice(0, 80);
+                });
+                return { win_keys, price_els };
+            }
+        """)
+        log.warning(f"[HB DEBUG] window keys: {debug_info.get('win_keys')}")
+        log.warning(f"[HB DEBUG] price elements: {debug_info.get('price_els')}")
     except Exception as e:
-        print(f"[hepsiburada/playwright] Hata: {type(e).__name__}: {e}")
+        log.warning(f"[HB DEBUG] evaluate hatası: {e}")
 
+    try:
+        js_title = await page.evaluate("""
+            () => window.productState?.product?.name || window.__INITIAL_STATE__?.product?.name || null
+        """)
+        if js_title:
+            title = js_title
+    except Exception:
+        pass
+
+    # ==================================================
+    # 1. window.productState — title, image ve fiyat (HTML regex)
+    # ==================================================
+    # Brace-balanced extraction (lazy {.*?} nested JSON'da bozulur)
+    m = re.search(r'window\.productState\s*=\s*(\{)', html)
+    productState = None
+    if m:
+        try:
+            start = m.start(1)
+            depth = 0
+            in_str = False
+            esc = False
+            end = start
+            for i, ch in enumerate(html[start:], start):
+                if esc:
+                    esc = False
+                    continue
+                if ch == '\\' and in_str:
+                    esc = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            productState = json.loads(html[start:end])
+            product = productState.get("product", {})
+            if not title:
+                title = product.get("name")
+            if not price:
+                price = _extract_price_from_state(productState)
+            stock = _extract_stock_from_state(productState)
+            if not image:
+                image = _extract_image_from_state(productState)
+        except Exception:
+            pass
+
+    # ==================================================
+    # 2. __NEXT_DATA__ — title, image, fiyat için
+    # ==================================================
+    if not title or not price:
+        # Script içeriğini tag sınırına kadar al (lazy {.*?} nested JSON'u keser)
+        m2 = re.search(
+            r'<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>',
+            html
+        )
+        if m2:
+            try:
+                j = json.loads(m2.group(1))
+                txt = json.dumps(j, ensure_ascii=False)
+                if not title:
+                    title = _find(txt, [r'"name"\s*:\s*"([^"]{10,})"', r'"title"\s*:\s*"([^"]{10,})"'])
+                if not price:
+                    price = _extract_price_from_next_data(j)
+            except:
+                pass
+
+    # ==================================================
+    # 3. JSON-LD — title, image, fiyat için
+    # ==================================================
+    if not title or not image:
+        for sc in soup.find_all("script", type="application/ld+json"):
+            try:
+                j = json.loads(sc.string or sc.text)
+                if isinstance(j, list):
+                    j = j[0]
+                if isinstance(j, dict):
+                    if not title:
+                        title = j.get("name")
+                    if not image:
+                        img = j.get("image")
+                        if isinstance(img, list) and img:
+                            image = img[0] if isinstance(img[0], str) else img[0].get("url")
+                        elif isinstance(img, str):
+                            image = img
+                    if not price:
+                        offers = j.get("offers", {})
+                        if isinstance(offers, dict):
+                            p = offers.get("price")
+                            if p:
+                                price = parse_price_tr_clean(str(p))
+            except:
+                pass
+
+    # ==================================================
+    # 3b. og:image — JSON-LD'de yoksa fallback
+    # ==================================================
+    if not image:
+        og_img = soup.find("meta", property="og:image")
+        if og_img:
+            image = og_img.get("content")
+
+    # ==================================================
+    # 4. DOM PRICE — JSON bulamazsa veya sepete özel varsa
+    # ==================================================
+    # checkout-price elementi varsa sepete özel indirim var
+    try:
+        co_el = await page.query_selector('[data-test-id="checkout-price"]')
+        if co_el:
+            cart_discount = True
+    except:
+        pass
+
+    dom_price = await _extract_dom_price(page)
+    if dom_price:
+        # DOM fiyatı JSON fiyatından küçükse sepete özel indirim var
+        if not price or dom_price < price:
+            if price and dom_price < price:
+                cart_discount = True
+            price = dom_price
+
+    # ==================================================
+    # 5. FALLBACK TITLE
+    # ==================================================
+    if not title:
+        og = soup.find("meta", property="og:title")
+        title = og.get("content") if og else None
+
+    if not title and soup.title:
+        raw_title = soup.title.text.strip()
+        # "Hepsiburada | Güvenlik" gibi hata sayfası başlıklarını reddet
+        if "Hepsiburada" not in raw_title or len(raw_title) > 30:
+            title = raw_title
+
+    # ==================================================
+    # RESULT
+    # ==================================================
+    if title and "güvenlik" not in title.lower() and "hata" not in title.lower():
+        log.info(f"[HB V11] title={title[:60]!r} price={price} stock={stock} cart_discount={cart_discount}")
+        return {
+            "title": title,
+            "price": price,
+            "image_url": image,
+            "stock": stock,
+            "cart_discount": cart_discount,
+            "platform": "Hepsiburada",
+            "success": True
+        }
+
+    log.warning(f"[HB V11] Geçersiz sayfa — title={title!r}")
+    return None
+
+
+def _extract_price_from_state(state: dict) -> Optional[float]:
+    """window.productState'den fiyat çıkar — birden fazla path dener."""
+    product = state.get("product", {})
+
+    # Doğrudan fiyat objeleri
+    for path in [
+        ["price", "value"],
+        ["price", "finalPrice"],
+        ["price", "discountedPrice"],
+        ["price", "currentPrice"],
+        ["buyBoxInfo", "priceInfo", "finalPrice"],
+        ["buyBoxInfo", "priceInfo", "value"],
+        ["buyBoxInfo", "price"],
+    ]:
+        d = product
+        for k in path:
+            if isinstance(d, dict):
+                d = d.get(k)
+            else:
+                d = None
+                break
+        if isinstance(d, (int, float)) and d > 0:
+            return float(d)
+        if isinstance(d, str):
+            v = parse_price_tr_clean(d)
+            if v:
+                return v
+
+    # promotions / campaigns
+    for promo in product.get("promotions", []) or []:
+        if isinstance(promo, dict):
+            fp = promo.get("finalPrice") or promo.get("discountedPrice")
+            if isinstance(fp, (int, float)) and fp > 0:
+                return float(fp)
+
+    return None
+
+
+def _extract_image_from_state(state: dict) -> Optional[str]:
+    product = state.get("product", {})
+    for path in [
+        ["mainImageUrl"],
+        ["imageUrl"],
+        ["images", 0, "url"],
+        ["images", 0],
+        ["image"],
+        ["thumbnailUrl"],
+    ]:
+        d = product
+        for k in path:
+            if isinstance(d, dict):
+                d = d.get(k)
+            elif isinstance(d, list) and isinstance(k, int) and len(d) > k:
+                d = d[k]
+            else:
+                d = None
+                break
+        if isinstance(d, str) and d.startswith("http"):
+            return d
+    return None
+
+
+def _extract_stock_from_state(state: dict) -> str:
+    product = state.get("product", {})
+    is_salable = product.get("isSalable") or product.get("isSaleable")
+    if is_salable is False:
+        return "Stok Yok"
+    stock_qty = product.get("stockQty") or product.get("stock")
+    if isinstance(stock_qty, (int, float)):
+        return "Stok Yok" if stock_qty == 0 else "Stokta Var"
+    if is_salable is True:
+        return "Stokta Var"
+    return "Bilinmiyor"
+
+
+def _extract_price_from_next_data(j: dict) -> Optional[float]:
+    """__NEXT_DATA__ içindeki fiyatı bul — recursive arama."""
+    txt = json.dumps(j, ensure_ascii=False)
+    for pattern in [
+        r'"finalPrice"\s*:\s*([\d]+(?:\.\d+)?)',
+        r'"discountedPrice"\s*:\s*([\d]+(?:\.\d+)?)',
+        r'"currentPrice"\s*:\s*([\d]+(?:\.\d+)?)',
+        r'"salePrice"\s*:\s*([\d]+(?:\.\d+)?)',
+        r'"price"\s*:\s*([\d]+(?:\.\d+)?)',
+    ]:
+        m = re.search(pattern, txt)
+        if m:
+            try:
+                v = float(m.group(1))
+                if v > 0:
+                    return v
+            except:
+                pass
+    return None
+
+
+# ==========================================
+# DOM PRICE ENGINE V11
+# Obfuscated class isimlerine bağımlılık kaldırıldı.
+# data-test-id attributeları + geniş fallback'ler.
+# ==========================================
+async def _extract_dom_price(page) -> Optional[float]:
+
+    # Kirletici elementleri DOM'dan kaldır
+    try:
+        await page.evaluate("""
+            ['[data-test-id="see-earnings"]',
+             '[data-test-id="see-earnings-tooltip"]',
+             '[data-test-id="payment-options"]',
+             '[data-test-id="PremiumBanner"]',
+             '[data-test-id="merchant-coupons"]',
+             '[data-test-id="prev-price"]'
+            ].forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
+        """)
+    except:
+        pass
+
+    # --------------------------------------------------
+    # 1. Sepete özel fiyat — checkout-price container
+    # --------------------------------------------------
+    try:
+        el = await page.query_selector('[data-test-id="checkout-price"]')
+        if el:
+            text = (await el.inner_text()).strip()
+            for raw in re.findall(r'([\d\.]+[,]\d{2}|\d+\.?\d*)\s*(?:TL|₺)', text):
+                v = parse_price_tr_clean(raw)
+                if v and v > 0:
+                    log.debug(f"[HB DOM] checkout-price → {v}")
+                    return v
+    except:
+        pass
+
+    # --------------------------------------------------
+    # 2. Normal fiyat — default-price
+    # --------------------------------------------------
+    try:
+        el = await page.query_selector('[data-test-id="default-price"]')
+        if el:
+            text = (await el.inner_text()).strip().split('\n')[0]
+            v = parse_price_tr_clean(text)
+            if v and v > 0:
+                log.debug(f"[HB DOM] default-price → {v}")
+                return v
+    except:
+        pass
+
+    # --------------------------------------------------
+    # 3. price-box / price-value attribute'ları (alternatif)
+    # --------------------------------------------------
+    try:
+        for sel in [
+            '[data-test-id="price-value"]',
+            '[data-test-id="buybox-price"]',
+            '[data-test-id="price"] [data-test-id="default-price"]',
+            '[class*="price-value"]',
+            '[class*="priceValue"]',
+            '[class*="finalPrice"]',
+            '[class*="product-price"]',
+            'span[itemprop="price"]',
+        ]:
+            el = await page.query_selector(sel)
+            if el:
+                text = (await el.inner_text()).strip()
+                v = parse_price_tr_clean(text)
+                if v and v > 0:
+                    log.debug(f"[HB DOM] {sel} → {v}")
+                    return v
+    except:
+        pass
+
+    # --------------------------------------------------
+    # 4. price bloğu — TL değerlerini tara (en küçük = satış fiyatı)
+    # --------------------------------------------------
+    try:
+        price_block = await page.query_selector('[data-test-id="price"]')
+        if price_block:
+            text = (await price_block.inner_text()).strip()
+            candidates = []
+            for raw in re.findall(r'([\d\.]+[,]\d{2})', text):
+                v = parse_price_tr_clean(raw)
+                if v and v > 0:
+                    candidates.append(v)
+            if candidates:
+                result = min(candidates)
+                log.debug(f"[HB DOM] price-block min → {result}")
+                return result
+    except:
+        pass
+
+    # --------------------------------------------------
+    # 5. itemprop="price" meta tag
+    # --------------------------------------------------
+    try:
+        el = await page.query_selector('meta[itemprop="price"]')
+        if el:
+            content = await el.get_attribute("content")
+            if content:
+                v = parse_price_tr_clean(content)
+                if v and v > 0:
+                    log.debug(f"[HB DOM] itemprop meta → {v}")
+                    return v
+    except:
+        pass
+
+    log.warning("[HB DOM] Hiçbir DOM seçici fiyat bulamadı")
+    return None
+
+
+# ==========================================
+# HELPERS
+# ==========================================
+def _extract_price_dict(d):
+    if not isinstance(d, dict):
+        return None
+
+    keys = [
+        "sortPrice",
+        "priceValue",
+        "discountedPrice",
+        "finalPrice",
+        "currentPrice",
+        "salePrice",
+        "price",
+        "value"
+    ]
+
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return parse_price_tr_clean(str(v))
+
+    return None
+
+
+def _extract_price_text(text):
+
+    patterns = [
+        r'"sortPrice":("?[\d\.,]+"?)',
+        r'"priceValue":("?[\d\.,]+"?)',
+        r'"finalPrice":("?[\d\.,]+"?)',
+        r'"currentPrice":("?[\d\.,]+"?)',
+        r'"price":("?[\d\.,]+"?)',
+        r'([\d\.\,]+)\s*(TL|₺)'
+    ]
+
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            return parse_price_tr_clean(m.group(1))
+
+    return None
+
+
+def _find(text, patterns):
+    for p in patterns:
+        m = re.search(p, text, re.DOTALL)
+        if m:
+            return m.group(1)
     return None

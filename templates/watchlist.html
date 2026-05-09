@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Takip Listem — FırsatVakti{% endblock %}
+
+{% block content %}
+<div style="max-width:900px;margin:0 auto;">
+
+  <!-- Başlık -->
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:28px;">
+    <div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:1px;color:var(--text);margin:0 0 4px;">🔔 TAKİP LİSTEM</h1>
+      <p style="color:var(--muted);font-size:14px;font-weight:500;margin:0;">Fiyat düşünce seni haberdar ediyoruz</p>
+    </div>
+    <span style="background:var(--bg2);border:1.5px solid var(--border);border-radius:10px;padding:8px 16px;font-size:13px;font-weight:700;color:var(--text);">
+      {{ items|length }} ürün takipte
+    </span>
+  </div>
+
+  {% if not items %}
+  <!-- Boş durum -->
+  <div style="text-align:center;padding:80px 20px;background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;">
+    <div style="font-size:64px;margin-bottom:16px;">🔔</div>
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:var(--text);margin:0 0 10px;">TAKİP LİSTEN BOŞ</h2>
+    <p style="color:var(--muted);font-size:15px;margin:0 0 24px;">Ürün sayfalarındaki "Fiyat Düşünce Bildir" butonuna basarak takibe alabilirsin.</p>
+    <a href="/" class="btn-add" style="display:inline-flex;">🔥 Fırsatlara Göz At</a>
+  </div>
+
+  {% else %}
+  <!-- Ürün listesi -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    {% for item in items %}
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;padding:16px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;transition:border-color .15s;"
+         onmouseover="this.style.borderColor='var(--fire)'" onmouseout="this.style.borderColor='var(--border)'">
+
+      <!-- Resim -->
+      <div style="width:64px;height:64px;border-radius:12px;background:var(--bg3);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;">
+        {% if item.image_url %}
+        <img src="{{ item.image_url }}" alt="{{ item.title }}" style="width:100%;height:100%;object-fit:contain;">
+        {% else %}
+        <span style="font-size:28px;">🛍</span>
+        {% endif %}
+      </div>
+
+      <!-- Ürün bilgisi -->
+      <div style="flex:1;min-width:200px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
+          <span class="badge-{{ item.platform }}" style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;">
+            {% if item.platform=='amazon' %}🟠{% elif item.platform=='trendyol' %}🔴{% elif item.platform=='n11' %}🟣{% else %}🟡{% endif %}
+            {{ item.platform|title }}
+          </span>
+          {% if item.deal_active %}
+          <span style="background:#f0fdf4;color:#16a34a;border:1.5px solid #bbf7d0;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;">🔥 Aktif Fırsat</span>
+          {% endif %}
+        </div>
+        <a href="/product/{{ item.id }}" style="font-size:14px;font-weight:600;color:var(--text);text-decoration:none;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4;margin-bottom:4px;">
+          {{ item.title or '(Başlık yükleniyor...)' }}
+        </a>
+        <div style="font-size:11px;color:var(--muted);">Takibe alındı: {{ item.watched_at[:10] }}</div>
+      </div>
+
+      <!-- Fiyat -->
+      <div style="text-align:right;flex-shrink:0;">
+        {% if item.deal_active and item.new_price %}
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:var(--fire);line-height:1;">{{ item.new_price|price_tr }} TL</div>
+        <div style="font-size:12px;color:var(--muted);text-decoration:line-through;">{{ item.old_price|price_tr }} TL</div>
+        <div style="font-size:11px;color:#16a34a;font-weight:700;">-%{{ item.discount_pct|int }} indirim</div>
+        {% elif item.current_price %}
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:var(--text);line-height:1;">{{ item.current_price|price_tr }} TL</div>
+        <div style="font-size:11px;color:var(--muted);">Güncel fiyat</div>
+        {% else %}
+        <div style="font-size:12px;color:var(--muted);">Fiyat bekleniyor...</div>
+        {% endif %}
+      </div>
+
+      <!-- Butonlar -->
+      <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
+        {% if item.deal_id and item.deal_active %}
+        <a href="/deal/{{ item.deal_id }}" style="padding:8px 16px;background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;text-align:center;">
+          Fırsata Git ↗
+        </a>
+        {% else %}
+        <a href="/product/{{ item.id }}" style="padding:8px 16px;background:var(--bg3);border:1.5px solid var(--border);color:var(--text);border-radius:10px;font-size:12px;font-weight:700;text-decoration:none;text-align:center;">
+          Ürünü Gör
+        </a>
+        {% endif %}
+        <button onclick="unwatchProduct({{ item.id }}, this)"
+                style="padding:7px 16px;background:transparent;border:1.5px solid #fecaca;color:#dc2626;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">
+          ✗ Takibi Bırak
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+function unwatchProduct(productId, btn) {
+  fetch('/unwatch/' + productId, {method: 'POST'})
+    .then(function() {
+      var row = btn.closest('[style*="border-radius:16px"]');
+      if (row) {
+        row.style.opacity = '0';
+        row.style.transition = 'opacity .3s';
+        setTimeout(function() { row.remove(); }, 300);
+      }
+    });
+}
+</script>
+{% endblock %}

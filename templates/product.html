@@ -1,5 +1,24 @@
 {% extends "base.html" %}
-{% block title %}{{ product.title or 'Ürün Takipte' }} — FırsatVakti{% endblock %}
+{% block title %}{{ (product.title or 'Ürün')[:60] }} Fiyat Takibi | FırsatVakti{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org/",
+  "@type": "Product",
+  "name": {{ product.title | tojson }},
+  {% if product.image_url %}"image": {{ product.image_url | tojson }},{% endif %}
+  "description": "{{ product.platform|title }}'da {{ (product.title or '')|replace('"','') }} fiyat takibi ve indirim bildirimi.",
+  {% if product.rating %}"aggregateRating": {"@type":"AggregateRating","ratingValue":"{{ '%.1f'|format(product.rating) }}"{% if product.review_count %},"reviewCount":"{{ product.review_count }}"{% endif %}},{% endif %}
+  "offers": {
+    "@type": "AggregateOffer",
+    "priceCurrency": "TRY",
+    "offerCount": "1",
+    "url": "https://firsatvakti.com/product/{{ product.id }}"
+  }
+}
+</script>
+{% endblock %}
 
 {% block content %}
 
@@ -65,32 +84,119 @@
       </div>
     </div>
 
-    <!-- Fiyat geçmişi (varsa) -->
+    <!-- Fiyat geçmişi grafiği -->
     {% if history|length > 1 %}
+    {% set max_p = history|map(attribute='price_value')|max %}
+    {% set min_p = history|map(attribute='price_value')|min %}
     <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
-      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 20px;">📊 FİYAT GEÇMİŞİ</h2>
-      {% set max_p = history|map(attribute='price_value')|max %}
-      {% set min_p = history|map(attribute='price_value')|min %}
-      <div style="display:flex;align-items:flex-end;gap:8px;height:100px;overflow-x:auto;padding-bottom:8px;">
-        {% for h in history %}
-        {% set bar_h = [(h.price_value / max_p * 80)|int, 8]|max %}
-        {% set is_min = h.price_value == min_p %}
-        <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;min-width:44px;">
-          <div style="font-size:10px;font-weight:700;color:{% if is_min %}#16a34a{% else %}var(--text){% endif %};">{{ "%.0f"|format(h.price_value) }}</div>
-          <div style="height:{{ bar_h }}px;width:32px;background:{% if is_min %}#16a34a{% else %}var(--fire){% endif %};border-radius:6px 6px 0 0;opacity:.7;"></div>
-          <div style="font-size:9px;color:var(--muted);">{{ h.scraped_at[5:10] }}</div>
-        </div>
-        {% endfor %}
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 6px;">📊 FİYAT GEÇMİŞİ</h2>
+      <div style="display:flex;gap:16px;margin-bottom:16px;font-size:12px;font-weight:600;">
+        <span style="color:#16a34a;">🟢 En düşük: {{ min_p|price_tr }} TL</span>
+        <span style="color:#dc2626;">🔴 En yüksek: {{ max_p|price_tr }} TL</span>
       </div>
-      <div style="display:flex;gap:16px;margin-top:12px;font-size:12px;font-weight:600;">
-        <span style="color:#16a34a;">🟢 En düşük: {{ "%.0f"|format(min_p) }} TL</span>
-        <span style="color:var(--muted);">🔴 En yüksek: {{ "%.0f"|format(max_p) }} TL</span>
+      <div style="position:relative;height:200px;">
+        <canvas id="priceChart"></canvas>
       </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+    (function(){
+      var labels = [{% for h in history %}"{{ h.scraped_at[5:16] }}"{% if not loop.last %},{% endif %}{% endfor %}];
+      var prices = [{% for h in history %}{{ "%.2f"|format(h.price_value) }}{% if not loop.last %},{% endif %}{% endfor %}];
+      var minP = {{ "%.2f"|format(min_p) }};
+      var ctx = document.getElementById('priceChart').getContext('2d');
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Fiyat (TL)',
+            data: prices,
+            borderColor: '#f4501c',
+            backgroundColor: 'rgba(244,80,28,0.08)',
+            borderWidth: 2,
+            pointRadius: prices.map(function(p){ return p === minP ? 6 : 3; }),
+            pointBackgroundColor: prices.map(function(p){ return p === minP ? '#16a34a' : '#f4501c'; }),
+            fill: true,
+            tension: 0.3,
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: {
+            label: function(c){ return c.parsed.y.toFixed(0) + ' TL'; }
+          }}},
+          scales: {
+            x: { ticks: { maxTicksLimit: 8, font: { size: 10 }, color: '#888' }, grid: { display: false } },
+            y: { ticks: { callback: function(v){ return v.toFixed(0)+' TL'; }, font: { size: 10 }, color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } }
+          }
+        }
+      });
+    })();
+    </script>
     {% endif %}
 
   </div>
 </div>
+
+<!-- ── Platformlar Arası Fiyat Karşılaştırma ──────────────── -->
+{% if comparison and comparison.products and comparison.products|length > 1 %}
+<div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px 28px;margin-top:20px;">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
+    <span style="font-size:22px;">⚖️</span>
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">DİĞER PLATFORMLARDA FİYAT</h2>
+    {% if comparison.savings %}
+    <span style="background:linear-gradient(135deg,#16a34a,#22c55e);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">
+      En ucuz: {{ comparison.savings.cheapest_platform|title }}
+    </span>
+    {% endif %}
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:10px;">
+    {% for p in comparison.products %}
+    {% set is_cheapest = comparison.cheapest and p.id == comparison.cheapest.id %}
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;background:{% if is_cheapest %}rgba(22,163,74,.08){% else %}var(--bg3){% endif %};border:1.5px solid {% if is_cheapest %}#16a34a{% else %}var(--border){% endif %};border-radius:14px;padding:14px 18px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:18px;">
+          {% if p.platform=='amazon' %}🟠
+          {% elif p.platform=='trendyol' %}🔴
+          {% elif p.platform=='n11' %}🟣
+          {% else %}🟡{% endif %}
+        </span>
+        <div>
+          <div style="font-weight:700;font-size:14px;color:var(--text);">{{ p.platform|title }}</div>
+          {% if p.title %}
+          <div style="font-size:11px;color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.title[:60] }}</div>
+          {% endif %}
+        </div>
+        {% if is_cheapest %}
+        <span style="background:#dcfce7;color:#16a34a;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;">EN UCUZ</span>
+        {% endif %}
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        {% if p.current_price %}
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:{% if is_cheapest %}#16a34a{% else %}var(--fire){% endif %};">
+          {{ "{:,.0f}".format(p.current_price).replace(",",".") }} TL
+        </div>
+        {% else %}
+        <div style="font-size:13px;color:var(--muted);font-weight:600;">Fiyat bekleniyor...</div>
+        {% endif %}
+        <a href="{{ p.source_url }}" target="_blank" rel="nofollow noopener"
+           style="background:var(--fire);color:#fff;font-size:12px;font-weight:700;padding:8px 16px;border-radius:10px;text-decoration:none;white-space:nowrap;">
+          Git →
+        </a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if comparison.savings %}
+  <div style="margin-top:14px;padding:12px 16px;background:rgba(22,163,74,.06);border:1.5px solid #bbf7d0;border-radius:12px;font-size:13px;color:#16a34a;font-weight:700;text-align:center;">
+    💰 En ucuz platformda {{ "{:,.0f}".format(comparison.savings.amount).replace(",",".") }} TL tasarruf edebilirsiniz (%{{ comparison.savings.percent|int }})
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 
 <style>
 @media (max-width: 700px) {

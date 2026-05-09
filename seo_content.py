@@ -80,9 +80,12 @@ def generate_comparison_data(db, group_id):
         SELECT p.*,pgm.confidence,
                (SELECT ph.price_value FROM price_history ph WHERE ph.product_id=p.id ORDER BY ph.id DESC LIMIT 1) as current_price,
                (SELECT MIN(ph.price_value) FROM price_history ph WHERE ph.product_id=p.id) as min_price,
-               (SELECT MAX(ph.price_value) FROM price_history ph WHERE ph.product_id=p.id) as max_price
+               (SELECT MAX(ph.price_value) FROM price_history ph WHERE ph.product_id=p.id) as max_price,
+               (SELECT d.cart_discount FROM deals d WHERE d.product_id=p.id ORDER BY d.id DESC LIMIT 1) as cart_discount
         FROM product_group_members pgm JOIN products p ON pgm.product_id=p.id
-        WHERE pgm.group_id=? ORDER BY current_price ASC NULLS LAST
+        WHERE pgm.group_id=?
+          AND (p.stock IS NULL OR p.stock != 'Stok Yok')
+        ORDER BY current_price ASC NULLS LAST
     """, (group_id,)).fetchall()
     products = [dict(m) for m in members]
     priced = [p for p in products if p.get("current_price")]
@@ -96,35 +99,61 @@ def build_meta_tags(page_type, data=None):
     d = data or {}
     if page_type == "deal":
         t = d.get("title","Fırsat"); pct = d.get("discount_pct",0); pl = d.get("platform","").title()
-        return {"title": f"%{pct:.0f} İndirim — {t[:60]} | FırsatVakti",
-                "description": f"{t[:100]} — {pl}'da %{pct:.0f} indirim. Fiyat geçmişi FırsatVakti'de.",
+        new_p = d.get("new_price"); old_p = d.get("old_price")
+        price_str = f"{new_p:.0f} TL (Normal: {old_p:.0f} TL). " if new_p and old_p else ""
+        desc = f"{t[:80]} — {pl}'da %{pct:.0f} indirim! {price_str}Fiyat geçmişi ve takibi FırsatVakti'de."
+        return {"title": f"%{pct:.0f} İndirim — {t[:55]} | FırsatVakti",
+                "description": desc[:160],
+                "og_image": d.get("image_url",""),
+                "og_type": "product"}
+    if page_type == "product":
+        t = d.get("title","Ürün"); pl = d.get("platform","").title()
+        return {"title": f"{t[:60]} Fiyat Takibi | FırsatVakti",
+                "description": f"{t[:100]} için {pl} fiyat geçmişi, indirim takibi ve fırsat bildirimi.",
                 "og_image": d.get("image_url","")}
     if page_type == "comparison":
         n = d.get("name","Karşılaştırma"); pc = d.get("platform_count",0)
         return {"title": f"{n[:60]} — {pc} Platformda Karşılaştırma | FırsatVakti",
-                "description": f"{n[:80]}: Amazon, Trendyol, N11 fiyatlarını karşılaştırın.",
+                "description": f"{n[:80]}: Amazon, Trendyol, N11, Hepsiburada fiyatlarını karşılaştırın ve en ucuzunu bulun.",
                 "og_image": d.get("image_url","")}
     if page_type == "article":
         return {"title": f"{d.get('title','')[:60]} | FırsatVakti Blog",
                 "description": d.get("summary","")[:160], "og_image": d.get("cover_image","")}
+    if page_type == "index":
+        return {"title": "FırsatVakti — Amazon, Trendyol, N11 Fırsat ve İndirim Takibi",
+                "description": "Amazon, Trendyol, Hepsiburada ve N11'den gerçek indirimler. Günlük kampanyalar, fiyat düşüş bildirimi ve ücretsiz fırsat takibi.",
+                "og_image": ""}
     return {"title": "FırsatVakti — En Ucuz Fiyatlar, Gerçek İndirimler",
-            "description": "Amazon, Trendyol, N11 fiyat takibi ve karşılaştırma.",
+            "description": "Amazon, Trendyol, Hepsiburada, N11 fiyat takibi ve karşılaştırma. Ücretsiz fırsat bildirimi.",
             "og_image": ""}
 
 
 def generate_sitemap_xml(db, domain="https://firsatvakti.com"):
-    urls = [{"loc": domain, "priority": "1.0", "changefreq": "hourly"}]
-    for d in db.execute("SELECT id,created_at FROM deals WHERE active=1 ORDER BY created_at DESC LIMIT 500").fetchall():
-        urls.append({"loc": f"{domain}/deal/{d['id']}", "lastmod": d["created_at"][:10], "priority": "0.8"})
+    urls = [
+        {"loc": domain, "priority": "1.0", "changefreq": "hourly"},
+        {"loc": f"{domain}/blog", "priority": "0.7", "changefreq": "daily"},
+    ]
+    # Aktif deal'lar — en yüksek öncelik
+    for d in db.execute("SELECT id,created_at FROM deals WHERE active=1 AND status='approved' ORDER BY created_at DESC LIMIT 500").fetchall():
+        urls.append({"loc": f"{domain}/deal/{d['id']}", "lastmod": d["created_at"][:10], "priority": "0.9", "changefreq": "daily"})
+    # Sona ermiş ama onaylı deal'lar — fiyat geçmişi sayfası olarak değerli
+    for d in db.execute("SELECT id,created_at FROM deals WHERE active=0 AND status='approved' ORDER BY created_at DESC LIMIT 300").fetchall():
+        urls.append({"loc": f"{domain}/deal/{d['id']}", "lastmod": d["created_at"][:10], "priority": "0.5", "changefreq": "monthly"})
+    # Karşılaştırma sayfaları
     for g in db.execute("SELECT pg.id,pg.updated_at FROM product_groups pg WHERE (SELECT COUNT(*) FROM product_group_members WHERE group_id=pg.id)>=2 LIMIT 200").fetchall():
-        urls.append({"loc": f"{domain}/compare/{g['id']}", "lastmod": (g["updated_at"] or "")[:10], "priority": "0.7"})
+        urls.append({"loc": f"{domain}/compare/{g['id']}", "lastmod": (g["updated_at"] or "")[:10], "priority": "0.7", "changefreq": "weekly"})
+    # Ürün sayfaları
+    for p in db.execute("SELECT id,last_seen_at FROM products ORDER BY id DESC LIMIT 500").fetchall():
+        urls.append({"loc": f"{domain}/product/{p['id']}", "lastmod": (p["last_seen_at"] or "")[:10], "priority": "0.6", "changefreq": "weekly"})
+    # Blog makaleleri
     for a in db.execute("SELECT slug,published_at FROM articles WHERE status='published' LIMIT 200").fetchall():
-        urls.append({"loc": f"{domain}/blog/{a['slug']}", "lastmod": (a["published_at"] or "")[:10], "priority": "0.6"})
+        urls.append({"loc": f"{domain}/blog/{a['slug']}", "lastmod": (a["published_at"] or "")[:10], "priority": "0.6", "changefreq": "monthly"})
 
-    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+    xml = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">\n'
     for u in urls:
         xml += f'  <url><loc>{u["loc"]}</loc>'
         if u.get("lastmod"): xml += f'<lastmod>{u["lastmod"]}</lastmod>'
+        if u.get("changefreq"): xml += f'<changefreq>{u["changefreq"]}</changefreq>'
         xml += f'<priority>{u.get("priority","0.5")}</priority></url>\n'
     return xml + '</urlset>'
 

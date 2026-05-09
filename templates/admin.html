@@ -14,62 +14,195 @@
       <a href="/admin/articles" class="btn-tg" style="text-decoration:none;">📝 Makaleler</a>
       <form method="post" action="/admin/scan/run" id="scan-form">
         <button type="submit" id="scan-btn" class="btn-add" style="border:none;cursor:pointer;">
-          🔄 Taramayı Başlat
+          🔄 Kuyruğu Sıfırla
         </button>
       </form>
       <a href="/" class="btn-tg" style="text-decoration:none;">← Siteye Dön</a>
     </div>
   </div>
 
-  <!-- TARAMA DURUMU -->
-  <div id="scan-progress-box" style="display:none;background:var(--bg2);border:2px solid var(--fire);border-radius:16px;padding:20px 24px;margin-bottom:24px;box-shadow:0 4px 20px rgba(244,80,28,.1);">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span id="scan-spinner" style="font-size:20px;display:inline-block;animation:spin 1.2s linear infinite;">⚙️</span>
-        <span id="scan-heading" style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:.5px;color:var(--text);">TARAMA DEVAM EDİYOR</span>
-      </div>
-      <div style="display:flex;gap:14px;font-size:13px;font-weight:700;">
-        <span style="color:#16a34a;" id="scan-done-count">0 tamam</span>
-        <span style="color:#dc2626;" id="scan-fail-count">0 hata</span>
-      </div>
-    </div>
-    <!-- Progress bar -->
-    <div style="background:var(--bg3);border-radius:99px;height:8px;overflow:hidden;margin-bottom:10px;">
-      <div id="scan-bar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--fire),var(--fire2));border-radius:99px;transition:width .4s ease;"></div>
-    </div>
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;">
-      <div style="font-size:13px;color:var(--muted);">
-        <span id="scan-current">0</span> / <span id="scan-total">0</span> ürün
-        &nbsp;·&nbsp;
-        <span id="scan-platform" style="font-weight:600;color:var(--text);"></span>
-      </div>
-      <div id="scan-title" style="font-size:12px;color:var(--muted);max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
-    </div>
-
-    <!-- Hatalı ürünler -->
-    <div id="scan-errors-wrap" style="display:none;margin-top:16px;border-top:1.5px solid var(--border);padding-top:14px;">
-      <div style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:8px;letter-spacing:.3px;">HATALI ÜRÜNLER</div>
-      <div id="scan-errors-list" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto;"></div>
-    </div>
-  </div>
 
   <!-- İSTATİSTİK KARTLARI -->
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:32px;">
     {% for val, label, color in [
       (stats.products, 'Ürün', 'var(--fire)'),
-      (stats.pending_deals, 'Onay Bekliyor', '#f59e0b'),
+      (stats.pending_links, 'Link Bekliyor', '#f97316'),
+      (stats.pending_deals, 'Deal Bekliyor', '#f59e0b'),
       (stats.active_deals, 'Aktif Fırsat', '#10b981'),
       (stats.deals, 'Toplam Deal', '#6366f1'),
       (stats.users, 'Üye', '#8b5cf6'),
       (stats.clicks, 'Tıklama', '#3b82f6'),
-      (stats.queue_pending, 'Kuyrukta', '#ef4444')
+      (stats.queue_pending, 'Kuyrukta', '#ef4444'),
+      (stats.dead_queue, 'Dead URL', '#6b7280'),
+      (stats.errors_24h, 'Hata (24s)', '#dc2626')
     ] %}
     <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:14px;padding:16px 20px;text-align:center;">
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:{{ color }};">{{ val }}</div>
+      <div {% if label == 'Kuyrukta' %}id="queue-count-val"{% endif %} style="font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:{{ color }};">{{ val }}</div>
       <div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:4px;">{{ label }}</div>
     </div>
     {% endfor %}
   </div>
+
+  <!-- ══ İSTATİSTİK GRAFİKLERİ ════════════════════════════ -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px;">
+    <!-- Platform Dağılımı -->
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:20px 24px;">
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:.5px;color:var(--text);margin:0 0 16px;">📊 Platform Dağılımı</h3>
+      <div style="position:relative;height:220px;">
+        <canvas id="platformChart"></canvas>
+      </div>
+    </div>
+    <!-- Son 7 Gün -->
+    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:20px 24px;">
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:.5px;color:var(--text);margin:0 0 16px;">📈 Son 7 Gün Deal</h3>
+      <div style="position:relative;height:220px;">
+        <canvas id="dailyChart"></canvas>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script>
+  (function(){
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+                 window.matchMedia('(prefers-color-scheme:dark)').matches;
+    var textColor = isDark ? '#e5e7eb' : '#374151';
+    var gridColor = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)';
+
+    // Platform doughnut
+    new Chart(document.getElementById('platformChart'), {
+      type: 'doughnut',
+      data: {
+        labels: {{ chart_labels | tojson }},
+        datasets: [{
+          data: {{ chart_values | tojson }},
+          backgroundColor: ['#f97316','#ef4444','#8b5cf6','#eab308'],
+          borderWidth: 0,
+          hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: textColor, font: { family: 'DM Sans', size: 12 }, padding: 12 } }
+        },
+        cutout: '65%'
+      }
+    });
+
+    // Günlük bar
+    new Chart(document.getElementById('dailyChart'), {
+      type: 'bar',
+      data: {
+        labels: {{ daily_labels | tojson }},
+        datasets: [{
+          label: 'Deal Sayısı',
+          data: {{ daily_values | tojson }},
+          backgroundColor: 'rgba(244,80,28,0.75)',
+          borderRadius: 6,
+          borderSkipped: false
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: textColor, font: { size: 11 } }, grid: { color: gridColor } },
+          y: { ticks: { color: textColor, font: { size: 11 }, stepSize: 1 }, grid: { color: gridColor }, beginAtZero: true }
+        }
+      }
+    });
+  })();
+  </script>
+
+  <!-- ══ TOPLU URL EKLE ════════════════════════════════════ -->
+  <div id="bulk-add" style="background:var(--bg2);border:2px solid var(--accent);border-radius:18px;overflow:hidden;margin-bottom:28px;box-shadow:0 4px 20px rgba(99,102,241,.1);">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:24px;">📋</span>
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0;">TOPLU URL EKLE</h2>
+      </div>
+      <span style="background:var(--bg);color:var(--muted);font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;border:1px solid var(--border);">Maks 200 URL · Her satıra 1</span>
+    </div>
+    <div style="padding:20px 24px;">
+      {% if bulk_result %}
+      <div style="margin-bottom:16px;padding:14px 18px;border-radius:12px;background:{% if bulk_result.errors %}#fff7ed{% else %}#f0fdf4{% endif %};border:1.5px solid {% if bulk_result.errors %}#f97316{% else %}#16a34a{% endif %};">
+        <div style="font-weight:700;font-size:14px;color:{% if bulk_result.errors %}#9a3412{% else %}#15803d{% endif %};">
+          ✅ {{ bulk_result.added }} yeni eklendi &nbsp;·&nbsp;
+          ⏭️ {{ bulk_result.skipped }} zaten sistemde &nbsp;·&nbsp;
+          ❌ {{ bulk_result.errors|length }} hata &nbsp;·&nbsp;
+          🔄 Çapraz tarama arka planda başlatıldı
+        </div>
+        {% if bulk_result.errors %}
+        <div style="margin-top:8px;font-size:12px;color:#7c2d12;line-height:1.7;">
+          {% for e in bulk_result.errors %}<div>• {{ e }}</div>{% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+      <form method="post" action="/admin/bulk-add">
+        <textarea name="urls" rows="8"
+          placeholder="Her satıra 1 URL yapıştır (n11, Trendyol, Hepsiburada, Amazon)&#10;&#10;https://www.n11.com/urun/...&#10;https://www.trendyol.com/...&#10;https://www.hepsiburada.com/...&#10;https://www.amazon.com.tr/..."
+          style="width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);color:var(--text);font-family:'DM Sans',monospace;font-size:13px;resize:vertical;outline:none;line-height:1.6;"></textarea>
+        <div style="margin-top:4px;text-align:right;font-size:11px;color:var(--muted);" id="bulk-url-count">0 URL</div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <button type="submit" style="background:linear-gradient(135deg,#6366f1,#818cf8);color:#fff;border:none;border-radius:10px;padding:10px 28px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 3px 12px rgba(99,102,241,.3);">
+            ➕ Hepsini Ekle & Tara
+          </button>
+          <span style="font-size:12px;color:var(--muted);">Her URL scraper kuyruğuna girer · çapraz platform tarama otomatik başlar</span>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script>
+  (function(){
+    var ta = document.querySelector('textarea[name="urls"]');
+    var ct = document.getElementById('bulk-url-count');
+    if (!ta || !ct) return;
+    function updateCount() {
+      var lines = ta.value.split('\n').filter(function(l){ return l.trim().startsWith('http'); });
+      ct.textContent = lines.length + ' URL';
+      ct.style.color = lines.length > 200 ? '#dc2626' : 'var(--muted)';
+    }
+    ta.addEventListener('input', updateCount);
+    updateCount();
+  })();
+  </script>
+
+  <!-- ══ ONAY BEKLEYEN LİNKLER ══════════════════════════════ -->
+  {% if pending_links %}
+  <div style="background:var(--bg2);border:2px solid #f97316;border-radius:18px;overflow:hidden;margin-bottom:28px;box-shadow:0 4px 20px rgba(249,115,22,.12);">
+    <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:24px;">🔗</span>
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0;">ONAY BEKLEYEN LİNKLER</h2>
+      </div>
+      <span style="background:#fff7ed;color:#9a3412;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_links|length }} link</span>
+    </div>
+    {% for lq in pending_links %}
+    <div id="link-item-{{ lq.id }}" style="padding:16px 24px;border-top:1px solid var(--border);{% if loop.first %}border-top:none;{% endif %}display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12px;font-weight:700;color:var(--fire);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">{{ lq.platform }}</div>
+        <div style="font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:600px;">
+          <a href="{{ lq.url }}" target="_blank" style="color:var(--accent);text-decoration:none;">{{ lq.url }}</a>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;">
+          {{ lq.username or 'Misafir' }} · {{ lq.submitted_at[:16] }}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <form method="post" action="/admin/link/{{ lq.id }}/approve" style="margin:0;" onsubmit="return handleLinkApprove(event, {{ lq.id }})">
+          <button type="submit" style="background:#16a34a;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-weight:700;font-size:13px;cursor:pointer;">✔ Onayla & Tara</button>
+        </form>
+        <form method="post" action="/admin/link/{{ lq.id }}/reject" style="margin:0;" onsubmit="return handleLinkReject(event, {{ lq.id }})">
+          <button type="submit" style="background:#dc2626;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-weight:700;font-size:13px;cursor:pointer;">✘ Reddet</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   <!-- ══ ONAY BEKLEYEN FIRSATLAR ════════════════════════════ -->
   {% if pending_deals %}
@@ -83,7 +216,7 @@
     </div>
 
     {% for d in pending_deals %}
-    <div style="padding:20px 24px;border-top:1px solid var(--border);{% if loop.first %}border-top:none;{% endif %}">
+    <div id="deal-card-{{ d.id }}" style="padding:20px 24px;border-top:1px solid var(--border);{% if loop.first %}border-top:none;{% endif %}">
       <div style="display:flex;align-items:start;gap:16px;flex-wrap:wrap;">
         <!-- Ürün bilgisi -->
         {% if d.image_url %}
@@ -100,8 +233,8 @@
           </div>
           <a href="/deal/{{ d.id }}" target="_blank" style="font-size:14px;font-weight:600;color:var(--text);text-decoration:none;display:block;margin-bottom:4px;">{{ d.title or '(başlık yok)' }}</a>
           <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
-            <span style="font-size:12px;color:var(--muted);text-decoration:line-through;">{{ "%.0f"|format(d.old_price) }} TL</span>
-            <span style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--fire);">{{ "%.0f"|format(d.new_price) }} TL</span>
+            <span style="font-size:12px;color:var(--muted);text-decoration:line-through;">{{ d.old_price|price_tr }} TL</span>
+            <span style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--fire);">{{ d.new_price|price_tr }} TL</span>
             <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;padding:3px 9px;border-radius:7px;">-%{{ d.discount_pct|int }}</span>
           </div>
           <div style="font-size:12px;color:var(--muted);margin-top:4px;">
@@ -111,9 +244,25 @@
           </div>
         </div>
 
+        <!-- Diğer platformda aktif deal uyarısı -->
+        {% if d.other_active_deals %}
+        <div style="width:100%;background:#fef9c3;border:1.5px solid #fbbf24;border-radius:10px;padding:10px 14px;font-size:12px;color:#92400e;display:flex;align-items:center;gap:8px;">
+          <span style="font-size:16px;">⚠️</span>
+          <div>
+            <strong>Bu ürün başka platformda zaten aktif deal!</strong>
+            {% for entry in d.other_active_deals.split(',') %}
+              {% set parts = entry.split('|') %}
+              <span style="display:inline-block;margin-top:3px;margin-right:6px;background:#fff;border:1px solid #fbbf24;border-radius:6px;padding:2px 8px;font-weight:700;">
+                {{ parts[0]|title }} — <a href="/deal/{{ parts[1] }}" target="_blank" style="color:#92400e;">Deal #{{ parts[1] }}</a> · {{ parts[2] }} TL
+              </span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
         <!-- Onay Formu -->
         <div style="width:320px;flex-shrink:0;">
-          <form method="post" action="/admin/deal/{{ d.id }}/approve" style="display:flex;flex-direction:column;gap:8px;">
+          <form method="post" action="/admin/deal/{{ d.id }}/approve" style="display:flex;flex-direction:column;gap:8px;" onsubmit="return handleDealApprove(event, {{ d.id }})">
             <label style="font-size:11px;font-weight:700;color:var(--text);letter-spacing:.3px;">AFFİLİATE LİNK <span style="color:var(--muted);font-weight:500;">(opsiyonel)</span></label>
             <input type="url" name="affiliate_url" placeholder="https://..."
                    value="{{ d.affiliate_url or '' }}"
@@ -126,7 +275,7 @@
               </button>
             </div>
           </form>
-          <form method="post" action="/admin/deal/{{ d.id }}/reject" style="margin-top:6px;" onsubmit="return confirm('Bu fırsatı reddetmek istediğine emin misin?')">
+          <form method="post" action="/admin/deal/{{ d.id }}/reject" style="margin-top:6px;" onsubmit="return handleDealReject(event, {{ d.id }})">
             <button type="submit" style="width:100%;background:#fef2f2;color:#dc2626;border:1.5px solid #fecaca;border-radius:10px;padding:8px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:700;cursor:pointer;">
               ✗ Reddet
             </button>
@@ -159,7 +308,7 @@
         </thead>
         <tbody>
           {% for d in recent_deals %}
-          <tr style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+          <tr id="deal-row-{{ d.id }}" style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
             <td style="padding:12px 16px;color:var(--muted);font-size:12px;">#{{ d.id }}</td>
             <td style="padding:12px 16px;max-width:280px;">
               <a href="/deal/{{ d.id }}" style="color:var(--text);text-decoration:none;font-weight:500;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;" target="_blank">
@@ -172,12 +321,12 @@
                 {{ d.platform|title }}
               </span>
             </td>
-            <td style="padding:12px 16px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:16px;color:var(--text);">{{ "%.0f"|format(d.new_price) }} TL</td>
+            <td style="padding:12px 16px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:16px;color:var(--text);">{{ d.new_price|price_tr }} TL</td>
             <td style="padding:12px 16px;text-align:right;">
               <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;padding:3px 9px;border-radius:7px;">-%{{ d.discount_pct|int }}</span>
             </td>
             <td style="padding:12px 16px;text-align:center;">
-              <form method="post" action="/admin/deal/{{ d.id }}/toggle" style="display:inline;">
+              <form method="post" action="/admin/deal/{{ d.id }}/toggle" style="display:inline;" onsubmit="return handleDealToggle(event, {{ d.id }})">
                 <button type="submit" style="border:none;cursor:pointer;padding:5px 12px;border-radius:8px;font-size:11px;font-weight:700;
                   {% if d.active %}background:#dcfce7;color:#16a34a;{% else %}background:#fef2f2;color:#dc2626;{% endif %}">
                   {% if d.active %}✓ Aktif{% else %}✗ Pasif{% endif %}
@@ -187,7 +336,7 @@
             <td style="padding:12px 16px;text-align:center;">
               <div style="display:flex;gap:6px;justify-content:center;">
                 <a href="/deal/{{ d.id }}" target="_blank" style="padding:5px 10px;background:var(--bg3);border-radius:7px;font-size:11px;font-weight:700;color:var(--text);text-decoration:none;">👁</a>
-                <form method="post" action="/admin/deal/{{ d.id }}/delete" style="display:inline;" onsubmit="return confirm('Bu fırsatı silmek istediğine emin misin?')">
+                <form method="post" action="/admin/deal/{{ d.id }}/delete" style="display:inline;" onsubmit="return handleDealDelete(event, {{ d.id }})">
                   <button type="submit" style="padding:5px 10px;background:#fef2f2;border:none;border-radius:7px;font-size:11px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Sil</button>
                 </form>
               </div>
@@ -200,16 +349,22 @@
   </div>
 
   <!-- ÜRÜN LİSTESİ -->
-  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-bottom:28px;">
+  <div id="products" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-bottom:28px;">
     <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:12px;">
         <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Ürünler</h2>
         <span style="font-size:12px;color:var(--muted);font-weight:600;" id="product-count">{{ products|length }} ürün</span>
       </div>
-      <input type="search" id="product-search" placeholder="Ürün adı veya URL ara..."
-             oninput="filterProducts(this.value)"
-             style="background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;width:260px;"
-             onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'">
+      <form method="get" action="/admin" id="product-search-form" style="display:flex;gap:6px;align-items:center;">
+        <input type="search" name="q" id="product-search" placeholder="Ürün adı veya URL ara..."
+               value="{{ search_q }}"
+               oninput="debouncedSearch(this.value)"
+               style="background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;width:260px;"
+               onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'">
+        {% if search_q %}
+        <a href="/admin#products" style="font-size:12px;color:var(--muted);text-decoration:none;padding:4px 8px;background:var(--bg3);border-radius:7px;border:1px solid var(--border);">✕ Temizle</a>
+        {% endif %}
+      </form>
     </div>
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -235,9 +390,7 @@
             </td>
             <td style="padding:12px 16px;text-align:right;font-weight:600;color:var(--text);">{{ p.price_count }}</td>
             <td style="padding:12px 16px;text-align:center;">
-              <form method="post" action="/admin/product/{{ p.id }}/delete" style="display:inline;" onsubmit="return confirm('Ürünü ve tüm geçmişini silmek istediğine emin misin? Bu işlem geri alınamaz!')">
-                <button type="submit" style="padding:5px 14px;background:#fef2f2;border:none;border-radius:7px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Ürünü Sil</button>
-              </form>
+              <button onclick="deleteProduct({{ p.id }}, this)" style="padding:5px 14px;background:#fef2f2;border:none;border-radius:7px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Ürünü Sil</button>
             </td>
           </tr>
           {% endfor %}
@@ -287,97 +440,245 @@
     </div>
   </div>
 
+  <!-- ══ SCRAPER HATA LOGLARI ════════════════════════════════ -->
+  {% if scraper_errors %}
+  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-top:28px;">
+    <div style="padding:18px 24px;border-bottom:1.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:20px;">🔴</span>
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">SCRAPER HATA LOGLARI</h2>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="background:#fef2f2;color:#dc2626;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">Son 50 hata</span>
+        <form method="post" action="/admin/clear-errors" onsubmit="return confirm('Tüm hatalar silinsin mi?')">
+          <button type="submit" style="background:#dc2626;color:#fff;border:none;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:700;cursor:pointer;">Hataları Sıfırla</button>
+        </form>
+      </div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="background:var(--bg3);">
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Ürün</th>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Platform</th>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Hatalı URL</th>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Hata</th>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Zaman</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for e in scraper_errors %}
+          <tr style="border-top:1px solid var(--border);">
+            <td style="padding:8px 14px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              {% if e.product_id %}
+              <a href="/product/{{ e.product_id }}" style="color:var(--accent);text-decoration:none;font-size:12px;">
+                {{ (e.title or ('Ürün #' ~ e.product_id))[:35] }}
+              </a>
+              {% else %}—{% endif %}
+            </td>
+            <td style="padding:8px 14px;">
+              <span class="badge-{{ e.platform }}" style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;">{{ e.platform }}</span>
+            </td>
+            <td style="padding:8px 14px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              {% if e.url %}
+              <a href="{{ e.url }}" target="_blank" rel="nofollow"
+                 style="color:#6366f1;text-decoration:none;font-size:11px;"
+                 title="{{ e.url }}">{{ e.url[:60] }}…</a>
+              {% else %}—{% endif %}
+            </td>
+            <td style="padding:8px 14px;color:#dc2626;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ e.error_msg }}">{{ e.error_msg }}</td>
+            <td style="padding:8px 14px;color:var(--muted);white-space:nowrap;">{{ e.occurred_at[:16] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
 </div>
 
 <style>
 @keyframes spin { to { transform: rotate(360deg); } }
+#wa-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999; align-items:center; justify-content:center; }
+#wa-modal.show { display:flex; }
+#wa-box { background:var(--bg2); border-radius:20px; padding:32px 28px; max-width:420px; width:90%; text-align:center; box-shadow:0 8px 40px rgba(0,0,0,.3); }
 </style>
 <script>
-function filterProducts(q) {
-  q = q.toLowerCase().trim();
-  var rows = document.querySelectorAll('#product-tbody tr');
-  var visible = 0;
-  rows.forEach(function(row) {
-    var text = row.textContent.toLowerCase();
-    var show = !q || text.includes(q);
-    row.style.display = show ? '' : 'none';
-    if (show) visible++;
+var _searchTimer = null;
+function debouncedSearch(val) {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(function() {
+    var url = new URL(window.location.href);
+    if (val.trim()) {
+      url.searchParams.set('q', val.trim());
+    } else {
+      url.searchParams.delete('q');
+    }
+    url.hash = 'products';
+    window.location.href = url.toString();
+  }, 500);
+}
+
+function deleteProduct(pid, btn) {
+  if (!confirm('Ürünü ve tüm geçmişini silmek istediğine emin misin? Bu işlem geri alınamaz!')) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  fetch('/admin/product/' + pid + '/delete', {method: 'POST', redirect: 'manual'})
+    .then(function() {
+      var row = btn.closest('tr');
+      row.remove();
+      var visible = document.querySelectorAll('#product-tbody tr').length;
+      document.getElementById('product-count').textContent = visible + ' ürün';
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = '🗑 Ürünü Sil';
+    });
+}
+
+// Kuyrukta kartı: 3 saniyede bir DB'deki anlık pending sayısını güncelle
+function pollQueue() {
+  fetch('/api/scan-status').then(function(r){ return r.json(); }).then(function(s) {
+    var qEl = document.getElementById('queue-count-val');
+    if (qEl && s.queue_pending !== undefined) { qEl.textContent = s.queue_pending; }
+  }).catch(function(){});
+}
+pollQueue();
+setInterval(pollQueue, 3000);
+
+// ── Admin AJAX helpers ────────────────────────────────────────
+function _ajaxPost(form, followRedirect) {
+  return fetch(form.action, {method:'POST', body: new FormData(form), redirect: followRedirect ? 'follow' : 'manual'});
+}
+function handleLinkApprove(e, id) {
+  e.preventDefault();
+  var btn = e.target.querySelector('button'); var orig = btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='...';
+  _ajaxPost(e.target, false).then(function() {
+    var el = document.getElementById('link-item-'+id); if(el) el.remove();
+  }).catch(function(){ btn.disabled=false; btn.innerHTML=orig; });
+  return false;
+}
+function handleLinkReject(e, id) {
+  e.preventDefault();
+  var btn = e.target.querySelector('button'); var orig = btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='...';
+  _ajaxPost(e.target, false).then(function() {
+    var el = document.getElementById('link-item-'+id); if(el) el.remove();
+  }).catch(function(){ btn.disabled=false; btn.innerHTML=orig; });
+  return false;
+}
+function handleDealApprove(e, id) {
+  e.preventDefault();
+  var btn = e.target.querySelector('button[type=submit]'); var orig = btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='⏳ Onaylanıyor...';
+  _ajaxPost(e.target, true).then(function(r) {
+    var card = document.getElementById('deal-card-'+id); if(card) card.remove();
+    try {
+      var u = new URL(r.url);
+      var wt = u.searchParams.get('wa_text');
+      if(wt) {
+        document.getElementById('wa-text-area').value = wt;
+        document.getElementById('wa-share-btn').href = 'https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B';
+        document.getElementById('wa-modal').style.display = 'flex';
+      }
+    } catch(ex){}
+  }).catch(function(){ btn.disabled=false; btn.innerHTML=orig; });
+  return false;
+}
+function handleDealReject(e, id) {
+  e.preventDefault();
+  if(!confirm('Bu fırsatı reddetmek istediğine emin misin?')) return false;
+  var btn = e.target.querySelector('button'); btn.disabled=true;
+  _ajaxPost(e.target, false).then(function() {
+    var card = document.getElementById('deal-card-'+id); if(card) card.remove();
+  }).catch(function(){ btn.disabled=false; });
+  return false;
+}
+function handleDealToggle(e, id) {
+  e.preventDefault();
+  var btn = e.target.querySelector('button');
+  var wasActive = btn.textContent.trim().charAt(0) === '✓';
+  _ajaxPost(e.target, false).then(function() {
+    if(wasActive) { btn.textContent='✗ Pasif'; btn.style.background='#fef2f2'; btn.style.color='#dc2626'; }
+    else          { btn.textContent='✓ Aktif'; btn.style.background='#dcfce7'; btn.style.color='#16a34a'; }
   });
-  document.getElementById('product-count').textContent = visible + ' ürün';
+  return false;
+}
+function handleDealDelete(e, id) {
+  e.preventDefault();
+  if(!confirm('Bu fırsatı silmek istediğine emin misin?')) return false;
+  var btn = e.target.querySelector('button'); btn.disabled=true;
+  _ajaxPost(e.target, false).then(function() {
+    var row = document.getElementById('deal-row-'+id); if(row) row.remove();
+  }).catch(function(){ btn.disabled=false; });
+  return false;
+}
+</script>
+
+<!-- WhatsApp Paylaşım Modal -->
+<div id="wa-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:var(--bg2);border-radius:20px;padding:32px 28px;max-width:460px;width:90%;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.3);">
+    <div style="font-size:48px;margin-bottom:12px;">✅</div>
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--text);margin:0 0 6px;">Fırsat Onaylandı!</h2>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Telegram kanalına gönderildi. WhatsApp kanalında da paylaşmak ister misin?</p>
+
+    <!-- Kopyalanabilir metin -->
+    <textarea id="wa-text-area" readonly
+      style="width:100%;height:110px;background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text);resize:none;box-sizing:border-box;margin-bottom:10px;text-align:left;"></textarea>
+
+    <!-- Metni Kopyala -->
+    <button id="wa-copy-btn" onclick="copyWaText()"
+      style="width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:10px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;color:var(--text);cursor:pointer;margin-bottom:8px;">
+      📋 Metni Kopyala
+    </button>
+
+    <!-- WhatsApp'ta Paylaş butonu -->
+    <a id="wa-share-btn" href="#" target="_blank"
+       style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;background:#25d366;color:#fff;border-radius:12px;padding:13px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;text-decoration:none;margin-bottom:8px;box-sizing:border-box;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+      WhatsApp'ta Paylaş
+    </a>
+
+    <!-- WhatsApp Kanalına Git -->
+    {% if wa_channel_url %}
+    <a id="wa-channel-link" href="{{ wa_channel_url }}" target="_blank"
+       style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--bg3);color:#25d366;border:1.5px solid #25d366;border-radius:12px;padding:10px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;text-decoration:none;margin-bottom:8px;box-sizing:border-box;">
+      📢 Kanala Git ↗
+    </a>
+    {% endif %}
+
+    <button onclick="document.getElementById('wa-modal').style.display='none';history.replaceState(null,'','/admin');"
+            style="width:100%;background:transparent;border:none;border-radius:12px;padding:10px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;">
+      Geç
+    </button>
+  </div>
+</div>
+<script>
+function copyWaText() {
+  var ta = document.getElementById('wa-text-area');
+  ta.select();
+  document.execCommand('copy');
+  var btn = document.getElementById('wa-copy-btn');
+  btn.textContent = '✓ Kopyalandı!';
+  btn.style.color = '#16a34a';
+  btn.style.borderColor = '#16a34a';
+  setTimeout(function() {
+    btn.textContent = '📋 Metni Kopyala';
+    btn.style.color = 'var(--text)';
+    btn.style.borderColor = 'var(--border)';
+  }, 2000);
 }
 
-// --- Scan progress polling ---
-var _scanInterval = null;
-
-function renderErrors(errors) {
-  var wrap = document.getElementById('scan-errors-wrap');
-  var list = document.getElementById('scan-errors-list');
-  if (!errors || errors.length === 0) {
-    wrap.style.display = 'none';
-    return;
+(function() {
+  var params = new URLSearchParams(window.location.search);
+  var waText = params.get('wa_text');
+  if (waText) {
+    document.getElementById('wa-text-area').value = waText;
+    document.getElementById('wa-share-btn').href = 'https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B';
+    document.getElementById('wa-modal').style.display = 'flex';
   }
-  wrap.style.display = 'block';
-  list.innerHTML = '';
-  errors.forEach(function(e) {
-    var row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:7px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;font-size:12px;';
-    row.innerHTML =
-      '<span style="font-weight:700;color:#dc2626;flex-shrink:0;">#' + e.pid + '</span>' +
-      '<span style="font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + (e.title||'') + '">' + (e.title || '(başlık yok)') + '</span>' +
-      '<span style="flex-shrink:0;background:#fee2e2;color:#991b1b;padding:2px 7px;border-radius:5px;font-weight:700;">' + (e.platform||'') + '</span>' +
-      '<span style="flex-shrink:0;color:#b91c1c;">' + (e.reason||'') + '</span>';
-    list.appendChild(row);
-  });
-}
-
-function updateScanUI(s) {
-  var box = document.getElementById('scan-progress-box');
-  var btn = document.getElementById('scan-btn');
-  if (s.running || (s.errors && s.errors.length > 0)) {
-    box.style.display = 'block';
-  }
-  if (s.running) {
-    btn.disabled = true;
-    btn.style.opacity = '0.5';
-    btn.style.cursor = 'not-allowed';
-    document.getElementById('scan-spinner').style.display = 'inline-block';
-    var pct = s.total > 0 ? (s.current / s.total * 100) : 0;
-    document.getElementById('scan-bar').style.width = pct.toFixed(1) + '%';
-    document.getElementById('scan-current').textContent = s.current;
-    document.getElementById('scan-total').textContent = s.total;
-    document.getElementById('scan-platform').textContent = s.platform ? ('(' + s.platform + ')') : '';
-    document.getElementById('scan-title').textContent = s.title || '';
-    document.getElementById('scan-done-count').textContent = s.done + ' tamam';
-    document.getElementById('scan-fail-count').textContent = s.failed + ' hata';
-  } else {
-    btn.disabled = false;
-    btn.style.opacity = '';
-    btn.style.cursor = '';
-    document.getElementById('scan-spinner').style.display = 'none';
-    if (_scanInterval) {
-      clearInterval(_scanInterval);
-      _scanInterval = null;
-    }
-    // Tarama bitti — başlığı güncelle
-    if (s.done > 0 || s.failed > 0) {
-      document.getElementById('scan-heading').textContent = 'TARAMA TAMAMLANDI';
-      document.getElementById('scan-bar').style.width = '100%';
-      document.getElementById('scan-bar').style.background = '#16a34a';
-      document.getElementById('scan-current').textContent = s.total;
-    }
-    if (s.errors && s.errors.length === 0 && s.done === 0 && s.failed === 0) {
-      box.style.display = 'none';
-    }
-  }
-  renderErrors(s.errors || []);
-}
-
-function pollScan() {
-  fetch('/api/scan-status').then(function(r){ return r.json(); }).then(updateScanUI).catch(function(){});
-}
-
-// Start polling immediately and on an interval
-pollScan();
-_scanInterval = setInterval(pollScan, 2000);
+})();
 </script>
 {% endblock %}

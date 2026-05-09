@@ -47,7 +47,7 @@
         ('📉', stats.today_drops, 'Bugün Düşen', 'linear-gradient(135deg,#10b981,#34d399)'),
         ('📦', stats.tracked_products_count, 'Takip Edilen Ürün', 'linear-gradient(135deg,#6366f1,#818cf8)')
       ] %}
-      <div style="background:var(--bg3);border:1.5px solid var(--border);border-radius:16px;padding:16px 24px;display:flex;align-items:center;gap:12px;min-width:150px;">
+      <div style="background:var(--bg3);border:1.5px solid var(--border);border-radius:16px;padding:16px 24px;display:flex;align-items:center;gap:12px;min-width:150px;{% if loop.first or loop.index == 2 %}cursor:pointer;{% endif %}"{% if loop.first %} onclick="location.href='/#deals-anchor'"{% elif loop.index == 2 %} onclick="location.href='/?tab=today#deals-anchor'"{% endif %}>
         <div style="width:40px;height:40px;border-radius:11px;background:{{ grad }};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;">{{ icon }}</div>
         <div style="text-align:left;">
           <div class="stat-counter" data-target="{{ num }}" style="font-family:'Bebas Neue',sans-serif;font-size:30px;line-height:1;background:{{ grad }};-webkit-background-clip:text;-webkit-text-fill-color:transparent;">0</div>
@@ -117,7 +117,7 @@
 </script>
 
 <!-- PLATFORM FİLTRELERİ -->
-<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:0;">
+<div id="deals-anchor" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:0;">
   <a href="/?sort={{ sort }}" class="filter-pill {{ 'active' if not platform else '' }}">Tümü</a>
   {% for p, src, label in [
     ('amazon','https://www.google.com/s2/favicons?domain=amazon.com.tr&sz=32','Amazon'),
@@ -158,7 +158,7 @@
 {% endif %}
 
 {% if deals %}
-<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px;">
+<div class="deals-grid">
   {% for d in deals %}
   <a href="/deal/{{ d.id }}" style="text-decoration:none;color:inherit;{% if d.stock == 'Stok Yok' %}opacity:.55;{% endif %}" class="deal-card">
     <div class="card-glow"></div>
@@ -191,11 +191,19 @@
       </div>
       {% endif %}
       <div class="card-price">
-        <span class="price-new">{{ "%.0f"|format(d.new_price) }}</span>
+        <span class="price-new">{{ d.new_price|price_tr }}</span>
         <span style="font-size:13px;color:var(--muted);font-weight:600;">TL</span>
-        <span class="price-old">{{ "%.0f"|format(d.old_price) }} TL</span>
+        <span class="price-old">{{ d.old_price|price_tr }} TL</span>
         <span class="price-save">%{{ d.discount_pct|int }}</span>
       </div>
+      {% if d.compare_group_id and d.best_compare_price %}
+      <div style="margin-top:5px;">
+        <span style="display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;
+          {% if d.best_compare_platform == d.platform %}background:#dcfce7;color:#16a34a;{% else %}background:var(--bg3);color:var(--muted);border:1px solid var(--border);{% endif %}">
+          ⚖️ {% if d.best_compare_platform == d.platform %}Bu platformda en ucuz{% else %}{{ d.best_compare_platform|title }}: {{ d.best_compare_price|price_tr }} TL{% endif %}
+        </span>
+      </div>
+      {% endif %}
       {% if d.last_seen_at %}
       <div style="font-size:10px;color:var(--muted);margin-top:4px;opacity:.7;">🕐 {{ d.last_seen_at|time_ago }}</div>
       {% endif %}
@@ -277,7 +285,7 @@
       <div class="card-body" style="padding:10px;">
         <p class="card-title" style="font-size:12px;-webkit-line-clamp:2;margin-bottom:6px;">{{ d.title or '…' }}</p>
         <div class="card-price" style="gap:4px;">
-          <span class="price-new" style="font-size:15px;">{{ "%.0f"|format(d.new_price) }}</span>
+          <span class="price-new" style="font-size:15px;">{{ d.new_price|price_tr }}</span>
           <span style="font-size:11px;color:var(--muted);font-weight:600;">TL</span>
         </div>
       </div>
@@ -321,7 +329,7 @@
       <div class="card-body" style="padding:10px;">
         <p class="card-title" style="font-size:12px;-webkit-line-clamp:2;margin-bottom:6px;">{{ d.title or '…' }}</p>
         <div class="card-price" style="gap:4px;">
-          <span class="price-new" style="font-size:15px;">{{ "%.0f"|format(d.new_price) }}</span>
+          <span class="price-new" style="font-size:15px;">{{ d.new_price|price_tr }}</span>
           <span style="font-size:11px;color:var(--muted);font-weight:600;">TL</span>
         </div>
       </div>
