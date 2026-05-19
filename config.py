@@ -56,7 +56,7 @@ RESCAN_VOLATILE     = 15    # Çok sık değişen
 
 # ── Deal kuralları ───────────────────────────────────────────────
 # Kaç saattir kontrol edilmemiş deal'lar pasife alınsın
-AUTO_EXPIRE_HOURS = 72
+AUTO_EXPIRE_HOURS = 12
 
 # Minimum indirim yüzdesi (deal oluşturmak için)
 MIN_DISCOUNT_PCT = 5.0

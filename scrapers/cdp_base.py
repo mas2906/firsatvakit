@@ -127,6 +127,8 @@ async def cdp_intercept_xhr(page, url: str, patterns: list, timeout: int = 15) -
             pass
     except Exception as e:
         log.debug(f"[cdp_intercept_xhr] goto hatası: {e}")
+    finally:
+        page.remove_listener("response", on_response)
 
     return captured
 
@@ -135,23 +137,29 @@ class BrowserPool:
     """
     Tek Chromium instance üzerinde birden fazla sayfa yöneten havuz.
     Resource blocking varsayılan olarak aktif.
+    N sayfa sonrası browser yeniden başlatılır (bellek birikimini önler).
     """
+
+    RESTART_AFTER = 300  # kaç sayfadan sonra browser restart edilsin
 
     def __init__(self, max_pages: int = 8):
         self.max_pages = max_pages
+        self._pw = None
         self._browser = None
         self._context = None
         self._sem = asyncio.Semaphore(max_pages)
         self._lock = asyncio.Lock()
         self._started = False
+        self._page_count = 0
+        self._restart_lock = asyncio.Lock()
 
     async def start(self) -> None:
         from playwright.async_api import async_playwright
         async with self._lock:
             if self._started:
                 return
-            pw = await async_playwright().start()
-            self._browser = await pw.chromium.launch(
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(
                 headless=True,
                 args=[
                     "--disable-gpu",
@@ -185,13 +193,47 @@ class BrowserPool:
             self._started = True
             log.info(f"[BrowserPool] Başladı — max_pages={self.max_pages}")
 
+    async def _restart(self) -> None:
+        """Browser'ı yeniden başlat — bellek birikimini temizler."""
+        async with self._restart_lock:
+            if self._page_count < self.RESTART_AFTER:
+                return  # başka coroutine zaten yaptı
+            log.info(f"[BrowserPool] {self._page_count} sayfa sonrası restart — aktif sayfalar bekleniyor...")
+
+            # Tüm aktif sayfalar bitene kadar bekle: semaphore'u tamamen doldur.
+            # Bu aynı zamanda yeni acquire() çağrılarını bloke eder.
+            acquired = 0
+            try:
+                for _ in range(self.max_pages):
+                    await asyncio.wait_for(self._sem.acquire(), timeout=30)
+                    acquired += 1
+            except asyncio.TimeoutError:
+                log.warning(f"[BrowserPool] Drain timeout — {acquired}/{self.max_pages} slot, zorla devam")
+
+            try:
+                await self.stop()
+                await self.start()
+                self._page_count = 0
+                log.info("[BrowserPool] Restart tamamlandı")
+            finally:
+                # Slotları geri ver — bekleyen acquire() çağrıları devam edebilir
+                for _ in range(acquired):
+                    self._sem.release()
+
     async def acquire(self):
         """Havuzdan bir sayfa al (semaphore ile sınırlı)."""
         if not self._started:
             await self.start()
+        # Bellek birikimine karşı periyodik restart
+        if self._page_count >= self.RESTART_AFTER:
+            await self._restart()
         await self._sem.acquire()
         try:
+            # Restart sürecinde context geçici olarak None olabilir
+            if self._context is None:
+                await self.start()
             page = await self._context.new_page()
+            self._page_count += 1
             try:
                 from playwright_stealth import Stealth
                 await Stealth().apply_stealth_async(page)
@@ -217,11 +259,19 @@ class BrowserPool:
                     await self._context.close()
                 except Exception:
                     pass
+                self._context = None
             if self._browser:
                 try:
                     await self._browser.close()
                 except Exception:
                     pass
+                self._browser = None
+            if self._pw:
+                try:
+                    await self._pw.stop()
+                except Exception:
+                    pass
+                self._pw = None
             self._started = False
             log.info("[BrowserPool] Durduruldu")
 

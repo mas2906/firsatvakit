@@ -18,7 +18,7 @@ import httpx
 from bs4 import BeautifulSoup
 from scrapers.utils import (
     UA_POOL, parse_price_tr_clean, normalize_image_url,
-    detect_cart_discount, PLAYWRIGHT_SEM, CLOUDFLARE_TITLES,
+    detect_cart_discount, get_playwright_sem, CLOUDFLARE_TITLES,
     STEALTH_SCRIPT, stream_fetch, RateLimiter, get_stealth_headers
 )
 
@@ -57,14 +57,61 @@ query ProductDetail($contentId: Long!) {
 
 try:
     from curl_cffi.requests import AsyncSession as CurlSession
-
     CURL_CFFI_AVAILABLE = True
 except ImportError:
+    CurlSession = None
     CURL_CFFI_AVAILABLE = False
 
-_limiter      = RateLimiter(2.0, 4.0)   # tam scrape
-_limiter_fast = RateLimiter(1.0, 2.0)   # price_only
-_limiter_gql  = RateLimiter(0.5, 1.5)   # graphql (API — daha az yük)
+_limiter      = RateLimiter(0.8, 2.0)
+_limiter_fast = RateLimiter(0.3, 0.8)
+_limiter_gql  = RateLimiter(0.05, 0.2)
+
+# Global persistent sessions — TCP/TLS maliyetini ortadan kaldırır
+_CURL_SESSION: Optional[CurlSession] = None
+_CURL_LOCK: Optional[asyncio.Lock] = None
+_HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
+_HTTPX_LOCK: Optional[asyncio.Lock] = None
+
+
+def _get_curl_lock() -> asyncio.Lock:
+    global _CURL_LOCK
+    if _CURL_LOCK is None:
+        _CURL_LOCK = asyncio.Lock()
+    return _CURL_LOCK
+
+
+def _get_httpx_lock() -> asyncio.Lock:
+    global _HTTPX_LOCK
+    if _HTTPX_LOCK is None:
+        _HTTPX_LOCK = asyncio.Lock()
+    return _HTTPX_LOCK
+
+
+async def _get_curl_session() -> CurlSession:
+    global _CURL_SESSION
+    async with _get_curl_lock():
+        if _CURL_SESSION is None:
+            imp = random.choice(["chrome124", "chrome120", "chrome136"])
+            _CURL_SESSION = CurlSession(impersonate=imp, timeout=15)
+            log.info(f"[n11] curl session oluşturuldu: {imp}")
+        return _CURL_SESSION
+
+
+def _reset_curl_session() -> None:
+    global _CURL_SESSION
+    _CURL_SESSION = None
+
+
+async def _get_httpx_client() -> httpx.AsyncClient:
+    global _HTTPX_CLIENT
+    async with _get_httpx_lock():
+        if _HTTPX_CLIENT is None or _HTTPX_CLIENT.is_closed:
+            _HTTPX_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0),
+                limits=httpx.Limits(max_connections=6, max_keepalive_connections=3),
+                follow_redirects=True,
+            )
+        return _HTTPX_CLIENT
 
 
 def _extract_content_id(url: str) -> Optional[int]:
@@ -73,18 +120,21 @@ def _extract_content_id(url: str) -> Optional[int]:
     Desteklenen formatlar:
       .../urun/some-product-B1234567      → 1234567
       .../urun/some-product?contentId=... → URL'deki ID
-      .../urun/some-product-1234567       → sondaki sayı
+      .../urun/some-product-1234567       → slug sonundaki sayı (en yaygın)
+      .../urun/some-product-1234567?magaza=... → query öncesi son sayı
     """
     # ?contentId= query param
     m = re.search(r'[?&]contentId=(\d+)', url)
     if m:
         return int(m.group(1))
-    # URL sonunda -B{id} formatı (N11 standart)
+    # URL sonunda -B{id} formatı
     m = re.search(r'-[Bb](\d{6,12})(?:[/?#]|$)', url)
     if m:
         return int(m.group(1))
-    # URL sonunda düz sayı (en az 6 hane)
-    m = re.search(r'/(\d{6,12})(?:[/?#]|$)', url)
+    # En yaygın format: /urun/product-name-12345678 veya /urun/product-name-12345678?magaza=...
+    # Query string ve fragment'ı çıkar, path'in sonundaki sayıyı al
+    path = url.split('?')[0].split('#')[0]
+    m = re.search(r'-(\d{5,12})$', path)
     if m:
         return int(m.group(1))
     return None
@@ -179,8 +229,8 @@ async def _via_graphql(url: str) -> Optional[dict]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.post(_GQL_ENDPOINT, json=payload, headers=headers)
+        client = await _get_httpx_client()
+        resp = await client.post(_GQL_ENDPOINT, json=payload, headers=headers)
 
         if resp.status_code != 200:
             log.warning("[n11/graphql] HTTP %d — contentId=%s", resp.status_code, content_id)
@@ -203,12 +253,12 @@ async def _via_graphql(url: str) -> Optional[dict]:
 
 def _parse_window_model(html: str) -> tuple:
     """
-    window.model JS objesinden fiyat, cart_discount ve stok çıkarır.
-    DÜZELTME: personalizedData altındaki gerçek sepet fiyatı hiyerarşisi eklendi.
+    window.model JS objesinden fiyat, cart_discount, stok, kupon ve varyantları çıkarır.
+    Dönüş: (price_float, cart_discount, stock_wm, coupon, variants)
     """
     m = re.search(r'window\.model\s*=\s*\{', html)
     if not m:
-        return None, False, None
+        return None, False, None, None, None
 
     start = m.start() + len(m.group(0)) - 1
     depth = 0
@@ -225,7 +275,7 @@ def _parse_window_model(html: str) -> tuple:
     try:
         model = json.loads(html[start:end])
     except Exception:
-        return None, False, None
+        return None, False, None, None, None
 
     product = model.get('product') or {}
 
@@ -236,7 +286,7 @@ def _parse_window_model(html: str) -> tuple:
         price_float = pm.get('price')
 
     if not isinstance(price_float, (int, float)) or price_float <= 0:
-        return None, False, None
+        return None, False, None, None, None
 
     # 2. Sepet İndirimi Tespiti (Geliştirilmiş Mantık)
     pd_data = product.get('personalizedData') or {}
@@ -263,9 +313,21 @@ def _parse_window_model(html: str) -> tuple:
     if (final_badge and "SEPETTE" in str(final_badge).upper()) or bool(coupons):
         cart_discount = True
 
-    # Orijinal HTML fallback'i
+    # Orijinal HTML fallback'i — SEPETTE badge'i JSON'da görünmeyince HTML'den çıkar
     if not cart_discount and ('price-badge' in html and 'SEPETTE' in html):
         cart_discount = True
+        # JSON sepet fiyatı yoksa HTML'den regex ile çek
+        for _pat in [
+            r'price-badge[^>]*>[^<]*SEPETTE[^<]*</[^>]+>[\s\S]{0,300}?<ins[^>]*>([\d.,]+(?:\s*TL)?)',
+            r'SEPETTE[\s\S]{0,400}?<ins[^>]*>([\d.,]+(?:\s*TL)?)',
+            r'newPrice[\s\S]{0,200}?<ins[^>]*>([\d.,]+(?:\s*TL)?)',
+        ]:
+            _m = re.search(_pat, html, re.I)
+            if _m:
+                _bp = parse_price_tr_clean(_m.group(1))
+                if _bp and 0 < _bp < price_float:
+                    price_float = _bp
+                    break
 
     # 3. Stok (Orijinal hiyerarşi korunarak)
     stock_wm = None
@@ -282,23 +344,69 @@ def _parse_window_model(html: str) -> tuple:
     elif is_salable is True and stock_wm is None:
         stock_wm = "Stokta Var"
 
-    return float(price_float), cart_discount, stock_wm
+    # 4. Kupon
+    coupon = None
+    if coupons:
+        for c in coupons:
+            if isinstance(c, dict):
+                t = c.get("title") or c.get("text") or c.get("name") or ""
+                if t:
+                    coupon = str(t)[:200]
+                    break
+        if not coupon:
+            coupon = "Kupon mevcut"
+
+    # 5. Varyantlar
+    variants_list = None
+    raw_variants = product.get('variants') or product.get('productVariants') or []
+    if raw_variants:
+        parsed = []
+        seen: set = set()
+        for var in raw_variants:
+            if not isinstance(var, dict):
+                continue
+            attr_name = (
+                var.get('attributeValue') or var.get('name') or
+                var.get('value') or var.get('optionName') or ""
+            ).strip()
+            if not attr_name or attr_name in seen:
+                continue
+            seen.add(attr_name)
+            vp = var.get('priceFloat') or var.get('price') or var.get('basketPrice')
+            var_price = float(vp) if isinstance(vp, (int, float)) and vp > 0 else None
+            in_stock = not (var.get('isOutOfStock') or var.get('outOfStock') or (var.get('stockCount') or 1) == 0)
+            parsed.append({"name": attr_name[:100], "price": var_price, "in_stock": in_stock})
+        if parsed:
+            variants_list = parsed[:50]
+
+    return float(price_float), cart_discount, stock_wm, coupon, variants_list
 
 
 def _parse_html(html: str) -> dict:
     """Orijinal parse akışı: soup verisi window.model ile finalize edilir."""
     soup = BeautifulSoup(html, 'html.parser')
     data = _parse_soup(soup)
-    wm_price, wm_cart_discount, wm_stock = _parse_window_model(html)
+    wm_price, wm_cart_discount, wm_stock, wm_coupon, wm_variants = _parse_window_model(html)
 
-    # JSON verisi CSS'den daha güvenilirdir, çelişki varsa JSON kazanır
+    # Fiyat birleştirme: JSON daha düşükse veya CSS fiyatı yoksa JSON'u kullan.
+    # SEPETTE senaryosu: window.model listPrice=4352 içerirken CSS'den newPrice=3899 geliyorsa
+    # JSON fiyatı daha YÜKSEK olduğu için CSS fiyatını koruruz; sadece cart_discount flag'ini güncelle.
     if wm_price:
-        if wm_cart_discount or not data.get('price') or wm_price < (data.get('price') or 999999):
+        css_price = data.get('price')
+        if not css_price or wm_price < css_price:
             data['price'] = wm_price
             data['cart_discount'] = wm_cart_discount
+        elif wm_cart_discount:
+            data['cart_discount'] = True
 
     if wm_stock and data.get('stock') in (None, 'Bilinmiyor'):
         data['stock'] = wm_stock
+
+    if wm_coupon:
+        data['coupon'] = wm_coupon
+    if wm_variants:
+        data['variants'] = wm_variants
+
     return data
 
 
@@ -327,6 +435,31 @@ def _parse_soup(soup: BeautifulSoup) -> dict:
             if _ni:
                 price = parse_price_tr_clean(_ni.get_text(strip=True))
                 cart_discount_html = True
+
+    # 0a2) .price-badge içindeki SEPETTE etiketi ile fiyat
+    if not price:
+        for badge_sel in [".price-badge", "[class*='price-badge']", "[class*='sepette']"]:
+            badge = soup.select_one(badge_sel)
+            if not badge:
+                continue
+            if "SEPETTE" not in badge.get_text(strip=True).upper():
+                continue
+            # Badge'in parent/grandparent'ında ins veya .newPrice ara
+            _parent = badge.parent
+            for _ in range(4):
+                if not _parent:
+                    break
+                for price_sel in ["ins", ".newPrice ins", ".newPrice"]:
+                    _pe = _parent.select_one(price_sel)
+                    if _pe and _pe != badge:
+                        _p = parse_price_tr_clean(_pe.get_text(strip=True))
+                        if _p:
+                            price = _p
+                            cart_discount_html = True
+                            break
+                if price:
+                    break
+                _parent = _parent.parent
 
     # 0b) Sepette indirimli fiyat (Orijinal alternatif seçiciler)
     if not price:
@@ -398,22 +531,27 @@ def _parse_soup(soup: BeautifulSoup) -> dict:
         "title": title, "price": price, "image_url": image_url,
         "rating": rating, "review_count": review_count, "stock": stock,
         "barcode": barcode, "cart_discount": cart_discount,
+        "coupon": None, "variants": None,
     }
 
 
 async def _via_curl_cffi(url: str) -> Optional[dict]:
     try:
-        async with CurlSession(impersonate=random.choice(["chrome124", "chrome120"])) as s:
-            html_text = await stream_fetch(
-                s, url, json_markers=["window.model"], max_kb=1000, timeout=12,
-                headers={"Referer": "https://www.n11.com/"}
-            )
-        if not html_text or len(html_text) < 5000: return None
-        if any(t.lower() in html_text.lower() for t in CLOUDFLARE_TITLES): return None
+        s = await _get_curl_session()
+        html_text = await stream_fetch(
+            s, url, json_markers=["window.model"], max_kb=1000, timeout=12,
+            headers={"Referer": "https://www.n11.com/"}
+        )
+        if not html_text or len(html_text) < 5000:
+            return None
+        if any(t.lower() in html_text.lower() for t in CLOUDFLARE_TITLES):
+            _reset_curl_session()
+            return None
 
         return await asyncio.to_thread(lambda: _parse_html(html_text))
     except Exception as e:
         log.error(f"[n11/curl_cffi] Hata: {e}")
+        _reset_curl_session()
         return None
 
 
@@ -430,7 +568,7 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             return _parse_html(html)
         finally:
             await pool.release(page)
-    async with PLAYWRIGHT_SEM:
+    async with get_playwright_sem():
         return await _launch_playwright(url)
 
 
@@ -496,4 +634,4 @@ async def scrape_n11(url: str, pool=None, price_only: bool = False) -> Optional[
 def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount") if k in data}
+    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}

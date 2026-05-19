@@ -18,7 +18,7 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from scrapers.utils import (
     UA_POOL, RateLimiter,
-    detect_cart_discount, PLAYWRIGHT_SEM, STEALTH_SCRIPT,
+    detect_cart_discount, get_playwright_sem, STEALTH_SCRIPT,
     parse_price_tr_clean, get_stealth_headers,
 )
 
@@ -26,12 +26,13 @@ try:
     from curl_cffi.requests import AsyncSession as CurlSession
     CURL_AVAILABLE = True
 except ImportError:
+    CurlSession = None
     CURL_AVAILABLE = False
 
 log = logging.getLogger("amazon")
 
-_limiter      = RateLimiter(min_delay=2.0, max_delay=4.5)   # tam scrape
-_limiter_fast = RateLimiter(min_delay=1.0, max_delay=2.5)   # price_only
+_limiter      = RateLimiter(min_delay=0.8, max_delay=2.0)   # tam scrape
+_limiter_fast = RateLimiter(min_delay=0.3, max_delay=0.8)   # price_only
 
 # ── Cookie cache ─────────────────────────────────────────────────
 _COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "amazon_cookies.json")
@@ -137,8 +138,7 @@ async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Option
                 if data.get("stock") == "Stok Yok":
                     break
             if attempt == 0:
-                # Block sonrası daha uzun bekle — yeni session zaten _via_curl içinde oluşturulur
-                backoff = random.uniform(4.0, 8.0)
+                backoff = random.uniform(1.0, 2.5)
                 log.info(f"[amazon/curl] Deneme {attempt+1} başarısız → {backoff:.1f}s backoff")
                 await asyncio.sleep(backoff)
 
@@ -164,7 +164,7 @@ async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Option
 def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount") if k in data}
+    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -228,9 +228,9 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             await setup_resource_blocking_amazon(page)
             await page.add_init_script(STEALTH_SCRIPT)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(1.0, 2.0))
             await page.mouse.wheel(0, random.randint(300, 700))
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.3, 0.8))
             html = await page.content()
             if html and len(html) > 5000:
                 if _is_not_found(html):
@@ -243,7 +243,7 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             return None
         finally:
             await pool.release(page)
-    async with PLAYWRIGHT_SEM:
+    async with get_playwright_sem():
         return await _launch_playwright(url)
 
 
@@ -277,61 +277,17 @@ async def _launch_playwright(url: str) -> Optional[dict]:
                 if _stealth:
                     await _stealth.apply_stealth_async(page)
                 await page.route("**/*.{gif,svg,ico,woff,woff2}", lambda r: r.abort())
-                try:
-                    await page.goto("https://www.amazon.com.tr/", wait_until="domcontentloaded", timeout=20000)
-                    await asyncio.sleep(random.uniform(1.5, 3.0))
-                    await page.mouse.move(random.randint(100, 400), random.randint(100, 300))
-                    await asyncio.sleep(random.uniform(0.2, 0.5))
-                    await page.mouse.move(random.randint(400, 900), random.randint(300, 600))
-                    await asyncio.sleep(random.uniform(0.3, 0.7))
-                except Exception:
-                    pass
                 await page.goto(url, wait_until="domcontentloaded", timeout=40000)
                 try:
                     await page.wait_for_selector("#productTitle", timeout=8000)
                 except Exception:
                     pass
 
-                # ── Ultra Human Mode ────────────────────────────────
-                await asyncio.sleep(random.uniform(1.2, 2.8))
-
-                await page.mouse.move(
-                    random.randint(80, 300), random.randint(120, 280),
-                    steps=random.randint(10, 25),
-                )
-                await asyncio.sleep(random.uniform(0.3, 0.9))
-                await page.mouse.move(
-                    random.randint(300, 900), random.randint(250, 600),
-                    steps=random.randint(12, 35),
-                )
-
-                await page.mouse.wheel(0, random.randint(250, 650))
+                await page.mouse.wheel(0, random.randint(250, 600))
                 await asyncio.sleep(random.uniform(0.8, 1.8))
-                await page.mouse.wheel(0, random.randint(150, 500))
-                await asyncio.sleep(random.uniform(0.6, 1.5))
-
-                if random.random() > 0.45:
-                    await page.mouse.wheel(0, -random.randint(80, 220))
-                    await asyncio.sleep(random.uniform(0.5, 1.2))
-
-                try:
-                    price_el = page.locator(".a-price").first
-                    if await price_el.count() > 0:
-                        await price_el.hover()
-                        await asyncio.sleep(random.uniform(0.5, 1.1))
-                except Exception:
-                    pass
-
-                try:
-                    atc = page.locator("#add-to-cart-button")
-                    if await atc.count() > 0:
-                        await atc.hover()
-                        await asyncio.sleep(random.uniform(0.6, 1.4))
-                except Exception:
-                    pass
-
-                await asyncio.sleep(random.uniform(1.5, 3.5))
-                # ────────────────────────────────────────────────────
+                if random.random() > 0.5:
+                    await page.mouse.wheel(0, random.randint(100, 300))
+                    await asyncio.sleep(random.uniform(0.4, 0.9))
 
                 html = await page.content()
             finally:
@@ -359,6 +315,126 @@ async def _launch_playwright(url: str) -> Optional[dict]:
 
 def _parse_price_tr(price_text: str) -> Optional[float]:
     return parse_price_tr_clean(price_text)
+
+
+def _parse_coupon(soup: BeautifulSoup, html: str) -> Optional[str]:
+    """Kupon rozeti metnini döner (varsa), yoksa None."""
+    for sel in [
+        "#couponDeals",
+        "#couponBadge_feature_div",
+        ".couponBadge",
+        "#prime_free_tie_feature_div",
+        "#socialProofingAsinFaceout_feature_div",
+        "[id*='coupon']",
+        "[class*='coupon-badge']",
+    ]:
+        try:
+            el = soup.select_one(sel)
+        except Exception:
+            continue
+        if el:
+            t = re.sub(r"\s+", " ", el.get_text(" ", strip=True))
+            if t and len(t) > 2:
+                return t[:200]
+
+    # Regex fallback — "X% kupon" veya "kupon: X TL" gibi kalıplar
+    for pat in [
+        r'(%\s*\d+)\s*(?:ekstra\s+)?(?:indirim\s+)?kupon',
+        r'kupon\s*uygula[^<"]{0,80}',
+        r'\d+\s*TL\s*kupon',
+    ]:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            return m.group(0)[:200].strip()
+
+    return None
+
+
+def _parse_variants(soup: BeautifulSoup, html: str) -> list:
+    """Ürün varyantlarını çıkar. Her öğe: {"asin": str, "name": str, "price": float|None}."""
+    variants: list = []
+    seen: set = set()
+
+    # Yöntem 1: #twister_feature_div içindeki li öğeleri
+    for li in soup.select(
+        "#twister_feature_div li[data-dp-url], "
+        "#twister_feature_div li[data-defaultasin], "
+        "#variation_color_name li[data-dp-url], "
+        "#variation_size_name li[data-dp-url]"
+    ):
+        dp_url = li.get("data-dp-url", "") or ""
+        m = re.search(r"/dp/([A-Z0-9]{10})", dp_url)
+        asin = m.group(1) if m else None
+
+        if not asin:
+            da = (li.get("data-defaultasin") or "").strip()
+            if re.match(r"^[A-Z0-9]{10}$", da):
+                asin = da
+
+        if not asin or asin in seen:
+            continue
+        seen.add(asin)
+
+        name = (li.get("title") or "").strip()
+        if not name:
+            img = li.select_one("img")
+            if img:
+                name = (img.get("alt") or "").strip()
+        if not name:
+            span = li.select_one("span.a-size-base, span")
+            if span:
+                name = span.get_text(strip=True)
+        if not name:
+            name = asin
+
+        variants.append({"asin": asin, "name": name[:100], "price": None})
+
+    # Yöntem 2: Gömülü JSON'dan asinToDpUrl / dimensionToAsinMap
+    if not variants:
+        m = re.search(r'"asinToDpUrl"\s*:\s*(\{[^}]{10,5000}\})', html)
+        if m:
+            try:
+                asin_map = json.loads(m.group(1))
+                for asin_key in asin_map:
+                    if re.match(r"^[A-Z0-9]{10}$", asin_key) and asin_key not in seen:
+                        seen.add(asin_key)
+                        variants.append({"asin": asin_key, "name": asin_key, "price": None})
+            except Exception:
+                pass
+
+    # Yöntem 3: Gömülü JSON'dan varyant fiyatları — varsa doldur
+    # Amazon bazı ürünlerde "priceMap" veya "variationDisplayLabels" ile fiyat gömer
+    price_map: dict = {}
+    for pat in [
+        r'"priceMap"\s*:\s*(\{[^}]{10,10000}\})',
+        r'"variationPrices"\s*:\s*(\{[^}]{10,10000}\})',
+    ]:
+        pm = re.search(pat, html)
+        if pm:
+            try:
+                raw = json.loads(pm.group(1))
+                for k, v in raw.items():
+                    if re.match(r"^[A-Z0-9]{10}$", k):
+                        p = parse_price_tr_clean(str(v))
+                        if p:
+                            price_map[k] = p
+            except Exception:
+                pass
+        if price_map:
+            break
+
+    # "displayPrice":"1.299,00 TL" kalıplarını asin yakınında ara
+    if not price_map:
+        for dm in re.finditer(r'"([A-Z0-9]{10})"[^}]{0,300}"displayPrice"\s*:\s*"([^"]+)"', html):
+            p = parse_price_tr_clean(dm.group(2))
+            if p:
+                price_map[dm.group(1)] = p
+
+    for v in variants:
+        if v["asin"] in price_map:
+            v["price"] = price_map[v["asin"]]
+
+    return variants[:50]
 
 
 def _parse(html: str) -> Optional[dict]:
@@ -639,13 +715,23 @@ def _parse(html: str) -> Optional[dict]:
     # ── Sepette indirim ──────────────────────────────────────
     cart_discount = detect_cart_discount(html)
     if not cart_discount:
-        for sel in ["#couponDeals", "#priceBadging_feature_div", "#promoPriceBlockMessage_feature_div"]:
+        for sel in ["#priceBadging_feature_div", "#promoPriceBlockMessage_feature_div"]:
             el = soup.select_one(sel)
             if el and el.get_text(strip=True):
                 cart_discount = True
                 break
 
-    log.info(f"[amazon] parse: title={'✔' if title else '✘'} price={price} barcode={barcode} image={'✔' if image_url else '✘'} stock={stock} cart_discount={cart_discount}")
+    # ── Kupon ─────────────────────────────────────────────────
+    coupon = _parse_coupon(soup, html)
+
+    # ── Varyantlar ────────────────────────────────────────────
+    variants = _parse_variants(soup, html)
+
+    log.info(
+        f"[amazon] parse: title={'✔' if title else '✘'} price={price} barcode={barcode} "
+        f"image={'✔' if image_url else '✘'} stock={stock} cart_discount={cart_discount} "
+        f"coupon={'✔' if coupon else '✘'} variants={len(variants)}"
+    )
     return {
         "title": title,
         "price": price,
@@ -655,4 +741,6 @@ def _parse(html: str) -> Optional[dict]:
         "stock": stock,
         "barcode": barcode,
         "cart_discount": cart_discount,
+        "coupon": coupon,
+        "variants": variants if variants else None,
     }

@@ -2,9 +2,22 @@
 # -*- coding: utf-8 -*-
 # WSL Local Scraper — her platform kendi bağımsız worker pool'unda çalışır
 
+import os, sys, tempfile as _tempfile
+
+# Playwright/Chromium geçici profillerini yönlendir
+# Linux/WSL'de Windows yolu geçersiz — TMPDIR bozarsa Chrome SIGTRAP ile çöküyor
+if sys.platform == "win32":
+    _TMP = r"D:\firsatvakti_temp"
+else:
+    _TMP = "/tmp/firsatvakti_temp"
+os.makedirs(_TMP, exist_ok=True)
+os.environ["TEMP"] = _TMP
+os.environ["TMP"] = _TMP
+os.environ["TMPDIR"] = _TMP
+_tempfile.tempdir = _TMP
+
 import asyncio
 import logging
-import os
 import sys
 import httpx
 from dotenv import load_dotenv
@@ -17,14 +30,14 @@ log = logging.getLogger("local_scraper")
 BASE_URL      = os.getenv("BASE_URL", "https://firsatvakti.com")
 API_KEY       = os.getenv("SCRAPER_SERVICE_KEY", "firsatvakti-scraper-key")
 WEBHOOK_KEY   = os.getenv("FRONTEND_WEBHOOK_KEY", "firsatvakti-webhook-key")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "3"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 
 # Her platform bağımsız — birbirini bloklamaz
 PLATFORM_CONFIG = {
-    "amazon":      {"concurrent": 2, "batch": 4},
-    "trendyol":    {"concurrent": 4, "batch": 6},
-    "n11":         {"concurrent": 2, "batch": 4},
-    "hepsiburada": {"concurrent": 1, "batch": 2},
+    "amazon":      {"concurrent": 6, "batch": 8},
+    "trendyol":    {"concurrent": 5, "batch": 6},
+    "n11":         {"concurrent": 6, "batch": 8},
+    "hepsiburada": {"concurrent": 2, "batch": 3},
 }
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,10 +53,11 @@ async def process_job(job, client, sem, pool):
         price_only = job.get("price_only", False)
 
         log.info(f"[{platform}] Scraping #{pid}{' [fiyat]' if price_only else ''}")
+        _timeout = 60 if platform == "hepsiburada" else 30
         try:
             data = await asyncio.wait_for(
                 scrape_product(url, platform, pool=pool, price_only=price_only),
-                timeout=60,
+                timeout=_timeout,
             )
             if data and data.get("price"):
                 title = (data.get("title") or "")[:50]
@@ -104,7 +118,7 @@ async def poll_platform(platform: str, cfg: dict, client: httpx.AsyncClient, poo
                 running.add(task)
                 task.add_done_callback(running.discard)
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
         except Exception as e:
             log.error(f"[{platform}] Poll hatası: {e}")
@@ -125,17 +139,36 @@ async def send_webhook(client, product_id, url, platform, data):
         log.error(f"[{platform}] Webhook failed #{product_id}: {e}")
 
 
+async def reset_stale_jobs(client: httpx.AsyncClient):
+    """Başlangıçta 'processing' kalan sıkışık işleri 'pending'e döndür."""
+    try:
+        r = await client.post(
+            f"{BASE_URL}/api/reset-stale-jobs",
+            headers={"X-Api-Key": API_KEY},
+            params={"force": "false"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            log.info(f"[startup] Sıkışık işler sıfırlandı: {data.get('reset', 0)} iş pending'e döndü")
+        else:
+            log.warning(f"[startup] reset-stale-jobs: {r.status_code}")
+    except Exception as e:
+        log.warning(f"[startup] reset-stale-jobs başarısız: {e}")
+
+
 async def main():
     total_pages = sum(c["concurrent"] for c in PLATFORM_CONFIG.values())
     log.info(f"WSL Local Scraper başladı — {len(PLATFORM_CONFIG)} platform, toplam {total_pages} slot")
     for p, cfg in PLATFORM_CONFIG.items():
         log.info(f"  {p}: concurrent={cfg['concurrent']} batch={cfg['batch']}")
 
-    pool = BrowserPool(max_pages=total_pages)
+    pool = BrowserPool(max_pages=total_pages + 4)  # buffer
     try:
         await pool.start()
         log.info("[BrowserPool] Hazır")
         async with httpx.AsyncClient() as client:
+            await reset_stale_jobs(client)
             await asyncio.gather(*[
                 poll_platform(p, cfg, client, pool)
                 for p, cfg in PLATFORM_CONFIG.items()

@@ -208,10 +208,26 @@ async def publish_deal(
     platform = normalize_platform(product.get("platform"))
 
     # 1) Kanal bildirimi
+    channel_sent = False
     if CHANNEL_TOKEN and CHANNEL_ID:
-        await _send(CHANNEL_TOKEN, CHANNEL_ID, msg, image_url)
+        channel_sent = await _send(CHANNEL_TOKEN, CHANNEL_ID, msg, image_url)
     else:
         log.warning("[tg] Kanal token/id eksik")
+
+    # Başarılı kanal yayınını 24h dedup loğuna kaydet
+    if channel_sent:
+        product_id = product.get("id")
+        if product_id:
+            try:
+                from datetime import datetime
+                now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                db.execute(
+                    "INSERT INTO deal_publish_log(product_id,discount_pct,published_at,deal_id) VALUES(?,?,?,?)",
+                    (product_id, round(pct), now_iso, deal_id)
+                )
+                log.info(f"[tg] 24h dedup kaydedildi: product={product_id} pct={round(pct)}")
+            except Exception as e:
+                log.warning(f"[tg] Dedup log hatası: {e}")
 
     # 2) Aboneler
     subs = db.execute(

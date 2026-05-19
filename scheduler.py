@@ -22,7 +22,7 @@ def now_str():
 
 
 async def auto_expire_stale_deals():
-    """AUTO_EXPIRE_HOURS süredir kontrol edilmemiş ürünlerin deal'larını pasife al."""
+    """{AUTO_EXPIRE_HOURS} saattir kontrol edilmemiş aktif deal'ları pasife al."""
     db = get_db()
     now = now_str()
     expired = db.execute(f"""
@@ -31,20 +31,25 @@ async def auto_expire_stale_deals():
         WHERE d.active = 1
           AND (
             p.last_seen_at IS NULL
-            OR p.last_seen_at < datetime('now', '-{AUTO_EXPIRE_HOURS} hours')
+            OR p.last_seen_at::timestamp < NOW() - INTERVAL '{AUTO_EXPIRE_HOURS} hours'
           )
     """).fetchall()
     for row in expired:
-        db.execute("UPDATE deals SET active=0, expires_at=? WHERE id=?", (now, row["id"]))
-        log.info(f"Deal #{row['id']} pasife alındı — {AUTO_EXPIRE_HOURS}s kontrol edilmedi")
+        db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?", (now, row["id"]))
+        log.info(f"Deal #{row['id']} pasife alındı — {AUTO_EXPIRE_HOURS} saattir kontrol edilmedi")
     if expired:
         db.commit()
+        log.info(f"[expire] Toplam {len(expired)} deal pasife alındı")
 
 
 async def _expire_worker():
-    """Stale deal temizliği — saatte bir çalışır."""
+    """Stale deal temizliği — startup'ta hemen, sonra 30 dakikada bir çalışır."""
+    try:
+        await auto_expire_stale_deals()
+    except Exception as e:
+        log.error(f"[expire] Startup hatası: {e}", exc_info=True)
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(1800)
         try:
             await auto_expire_stale_deals()
         except Exception as e:
@@ -203,6 +208,33 @@ async def _requeue_worker():
                 db.commit()
             log.info(f"[requeue] Tur: {scanned_this_round}/{total_products} tamamlandı | kuyruğa eklenen: {len(all_rows)}")
 
+            # 4b. Platform bazlı catchup — kuyruğu boşalan platformları yeniden doldur
+            for plat in ["amazon", "trendyol", "n11", "hepsiburada"]:
+                plat_active = db.execute(
+                    "SELECT COUNT(*) FROM scan_queue WHERE platform=? AND status IN ('pending','processing')",
+                    (plat,)
+                ).fetchone()[0]
+                if plat_active == 0:
+                    catchup = db.execute("""
+                        SELECT p.id, p.source_url FROM products p
+                        WHERE p.platform = ?
+                          AND p.source_url IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1 FROM deals d WHERE d.product_id = p.id AND d.active = 1
+                          )
+                        ORDER BY COALESCE(p.last_seen_at, '2000-01-01') ASC
+                        LIMIT 500
+                    """, (plat,)).fetchall()
+                    for r in catchup:
+                        db.execute(
+                            "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) "
+                            "VALUES(?,?,?,'pending',2,?)",
+                            (r["id"], r["source_url"], plat, now)
+                        )
+                    if catchup:
+                        db.commit()
+                        log.info(f"[requeue] {plat} kuyruğu boş — {len(catchup)} ürün yeniden eklendi (catchup)")
+
             # 5. Zaman bazlı temizlik — 48 saatlik done/failed kayıtları sil
             cleaned = db.execute(
                 "DELETE FROM scan_queue WHERE status IN ('done', 'failed')"
@@ -223,7 +255,7 @@ async def _requeue_worker():
                 "AND NOT EXISTS (SELECT 1 FROM scan_queue sq WHERE sq.product_id=p.id AND sq.status IN ('pending','processing'))",
                 (round_started_at,)
             ).fetchone()[0]
-            if active == 0 and remaining == 0 and scanned_this_round > 0:
+            if remaining == 0 and scanned_this_round > 0:
                 new_round = now
                 db.execute(
                     "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "

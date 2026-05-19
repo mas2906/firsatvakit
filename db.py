@@ -130,7 +130,7 @@ def _convert(sql: str) -> str:
     sql = _PARAM.sub("%s", sql)
 
     if has_ioi:
-        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING RETURNING id"
+        sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING RETURNING *"
 
     return sql
 
@@ -217,6 +217,7 @@ class _Connection:
                 is_insert
                 and "RETURNING" not in sql_pg.upper()
                 and "ON CONFLICT" not in sql_pg.upper()
+                # ON CONFLICT DO NOTHING RETURNING * zaten _convert tarafından eklendi
         )
 
         if needs_ret:
@@ -237,7 +238,7 @@ class _Connection:
             raw = cur.fetchall()
             if is_insert:
                 if raw:
-                    last_id = raw[0].get("id")
+                    last_id = raw[0].get("id")  # RETURNING * → id varsa al, yoksa None
             else:
                 rows = list(raw)
 
@@ -273,9 +274,58 @@ def commit_with_retry(db: _Connection, **_):
 def init_db():
     db = get_db()
     _create_schema(db)
+    _run_migrations(db)
     _ensure_admin(db)
     db.commit()
     print("[db] Veritabanı hazır (PostgreSQL).")
+
+
+def _run_migrations(db: _Connection):
+    """migrations/ klasöründeki .sql dosyalarını sırayla çalıştırır."""
+    import glob, os as _os
+    migrations_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "migrations")
+    if not _os.path.isdir(migrations_dir):
+        return
+
+    # Migration takip tablosu
+    cur = db._conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS _migrations (
+            filename TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    db._conn.commit()
+
+    cur.execute("SELECT filename FROM _migrations")
+    applied = {r[0] for r in cur.fetchall()}
+
+    sql_files = sorted(glob.glob(_os.path.join(migrations_dir, "*.sql")))
+    for path in sql_files:
+        fname = _os.path.basename(path)
+        if fname in applied:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                sql = f.read()
+            for stmt in sql.split(";"):
+                stmt = stmt.strip()
+                if stmt and not stmt.startswith("--"):
+                    try:
+                        cur.execute(stmt)
+                    except Exception as e:
+                        log.warning(f"[migration] {fname} stmt atlandı: {e}")
+            cur.execute(
+                "INSERT INTO _migrations(filename, applied_at) VALUES(%s, NOW())",
+                (fname,)
+            )
+            db._conn.commit()
+            log.info(f"[migration] ✔ {fname} uygulandı")
+        except Exception as e:
+            log.error(f"[migration] {fname} HATA: {e}")
+            db._conn.rollback()
+
+    cur.close()
 
 
 def _create_schema(db: _Connection):
@@ -451,6 +501,14 @@ def _create_schema(db: _Connection):
             submitted_at TEXT NOT NULL,
             reviewed_at TEXT
         )""",
+        # Aynı ürün + aynı indirim oranı 24 saat içinde tekrar yayınlanmasın
+        """CREATE TABLE IF NOT EXISTS deal_publish_log (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            discount_pct INTEGER NOT NULL,
+            published_at TEXT NOT NULL,
+            deal_id INTEGER REFERENCES deals(id)
+        )""",
         # ── İndeksler ────────────────────────────────────────────────────
         "CREATE INDEX IF NOT EXISTS idx_products_platform ON products(platform)",
         "CREATE INDEX IF NOT EXISTS idx_ph_product ON price_history(product_id)",
@@ -470,6 +528,7 @@ def _create_schema(db: _Connection):
         "CREATE INDEX IF NOT EXISTS idx_se_product ON scraper_errors(product_id, occurred_at)",
         "CREATE INDEX IF NOT EXISTS idx_lq_status ON link_queue(status, submitted_at)",
         "CREATE INDEX IF NOT EXISTS idx_prt_token ON password_reset_tokens(token)",
+        "CREATE INDEX IF NOT EXISTS idx_dpl_lookup ON deal_publish_log(product_id, discount_pct, published_at)",
     ]
     cur = db._conn.cursor()
     for stmt in stmts:

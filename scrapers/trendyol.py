@@ -16,22 +16,63 @@ import random
 import asyncio
 from typing import Optional
 from bs4 import BeautifulSoup
-from scrapers.utils import CLOUDFLARE_TITLES, STEALTH_SCRIPT, UA_POOL, parse_price_tr_clean, detect_cart_discount, PLAYWRIGHT_SEM, RateLimiter, stream_fetch, get_stealth_headers
+from scrapers.utils import CLOUDFLARE_TITLES, STEALTH_SCRIPT, UA_POOL, parse_price_tr_clean, detect_cart_discount, get_playwright_sem, RateLimiter, stream_fetch, get_stealth_headers
 
 try:
     from curl_cffi.requests import AsyncSession as CurlSession
     CURL_AVAILABLE = True
 except ImportError:
+    CurlSession = None
     CURL_AVAILABLE = False
 
 import httpx
 
 log = logging.getLogger("trendyol")
 
-_limiter      = RateLimiter(2.0, 4.0)   # tam scrape
-_limiter_fast = RateLimiter(1.0, 2.0)   # price_only
+_limiter      = RateLimiter(2.0, 4.0)
+_limiter_fast = RateLimiter(1.0, 2.0)
 
 _TY_API = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{content_id}"
+
+IMPERSONATE_POOL = ["chrome146", "chrome142", "chrome136", "chrome131", "chrome124", "chrome120"]
+
+# Global persistent sessions — her scrape'de yeni TCP/TLS kurmayı önler
+_CURL_SESSION: Optional[CurlSession] = None
+_CURL_LOCK = asyncio.Lock()
+_HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
+_HTTPX_LOCK = asyncio.Lock()
+
+
+async def _get_curl_session() -> CurlSession:
+    global _CURL_SESSION
+    async with _CURL_LOCK:
+        if _CURL_SESSION is None:
+            imp = random.choice(IMPERSONATE_POOL)
+            _CURL_SESSION = CurlSession(impersonate=imp, timeout=20)
+            # Warm-up tek seferlik — cookie ve TLS session oluştur
+            try:
+                await _CURL_SESSION.get("https://www.trendyol.com/", timeout=8)
+            except Exception:
+                pass
+            log.info(f"[trendyol] curl session oluşturuldu: {imp}")
+        return _CURL_SESSION
+
+
+def _reset_curl_session() -> None:
+    global _CURL_SESSION
+    _CURL_SESSION = None
+
+
+async def _get_httpx_client() -> httpx.AsyncClient:
+    global _HTTPX_CLIENT
+    async with _HTTPX_LOCK:
+        if _HTTPX_CLIENT is None or _HTTPX_CLIENT.is_closed:
+            _HTTPX_CLIENT = httpx.AsyncClient(
+                timeout=httpx.Timeout(15.0),
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+                follow_redirects=True,
+            )
+        return _HTTPX_CLIENT
 
 
 def _extract_content_id(url: str) -> Optional[str]:
@@ -115,17 +156,17 @@ async def scrape_trendyol(url: str, pool=None, price_only: bool = False) -> Opti
         if data and data.get("title") and data.get("price"):
             log.info(f"[trendyol/curl_cffi] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
             return _price_only_filter(data, price_only)
-    else:
-        log.warning("[trendyol] curl_cffi yüklü değil, httpx deneniyor...")
 
-    # ── Katman 2: httpx (fallback) ────────────────────────────
-    data = await _via_httpx(url)
-    if data and data.get("title") and data.get("price"):
-        log.info(f"[trendyol/httpx] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-        return _price_only_filter(data, price_only)
+        # ── Katman 2: httpx (curl_cffi varken fallback) ──────
+        data = await _via_httpx(url)
+        if data and data.get("title") and data.get("price"):
+            log.info(f"[trendyol/httpx] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
+            return _price_only_filter(data, price_only)
+    else:
+        log.warning("[trendyol] curl_cffi yüklü değil, direkt Playwright kullanılıyor")
 
     # ── Katman 3: Playwright (son çare) ──────────────────────
-    log.info(f"[trendyol] curl_cffi başarısız → Playwright deneniyor...")
+    log.info(f"[trendyol] Playwright deneniyor...")
     data = await _via_playwright(url, pool=pool)
     if data and data.get("title"):
         log.info(f"[trendyol/playwright] ✔ title={data['title']!r:.50} price={data.get('price')} image={'✔' if data.get('image_url') else '✘'}")
@@ -138,7 +179,7 @@ async def scrape_trendyol(url: str, pool=None, price_only: bool = False) -> Opti
 def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount") if k in data}
+    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -154,8 +195,8 @@ async def _via_httpx(url: str) -> Optional[dict]:
         **get_stealth_headers(_ua),
     }
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
-            r = await client.get(url)
+        client = await _get_httpx_client()
+        r = await client.get(url, headers=headers)
 
         if r.status_code != 200:
             log.info(f"[trendyol/httpx] status={r.status_code}")
@@ -178,37 +219,32 @@ async def _via_httpx(url: str) -> Optional[dict]:
 
 async def _via_curl_cffi(url: str) -> Optional[dict]:
     try:
-        impersonate = random.choice(["chrome146", "chrome142", "chrome136", "chrome131", "chrome124", "chrome120"])
-        async with CurlSession(impersonate=impersonate) as session:
-            try:
-                await session.get("https://www.trendyol.com/", timeout=10)
-                await asyncio.sleep(random.uniform(1.0, 2.0))
-            except Exception:
-                pass
-
-            html = await stream_fetch(
-                session, url,
-                json_markers=["__envoy__PROPS"],
-                max_kb=700,
-                timeout=15,
-                headers={
-                    "Accept-Language": "tr-TR,tr;q=0.9",
-                    "Referer": "https://www.trendyol.com/",
-                },
-                validate_fn=lambda text: bool(_extract_envoy(text)),
-            )
+        session = await _get_curl_session()
+        html = await stream_fetch(
+            session, url,
+            json_markers=["__envoy__PROPS"],
+            max_kb=700,
+            timeout=15,
+            headers={
+                "Accept-Language": "tr-TR,tr;q=0.9",
+                "Referer": "https://www.trendyol.com/",
+            },
+            validate_fn=lambda text: bool(_extract_envoy(text)),
+        )
 
         if not html:
             log.info("[trendyol/curl_cffi] Başarısız")
             return None
 
         if _is_blocked(html):
-            log.info("[trendyol/curl_cffi] Block algılandı")
+            log.info("[trendyol/curl_cffi] Block algılandı — session sıfırlanıyor")
+            _reset_curl_session()
             return None
 
         return await asyncio.to_thread(_parse, html, url)
     except Exception as e:
         log.error(f"[trendyol/curl_cffi] Hata: {e}")
+        _reset_curl_session()
         return None
 
 
@@ -236,7 +272,7 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             return None
         finally:
             await pool.release(page)
-    async with PLAYWRIGHT_SEM:
+    async with get_playwright_sem():
         return await _launch_playwright(url)
 
 
@@ -335,10 +371,14 @@ def _pv(obj) -> Optional[float]:
 
 # Sepet/kampanya fiyatı anahtar isimleri — öncelik sırasıyla
 _BASKET_KEYS = (
-    "basketPrice", "campaignPrice", "promotionPrice", "basketSellingPrice",
+    "basketPrice", "promotionPrice", "basketSellingPrice",
     "plusPrice", "memberPrice", "loyaltyDiscountedPrice", "campaignSellingPrice",
     "basketDiscountedPrice", "promotionalPrice", "discountedBasketPrice",
 )
+# NOT: "campaignPrice" kasıtlı olarak çıkarıldı.
+# Trendyol bazı ürünlerde campaignPrice'ı "2000 TL'ye 200 TL İndirim" gibi
+# kampanya eşik değeri (ürün fiyatı değil) olarak doldurur. Bunu sepet fiyatı
+# sanarak yanlış fiyat çekiyorduk. HTML'deki .new-price her zaman daha güvenilir.
 
 
 def _parse(html: str, current_url: str = "") -> dict:
@@ -359,16 +399,23 @@ def _parse(html: str, current_url: str = "") -> dict:
         # Sepette/kampanya indirimli fiyat — {value: X} veya düz sayı her ikisini de destekler
         for _basket_key in _BASKET_KEYS:
             _bv = _pv(p_obj.get(_basket_key))
-            if _bv is not None:
+            if _bv is not None and _bv > 0:
                 price = _bv
                 cart_discount = True
                 break
 
-        # sellingPrice → gerçek satış fiyatı (indirim dahil)
+        # Gerçek fiyat: discountedPrice ve sellingPrice'ın minimuğunu al.
+        # Trendyol'da sellingPrice üstü çizili (orijinal) fiyat olabilir;
+        # discountedPrice fiilen ödenen fiyattır. İkisi varsa küçüğü doğrudur.
         if price is None:
-            v = _pv(p_obj.get("sellingPrice")) or _pv(p_obj.get("discountedPrice"))
-            if v is not None:
-                price = v
+            v_disc = _pv(p_obj.get("discountedPrice")) or _pv(p_obj.get("originalPrice"))
+            v_sell = _pv(p_obj.get("sellingPrice"))
+            if v_disc and v_sell:
+                price = min(v_disc, v_sell)
+            elif v_disc:
+                price = v_disc
+            elif v_sell:
+                price = v_sell
 
         # Fallback: variants listesi
         if price is None:
@@ -377,7 +424,7 @@ def _parse(html: str, current_url: str = "") -> dict:
                 _bv = None
                 for _bk in _BASKET_KEYS:
                     _bv = _pv(vp.get(_bk))
-                    if _bv is not None:
+                    if _bv is not None and _bv > 0:
                         cart_discount = True
                         break
                 raw = _bv or _pv(vp.get("sellingPrice")) or _pv(vp.get("discountedPrice")) or \
@@ -432,12 +479,24 @@ def _parse(html: str, current_url: str = "") -> dict:
                 t = m.group(1).strip()
                 title = t.split("|")[0].strip() or t.split("-")[0].strip()
 
-    # HTML'den sepet fiyatı — JSON'dan fiyat gelse bile override eder (sepet fiyatı daha düşük olabilir)
+    # HTML'den sepet fiyatı — CSS ile bulunanlar her zaman öncelikli.
+    # Güvenlik: JSON fiyatının %40'ından düşük değerleri yanlış pozitif olarak reddet.
     soup = soup or BeautifulSoup(html, "html.parser")
-    _basket_html_price = _extract_basket_price_html(soup, html)
-    if _basket_html_price and (not price or _basket_html_price < price):
-        price = _basket_html_price
-        cart_discount = True
+    _basket_html_price, _basket_html_hc = _extract_basket_price_html(soup, html)
+    if _basket_html_price:
+        _json_ref = price or 0
+        _too_low = _json_ref > 0 and _basket_html_price < _json_ref * 0.40
+        if not _too_low:
+            cart_discount = True
+            # Yüksek güvenilirlik (CSS selektör): JSON basket key fiyatını her zaman geçersiz kılar.
+            # Düşük güvenilirlik (metin arama): yalnızca mevcut fiyattan düşükse kullan.
+            if _basket_html_hc or not price or _basket_html_price < price:
+                price = _basket_html_price
+        else:
+            log.warning(
+                f"[trendyol] basket HTML fiyatı ({_basket_html_price}) JSON fiyatının "
+                f"({_json_ref}) %40'ından düşük — yanlış pozitif olarak reddedildi"
+            )
 
     if not price:
         for sel in [
@@ -507,9 +566,88 @@ def _parse(html: str, current_url: str = "") -> dict:
                         cart_discount = True
                         break
 
+    # ── Kupon ────────────────────────────────────────────────
+    coupon = None
+    if product:
+        for key in ("couponTitle", "couponText", "couponName"):
+            val = (product.get(key) or "").strip()
+            if val:
+                coupon = val[:200]
+                break
+        if not coupon and envoy and envoy.get("hasCollectableCoupon"):
+            for key in ("couponTitle", "couponText"):
+                val = (envoy.get(key) or "").strip()
+                if val:
+                    coupon = val[:200]
+                    break
+            if not coupon:
+                for c in (product.get("coupons") or []):
+                    t = c.get("title") or c.get("text") or ""
+                    if t:
+                        coupon = t[:200]
+                        break
+            if not coupon:
+                coupon = "Kupon mevcut"
+    if not coupon:
+        soup = soup or BeautifulSoup(html, "html.parser")
+        for sel in ["[data-testid='coupon-banner']", ".coupon-container", "[class*='coupon']"]:
+            el = soup.select_one(sel)
+            if el:
+                t = re.sub(r"\s+", " ", el.get_text(" ", strip=True))
+                if t and len(t) > 2:
+                    coupon = t[:200]
+                    break
+
+    # ── Varyantlar ───────────────────────────────────────────
+    variants_list = None
+    if product:
+        raw_variants = product.get("variants") or []
+        parsed_variants = []
+        seen_names: set = set()
+        for var in raw_variants:
+            if not isinstance(var, dict):
+                continue
+            attr = (var.get("attributeValue") or var.get("value") or var.get("size") or "").strip()
+            # Renk + beden birleştir
+            color = (var.get("color") or var.get("colorName") or "").strip()
+            size = (var.get("size") or var.get("sizeName") or "").strip()
+            if color and size:
+                name = f"{color} / {size}"
+            elif color:
+                name = color
+            elif size:
+                name = size
+            elif attr:
+                name = attr
+            else:
+                continue
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            vp = var.get("price") or {}
+            # Sepet fiyatı veya satış fiyatı
+            var_price = None
+            if isinstance(vp, dict):
+                for _bk in _BASKET_KEYS:
+                    _bv = _pv(vp.get(_bk))
+                    if _bv:
+                        var_price = _bv
+                        break
+                if not var_price:
+                    var_price = _pv(vp.get("sellingPrice")) or _pv(vp.get("discountedPrice"))
+            elif isinstance(vp, (int, float)):
+                var_price = float(vp) if vp > 0 else None
+            in_stock = bool(var.get("inStock") or var.get("hasStock") or (var.get("stock") or 0) > 0)
+            parsed_variants.append({"name": name[:100], "price": var_price, "in_stock": in_stock})
+        if parsed_variants:
+            variants_list = parsed_variants[:50]
+
     # ── Sepette kampanya fiyatı — JSON fiyatından daha düşükse override ──
     soup = soup or BeautifulSoup(html, "html.parser")
-    log.info(f"[trendyol] title={title} price={price} brand={brand} seller={seller} stock={stock} cart_discount={cart_discount} image={'✔ '+image_url[:60] if image_url else '✘ YOK'}")
+    log.info(
+        f"[trendyol] title={title} price={price} brand={brand} seller={seller} stock={stock} "
+        f"cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants_list or [])}"
+    )
     return {
         "title": title,
         "price": price,
@@ -522,16 +660,52 @@ def _parse(html: str, current_url: str = "") -> dict:
         "barcode": barcode,
         "url": current_url,
         "cart_discount": cart_discount,
+        "coupon": coupon,
+        "variants": variants_list,
     }
 
 
-def _extract_basket_price_html(soup, html: str) -> Optional[float]:
+def _extract_basket_price_html(soup, html: str) -> tuple:
     """
     HTML'den sepet/kampanya fiyatını çıkarır.
-    Hem CSS selektörleri hem regex ile "Sepette X TL" / "Kampanyalı Fiyat X TL" metinlerini tarar.
+    Returns (price, high_confidence):
+      high_confidence=True  → CSS selektörlerle bulundu (güvenilir)
+      high_confidence=False → metin aramasıyla bulundu (şüpheli)
     """
+    # 0a) TY Plus fiyatı — data-testid="ty-plus-price" + .ty-plus-price-discounted-price
+    for plus_sel in ["[data-testid='ty-plus-price']", ".ty-plus-price"]:
+        plus_el = soup.select_one(plus_sel)
+        if plus_el:
+            disc = plus_el.select_one(".ty-plus-price-discounted-price")
+            if disc:
+                p = parse_price_tr_clean(disc.get_text())
+                if p:
+                    return (p, True)
+
+    # 0b) Öncelikli: <div class="campaign-price-content"> yapısı
+    #    <p class="text">Sepette</p> + <p class="new-price">7.051,85 TL</p>
+    #    UYARI: .campaign-price-info altındaki "2000 TL'ye 200 TL İndirim" gibi
+    #    kampanya eşik metinlerini fiyat olarak almamak için .new-price CSS'e güveniyoruz.
+    for container_sel in [
+        ".campaign-price-content",
+        ".campaign-price-wrapper",
+    ]:
+        container = soup.select_one(container_sel)
+        if not container:
+            continue
+        label = container.find(string=re.compile(r"Sepette|Kampanya", re.I))
+        if not label:
+            continue
+        price_el = container.select_one(".new-price") or container.select_one("[class*='new-price']")
+        if price_el:
+            p = parse_price_tr_clean(price_el.get_text())
+            if p:
+                return (p, True)
+
     # 1) CSS selektörler — Trendyol'un bilinen basket/campaign price sınıfları
     for sel in [
+        ".campaign-price-wrapper .new-price",
+        ".campaign-price-content .new-price",
         "[data-testid='basket-price']",
         "[data-testid='product-campaign-info-price']",
         ".basket-price-wrapper .prc-dsc",
@@ -541,40 +715,65 @@ def _extract_basket_price_html(soup, html: str) -> Optional[float]:
         "[class*='campaign-price'] .prc-dsc",
         "[class*='basketPrice']",
         "[class*='campaign-price'] .new-price",
-        ".campaign-price-wrapper .new-price",
     ]:
         el = soup.select_one(sel)
         if el:
             p = parse_price_tr_clean(el.get_text())
             if p:
-                return p
+                return (p, True)
 
-    # 2) "Sepette" veya "Kampanyalı Fiyat" yazan elementin kardeş/ebeveyn fiyatını bul
-    for tag in soup.find_all(string=re.compile(r"(Sepette|Kampanyalı Fiyat|Trendyol Plus)", re.I)):
-        parent = tag.parent
-        for _ in range(4):  # 4 seviye yukarı çık
-            if parent is None:
+    # 1b) "Sepette" badge (.prc-slg / .prc-badge / .ty-plus-price-badge) yanındaki fiyat
+    # Örnek: <span class="prc-slg">Sepette</span><span class="prc-dsc">3.899 TL</span>
+    # Örnek: <span class="ty-plus-price-badge">Sepette</span><span class="ty-plus-price-discounted-price">1.196,96 TL</span>
+    for badge_sel in [".prc-slg", "[class*='prc-badge']", "[class*='basket-badge']",
+                      "[class*='sepette-badge']", "[class*='sepette-label']",
+                      ".ty-plus-price-badge"]:
+        badge = soup.select_one(badge_sel)
+        if not badge:
+            continue
+        if not re.search(r'sepette', badge.get_text(), re.I):
+            continue
+        # Aynı parent içindeki .prc-dsc / .ty-plus-price-discounted-price / .new-price fiyatına bak
+        _parent = badge.parent
+        for _ in range(3):
+            if not _parent:
                 break
-            text = parent.get_text(" ", strip=True)
-            m = re.search(r'([\d.,]{4,})\s*TL', text)
-            if m:
-                p = parse_price_tr_clean(m.group(1))
-                if p:
-                    return p
-            parent = parent.parent
+            for price_sel in [".ty-plus-price-discounted-price", ".prc-dsc", ".new-price",
+                               "[class*='new-price']", "[class*='prc-dsc']",
+                               "[class*='discounted-price']", "ins"]:
+                _pe = _parent.select_one(price_sel)
+                if _pe and _pe != badge:
+                    p = parse_price_tr_clean(_pe.get_text())
+                    if p:
+                        return (p, True)
+            _parent = _parent.parent
 
-    # 3) Regex: "Sepette X TL" / "Kampanyalı X TL" pattern — ham HTML'de
-    for pattern in [
-        r'[Ss]epette\D{0,30}?([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*TL',
-        r'[Kk]ampanya\w*\D{0,30}?([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)\s*TL',
-    ]:
-        m = re.search(pattern, html)
-        if m:
-            p = parse_price_tr_clean(m.group(1))
-            if p:
-                return p
+    # 2) "Sepette" veya "Kampanyalı Fiyat" yazan elementin kardeş/ebeveyn fiyatını bul.
+    # Sadece ürün fiyat container'ı içinde ara — tüm sayfada değil.
+    _price_root = (
+        soup.select_one(".campaign-price-content")
+        or soup.select_one(".price-wrapper")
+        or soup.select_one(".product-price-container")
+        or soup.select_one(".pr-bx-rnr-pr-rnr")
+        or soup.select_one("[class*='product-price']")
+        or soup.select_one("[class*='price-box']")
+    )
+    _search_scope = _price_root if _price_root else None
+    if _search_scope:
+        for tag in _search_scope.find_all(string=re.compile(r"(Sepette|Kampanyalı Fiyat)", re.I)):
+            parent = tag.parent
+            for _ in range(3):
+                if parent is None:
+                    break
+                text = parent.get_text(" ", strip=True)
+                m = re.search(r'([\d.,]{4,})\s*TL', text)
+                if m:
+                    p = parse_price_tr_clean(m.group(1))
+                    if p:
+                        return (p, False)
+                parent = parent.parent
 
-    return None
+    return (None, False)
 
 
 def _detect_stock_trendyol(product: dict, winner: dict) -> Optional[str]:

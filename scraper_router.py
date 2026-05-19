@@ -129,8 +129,37 @@ def extract_product_id(url: str, platform: str) -> str | None:
     return None
 
 
+_INVALID_URL_PATTERNS = {
+    "amazon": [
+        r"/gp/bestsellers", r"/gp/buyagain", r"/gp/browse", r"/gp/cart",
+        r"/gp/search", r"/s\?", r"/b\?", r"/b/", r"/stores/",
+    ],
+    "trendyol": [r"/sr\?", r"/butik/", r"/kampanya/"],
+    "hepsiburada": [r"/ara\?", r"/liste/", r"/kampanya/"],
+    "n11": [r"/liste/", r"/arama\?"],
+}
+
+
+def is_valid_product_url(url: str, platform: str) -> bool:
+    """Ürün sayfası URL'si mi, yoksa kategori/liste sayfası mı?"""
+    patterns = _INVALID_URL_PATTERNS.get(platform, [])
+    for pat in patterns:
+        if re.search(pat, url, re.IGNORECASE):
+            return False
+    # Platform bazlı ürün URL'si kontrolü
+    if platform == "amazon" and not re.search(r"/dp/[A-Z0-9]{10}", url):
+        return False
+    if platform == "trendyol" and not re.search(r"-p-\d+", url):
+        return False
+    if platform == "hepsiburada" and not re.search(r"(/p/[A-Z0-9]+|HBC[A-Z0-9]+|-pm-[A-Z0-9]+)", url):
+        return False
+    return True
+
+
 def enqueue_url(db, url: str, platform: str) -> int:
     """Ürünü DB'ye kaydet ve tarama kuyruğuna ekle. product_id döner."""
+    if not is_valid_product_url(url, platform):
+        raise ValueError(f"Geçersiz ürün URL'si ({platform}): {url[:80]}")
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     product_id_str = extract_product_id(url, platform)
 
@@ -150,15 +179,20 @@ def enqueue_url(db, url: str, platform: str) -> int:
         row = db.execute("SELECT id FROM products WHERE source_url=?", (clean_url,)).fetchone()
         product_id = row["id"]
 
-    # Kuyruğa ekle (zaten pending/processing'de varsa tekrar ekleme)
+    # Kuyruğa ekle — admin eklediği için en yüksek öncelik (-1)
+    # Zaten kuyrukta varsa önceliğini -1'e çek (öne geç)
     existing = db.execute(
-        "SELECT id FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')",
+        "SELECT id, priority FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')",
         (product_id,)
     ).fetchone()
-    if not existing:
+    if existing:
+        if existing["priority"] > -1:
+            db.execute("UPDATE scan_queue SET priority=-1 WHERE id=?", (existing["id"],))
+            commit_with_retry(db)
+    else:
         db.execute("""
             INSERT INTO scan_queue(product_id, url, platform, status, priority, created_at)
-            VALUES(?,?,?,'pending',0,?)
+            VALUES(?,?,?,'pending',-1,?)
         """, (product_id, clean_url, platform, now))
         commit_with_retry(db)
 

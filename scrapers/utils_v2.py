@@ -21,9 +21,15 @@ UA_POOL = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
 
-PLAYWRIGHT_SEM = asyncio.Semaphore(2)
-
 CLOUDFLARE_TITLES = ["Attention Required", "Just a moment", "Checking your browser"]
+
+_PLAYWRIGHT_SEM = None
+
+def get_playwright_sem() -> asyncio.Semaphore:
+    global _PLAYWRIGHT_SEM
+    if _PLAYWRIGHT_SEM is None:
+        _PLAYWRIGHT_SEM = asyncio.Semaphore(2)
+    return _PLAYWRIGHT_SEM
 
 class RateLimiter:
     def __init__(self, min_delay: float, max_delay: float):
@@ -74,19 +80,16 @@ def parse_price_tr_clean(text: str) -> Optional[float]:
     try:
         v = float(t)
         # 10 TL altı veya 999.999 TL üstü → muhtemelen yanlış parse
-        return v if 10 < v < 1_000_000 else None
+        return v if 0.5 < v < 1_000_000 else None
     except Exception:
         return None
 
 
-def normalize_image_url(url: str | None) -> str | None:
+def normalize_image_url(url: Optional[str]) -> Optional[str]:
     if not url: return None
     url = url.strip()
     if url.startswith('//'): return 'https:' + url
     if url.startswith('http'): return url
     return None
 
-def detect_cart_discount(html: str) -> bool:
-    patterns = ['sepette indirim', 'sepete indirim', '2. ürüne', 'ikinci ürüne']
-    return any(p in (html or '').lower() for p in patterns)
 

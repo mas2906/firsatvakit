@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 from bs4 import BeautifulSoup
 
+import httpx
 from scrapers.utils import (
     UA_POOL,
     MOBILE_UA_POOL,
@@ -20,23 +21,213 @@ from scrapers.utils import (
     get_stealth_headers,
 )
 
+try:
+    from curl_cffi.requests import AsyncSession as CurlSession
+    CURL_CFFI_AVAILABLE = True
+except ImportError:
+    CurlSession = None
+    CURL_CFFI_AVAILABLE = False
+
 log = logging.getLogger("hb_v11")
 
 # ==========================================
 # CONFIG
 # ==========================================
-_limiter = RateLimiter(min_delay=1.2, max_delay=3.5)
-HB_LOCK = asyncio.Semaphore(2)
+_limiter      = RateLimiter(min_delay=3.0, max_delay=7.0)
+_limiter_fast = RateLimiter(min_delay=0.4, max_delay=1.0)
+_HB_LOCK = None
+
+def _get_hb_lock() -> asyncio.Semaphore:
+    global _HB_LOCK
+    if _HB_LOCK is None:
+        _HB_LOCK = asyncio.Semaphore(5)
+    return _HB_LOCK
+
+# HB'ye özel BrowserPool — paylaşımlı context'ten ayrı (security sayfasını önler)
+_HB_POOL = None
+_HB_POOL_LOCK = None
+
+def _get_hb_pool_lock() -> asyncio.Lock:
+    global _HB_POOL_LOCK
+    if _HB_POOL_LOCK is None:
+        _HB_POOL_LOCK = asyncio.Lock()
+    return _HB_POOL_LOCK
+
+async def _get_or_create_hb_pool():
+    global _HB_POOL
+    async with _get_hb_pool_lock():
+        if _HB_POOL is None or not _HB_POOL._started:
+            from scrapers.cdp_base import BrowserPool
+            _HB_POOL = BrowserPool(max_pages=5)
+            await _HB_POOL.start()
+            log.info("[HB] Dedicated BrowserPool başlatıldı")
+    return _HB_POOL
+
+_CURL_SESSION = None
+_CURL_LOCK = asyncio.Lock()
+
+IMPERSONATE_POOL = ["chrome136", "chrome131", "chrome124", "chrome120"]
+
+
+async def _get_curl_session():
+    global _CURL_SESSION
+    async with _CURL_LOCK:
+        if _CURL_SESSION is None:
+            imp = random.choice(IMPERSONATE_POOL)
+            _CURL_SESSION = CurlSession(impersonate=imp, timeout=12)
+            log.info(f"[HB] curl session oluşturuldu: {imp}")
+        return _CURL_SESSION
+
+
+def _reset_curl_session():
+    global _CURL_SESSION
+    _CURL_SESSION = None
+
+
+def _parse_html_only(html: str) -> Optional[dict]:
+    """Playwright gerektirmeden HTML'den parse — curl_cffi layer için."""
+    soup = BeautifulSoup(html, "html.parser")
+    title = price = image = None
+    stock = "Bilinmiyor"
+    cart_discount = False
+
+    # 1) window.productState
+    m = re.search(r'window\.productState\s*=\s*(\{)', html)
+    ps = None
+    if m:
+        try:
+            start = m.start(1)
+            depth, in_str, esc, end = 0, False, False, start
+            for i, ch in enumerate(html[start:], start):
+                if esc: esc = False; continue
+                if ch == '\\' and in_str: esc = True; continue
+                if ch == '"': in_str = not in_str; continue
+                if in_str: continue
+                if ch == '{': depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0: end = i + 1; break
+            ps = json.loads(html[start:end])
+            product = ps.get("product", {})
+            title = product.get("name")
+            price = _extract_price_from_state(ps)
+            stock = _extract_stock_from_state(ps)
+            image = _extract_image_from_state(ps)
+        except Exception:
+            pass
+
+    # 2) __NEXT_DATA__
+    if not title or not price:
+        m2 = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>', html)
+        if m2:
+            try:
+                j = json.loads(m2.group(1))
+                txt = json.dumps(j, ensure_ascii=False)
+                if not title:
+                    tm = re.search(r'"name"\s*:\s*"([^"]{10,})"', txt)
+                    if tm: title = tm.group(1)
+                if not price:
+                    price = _extract_price_from_next_data(j)
+            except Exception:
+                pass
+
+    # 3) JSON-LD
+    if not title or not image:
+        for sc in soup.find_all("script", type="application/ld+json"):
+            try:
+                j = json.loads(sc.string or sc.text)
+                if isinstance(j, list): j = j[0]
+                if isinstance(j, dict):
+                    if not title: title = j.get("name")
+                    if not image:
+                        img = j.get("image")
+                        if isinstance(img, list) and img:
+                            image = img[0] if isinstance(img[0], str) else img[0].get("url")
+                        elif isinstance(img, str):
+                            image = img
+                    if not price:
+                        offers = j.get("offers", {})
+                        p = offers.get("price") if isinstance(offers, dict) else None
+                        if p: price = parse_price_tr_clean(str(p))
+            except Exception:
+                pass
+
+    # 4) og fallbacks
+    if not image:
+        og = soup.find("meta", property="og:image")
+        if og: image = og.get("content")
+    if not title:
+        og = soup.find("meta", property="og:title")
+        if og: title = og.get("content")
+
+    if not price or not title:
+        return None
+
+    if "güvenlik" in (title or "").lower() or "hata" in (title or "").lower():
+        return None
+
+    # Kupon ve varyantlar — zaten parse edilmiş ps'den al
+    coupon = None
+    variants_list = None
+    if ps:
+        coupon = _extract_coupon_from_state(ps)
+        variants_list = _extract_variants_from_state(ps)
+
+    return {
+        "title": title, "price": price, "image_url": image,
+        "stock": stock, "cart_discount": cart_discount,
+        "coupon": coupon, "variants": variants_list,
+    }
+
+
+async def _via_curl_cffi(url: str) -> Optional[dict]:
+    """Layer 0: curl_cffi (Chrome TLS fingerprint) — Playwright gerektirmez."""
+    if not CURL_CFFI_AVAILABLE:
+        return None
+    try:
+        await _limiter_fast.wait()
+        session = await _get_curl_session()
+        ua = random.choice(MOBILE_UA_POOL + UA_POOL)
+        headers = {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9",
+            "Referer": "https://www.hepsiburada.com/",
+        }
+        r = await session.get(url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code != 200:
+            return None
+        html = r.text
+        if "security" in html[:2000].lower() or "captcha" in html[:2000].lower():
+            _reset_curl_session()
+            return None
+        result = _parse_html_only(html)
+        if result:
+            log.info(f"[HB/curl] ✔ {result.get('title','')[:50]} | {result.get('price')}")
+        return result
+    except Exception as e:
+        log.debug(f"[HB/curl] Hata: {e}")
+        _reset_curl_session()
+        return None
 
 
 # ==========================================
 # ENTRY
 # ==========================================
 async def scrape_hepsiburada(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
-    async with HB_LOCK:
+    # Layer 0: curl_cffi — browser gerektirmez, ~3x hızlı
+    if CURL_CFFI_AVAILABLE:
+        data = await _via_curl_cffi(url)
+        if data and data.get("price"):
+            if price_only:
+                return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+            return data
+
+    # Layer 1: Playwright fallback
+    async with _get_hb_lock():
         result = await _run(url, pool)
         if price_only and result:
-            return {k: result[k] for k in ("price", "stock", "cart_discount") if k in result}
+            return {k: result[k] for k in ("price", "stock", "cart_discount", "coupon") if k in result}
         return result
 
 
@@ -92,6 +283,10 @@ async def _run(url: str, pool=None):
             return None
 
     use_mobile = False  # pool modunda desktop (pool kendi context'ini yönetir)
+
+    # pool verilmemişse HB'nin dedicated pool'unu kullan (her scrape'te yeni browser açmak yerine)
+    if pool is None:
+        pool = await _get_or_create_hb_pool()
 
     if pool:
         page = await pool.acquire()
@@ -172,72 +367,57 @@ async def _parse(page, html: str):
     # 0. JS page evaluation — en güvenilir yöntem
     # ==================================================
     try:
-        js_price = await page.evaluate("""
+        js_data = await page.evaluate("""
             () => {
-                const paths = [
+                const pricePaths = [
                     () => window.productState?.product?.price?.finalPrice,
                     () => window.productState?.product?.price?.value,
                     () => window.productState?.product?.price?.discountedPrice,
                     () => window.productState?.product?.price?.currentPrice,
                     () => window.productState?.product?.buyBoxInfo?.priceInfo?.finalPrice,
                     () => window.productState?.product?.buyBoxInfo?.price,
+                    () => window.productModel?.price?.finalPrice,
+                    () => window.productModel?.price?.value,
+                    () => window.productModel?.price?.discountedPrice,
                     () => window.__INITIAL_STATE__?.product?.price?.finalPrice,
                     () => window.__INITIAL_STATE__?.product?.price?.value,
                 ];
-                for (const fn of paths) {
+                let price = null;
+                for (const fn of pricePaths) {
                     try {
                         const v = fn();
-                        if (v && typeof v === 'number' && v > 10) return v;
+                        if (v && typeof v === 'number' && v > 10) { price = v; break; }
                         if (v && typeof v === 'string') {
                             const n = parseFloat(v.replace(/\\./g,'').replace(',','.'));
-                            if (n > 10) return n;
+                            if (n > 10) { price = n; break; }
                         }
                     } catch(e) {}
                 }
-                return null;
+
+                // Stock: productModel veya productState'den
+                let stock = null;
+                const pm = window.productModel || window.productState?.product || {};
+                const salable = pm.isSalable ?? pm.isSaleable ?? pm.isAvailable ?? null;
+                const qty = pm.stockQty ?? pm.stock ?? null;
+                if (salable === false || qty === 0) stock = 'Stok Yok';
+                else if (salable === true || (typeof qty === 'number' && qty > 0)) stock = 'Stokta Var';
+
+                // Title: productModel veya productState'den
+                const title = window.productModel?.name
+                    || window.productState?.product?.name
+                    || window.__INITIAL_STATE__?.product?.name
+                    || null;
+
+                return { price, stock, title };
             }
         """)
-        if js_price:
-            price = float(js_price)
-    except Exception:
-        pass
-
-    # DEBUG: hangi window değişkenleri var, DOM fiyat elementleri ne döndürüyor
-    try:
-        debug_info = await page.evaluate("""
-            () => {
-                const win_keys = Object.keys(window).filter(k =>
-                    /state|product|price|hb|data/i.test(k) && typeof window[k] === 'object'
-                );
-                const price_els = {};
-                [
-                    '[data-test-id="default-price"]',
-                    '[data-test-id="checkout-price"]',
-                    '[data-test-id="price"]',
-                    '[data-test-id="price-value"]',
-                    '[class*="price"]',
-                    'span[itemprop="price"]',
-                    'meta[itemprop="price"]',
-                ].forEach(sel => {
-                    const el = document.querySelector(sel);
-                    if (el) price_els[sel] = el.tagName === 'META'
-                        ? el.getAttribute('content')
-                        : el.innerText?.trim().slice(0, 80);
-                });
-                return { win_keys, price_els };
-            }
-        """)
-        log.warning(f"[HB DEBUG] window keys: {debug_info.get('win_keys')}")
-        log.warning(f"[HB DEBUG] price elements: {debug_info.get('price_els')}")
-    except Exception as e:
-        log.warning(f"[HB DEBUG] evaluate hatası: {e}")
-
-    try:
-        js_title = await page.evaluate("""
-            () => window.productState?.product?.name || window.__INITIAL_STATE__?.product?.name || null
-        """)
-        if js_title:
-            title = js_title
+        if js_data:
+            if js_data.get("price"):
+                price = float(js_data["price"])
+            if js_data.get("stock"):
+                stock = js_data["stock"]
+            if js_data.get("title"):
+                title = js_data["title"]
     except Exception:
         pass
 
@@ -376,13 +556,32 @@ async def _parse(page, html: str):
     # RESULT
     # ==================================================
     if title and "güvenlik" not in title.lower() and "hata" not in title.lower():
-        log.info(f"[HB V11] title={title[:60]!r} price={price} stock={stock} cart_discount={cart_discount}")
+        # Kupon ve varyantlar — zaten parse edilmiş productState'den al
+        coupon = None
+        variants_list = None
+        if productState:
+            coupon = _extract_coupon_from_state(productState)
+            variants_list = _extract_variants_from_state(productState)
+
+        if not coupon:
+            try:
+                co_coupon = await page.query_selector('[data-test-id="merchant-coupons"]')
+                if co_coupon:
+                    t = (await co_coupon.inner_text()).strip()
+                    if t:
+                        coupon = t[:200]
+            except Exception:
+                pass
+
+        log.info(f"[HB V11] title={title[:60]!r} price={price} stock={stock} cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants_list or [])}")
         return {
             "title": title,
             "price": price,
             "image_url": image,
             "stock": stock,
             "cart_discount": cart_discount,
+            "coupon": coupon,
+            "variants": variants_list,
             "platform": "Hepsiburada",
             "success": True
         }
@@ -464,6 +663,58 @@ def _extract_stock_from_state(state: dict) -> str:
     if is_salable is True:
         return "Stokta Var"
     return "Bilinmiyor"
+
+
+def _extract_coupon_from_state(state: dict) -> Optional[str]:
+    """window.productState'den kupon bilgisini çıkar."""
+    product = state.get("product", {}) or {}
+    for key in ("couponText", "couponTitle", "couponName", "merchantCoupon", "couponDescription"):
+        val = product.get(key)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()[:200]
+    coupons = product.get("coupons") or product.get("merchantCoupons") or []
+    for c in (coupons if isinstance(coupons, list) else []):
+        if isinstance(c, dict):
+            t = c.get("title") or c.get("text") or c.get("name") or c.get("description") or ""
+            if t:
+                return str(t)[:200]
+    return None
+
+
+def _extract_variants_from_state(state: dict) -> Optional[list]:
+    """window.productState'den varyantları çıkar."""
+    product = state.get("product", {}) or {}
+    raw = (product.get("variants") or product.get("listings") or
+           product.get("skus") or product.get("variantList") or [])
+    if not raw or not isinstance(raw, list):
+        return None
+    parsed = []
+    seen: set = set()
+    for var in raw:
+        if not isinstance(var, dict):
+            continue
+        name_parts = []
+        for attr_key in ("color", "colorName", "size", "sizeName", "attribute", "attributeValue", "description"):
+            v = (var.get(attr_key) or "").strip()
+            if v and v not in name_parts:
+                name_parts.append(v)
+        name = " / ".join(name_parts) if name_parts else (var.get("id") or var.get("sku") or "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        vp = None
+        for pk in ("price", "finalPrice", "discountedPrice", "currentPrice"):
+            pv = var.get(pk)
+            if isinstance(pv, dict):
+                pv = pv.get("value") or pv.get("finalPrice")
+            if isinstance(pv, (int, float)) and pv > 0:
+                vp = float(pv)
+                break
+        in_stock = not (var.get("outOfStock") or (var.get("stockQty") or 1) == 0)
+        parsed.append({"name": str(name)[:100], "price": vp, "in_stock": in_stock})
+        if len(parsed) >= 50:
+            break
+    return parsed if parsed else None
 
 
 def _extract_price_from_next_data(j: dict) -> Optional[float]:

@@ -14,8 +14,14 @@ log = logging.getLogger("utils")
 
 CLOUDFLARE_TITLES = ["Attention Required", "Just a moment", "Checking your browser"]
 
-# Aynı anda en fazla 2 Playwright/Chromium instance (amazon + trendyol paralel)
-PLAYWRIGHT_SEM = asyncio.Semaphore(2)
+# Lazy init: modül import edildiğinde event loop olmayabilir
+_PLAYWRIGHT_SEM = None
+
+def get_playwright_sem() -> asyncio.Semaphore:
+    global _PLAYWRIGHT_SEM
+    if _PLAYWRIGHT_SEM is None:
+        _PLAYWRIGHT_SEM = asyncio.Semaphore(2)
+    return _PLAYWRIGHT_SEM
 
 
 
@@ -313,7 +319,7 @@ def parse_price_tr_clean(text: str) -> Optional[float]:
     try:
         v = float(t)
         # 10 TL altı veya 999.999 TL üstü → muhtemelen yanlış parse
-        return v if 10 < v < 1_000_000 else None
+        return v if 0.5 < v < 1_000_000 else None
     except Exception:
         return None
 
