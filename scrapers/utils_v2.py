@@ -28,7 +28,7 @@ _PLAYWRIGHT_SEM = None
 def get_playwright_sem() -> asyncio.Semaphore:
     global _PLAYWRIGHT_SEM
     if _PLAYWRIGHT_SEM is None:
-        _PLAYWRIGHT_SEM = asyncio.Semaphore(2)
+        _PLAYWRIGHT_SEM = asyncio.Semaphore(30)
     return _PLAYWRIGHT_SEM
 
 class RateLimiter:

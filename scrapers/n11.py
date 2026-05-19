@@ -62,9 +62,9 @@ except ImportError:
     CurlSession = None
     CURL_CFFI_AVAILABLE = False
 
-_limiter      = RateLimiter(0.8, 2.0)
-_limiter_fast = RateLimiter(0.3, 0.8)
-_limiter_gql  = RateLimiter(0.05, 0.2)
+_limiter      = RateLimiter(0.0, 0.05)
+_limiter_fast = RateLimiter(0.0, 0.02)
+_limiter_gql  = RateLimiter(0.0, 0.02)
 
 # Global persistent sessions — TCP/TLS maliyetini ortadan kaldırır
 _CURL_SESSION: Optional[CurlSession] = None

@@ -31,8 +31,8 @@ except ImportError:
 
 log = logging.getLogger("amazon")
 
-_limiter      = RateLimiter(min_delay=0.8, max_delay=2.0)   # tam scrape
-_limiter_fast = RateLimiter(min_delay=0.3, max_delay=0.8)   # price_only
+_limiter      = RateLimiter(min_delay=0.0, max_delay=0.05)
+_limiter_fast = RateLimiter(min_delay=0.0, max_delay=0.02)
 
 # ── Cookie cache ─────────────────────────────────────────────────
 _COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "amazon_cookies.json")

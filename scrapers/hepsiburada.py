@@ -33,8 +33,8 @@ log = logging.getLogger("hb_v11")
 # ==========================================
 # CONFIG
 # ==========================================
-_limiter      = RateLimiter(min_delay=3.0, max_delay=7.0)
-_limiter_fast = RateLimiter(min_delay=0.4, max_delay=1.0)
+_limiter      = RateLimiter(min_delay=0.5, max_delay=1.0)
+_limiter_fast = RateLimiter(min_delay=0.0, max_delay=0.1)
 _HB_LOCK = None
 
 def _get_hb_lock() -> asyncio.Semaphore:

@@ -34,10 +34,10 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 
 # Her platform bağımsız — birbirini bloklamaz
 PLATFORM_CONFIG = {
-    "amazon":      {"concurrent": 6, "batch": 8},
-    "trendyol":    {"concurrent": 5, "batch": 6},
-    "n11":         {"concurrent": 6, "batch": 8},
-    "hepsiburada": {"concurrent": 2, "batch": 3},
+    "amazon":      {"concurrent": 20, "batch": 25},
+    "trendyol":    {"concurrent": 15, "batch": 20},
+    "n11":         {"concurrent": 25, "batch": 30},
+    "hepsiburada": {"concurrent": 6,  "batch": 8},
 }
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -163,7 +163,7 @@ async def main():
     for p, cfg in PLATFORM_CONFIG.items():
         log.info(f"  {p}: concurrent={cfg['concurrent']} batch={cfg['batch']}")
 
-    pool = BrowserPool(max_pages=total_pages + 4)  # buffer
+    pool = BrowserPool(max_pages=total_pages + 10)  # buffer
     try:
         await pool.start()
         log.info("[BrowserPool] Hazır")
