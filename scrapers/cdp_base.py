@@ -135,17 +135,19 @@ async def cdp_intercept_xhr(page, url: str, patterns: list, timeout: int = 15) -
 
 class BrowserPool:
     """
-    Tek Chromium instance üzerinde birden fazla sayfa yöneten havuz.
-    Resource blocking varsayılan olarak aktif.
-    N sayfa sonrası browser yeniden başlatılır (bellek birikimini önler).
+    Platform başına izole BrowserPool — ayrı Chrome process, ayrı context.
+    Her 100 sayfada context yeniden başlatılır; diğer platformlar etkilenmez.
     """
 
-    RESTART_AFTER = 300  # kaç sayfadan sonra browser restart edilsin
+    RESTART_AFTER = 100
 
-    def __init__(self, max_pages: int = 8):
+    def __init__(self, max_pages: int = 8, name: str = "pool",
+                 shared_browser=None, shared_pw=None):
         self.max_pages = max_pages
-        self._pw = None
-        self._browser = None
+        self.name = name
+        self._pw = shared_pw
+        self._browser = shared_browser
+        self._shared = shared_browser is not None  # browser'ı biz başlatmadık
         self._context = None
         self._sem = asyncio.Semaphore(max_pages)
         self._lock = asyncio.Lock()
@@ -153,85 +155,86 @@ class BrowserPool:
         self._page_count = 0
         self._restart_lock = asyncio.Lock()
 
+    async def _new_context(self):
+        _w = random.choice([1280, 1366, 1440, 1920])
+        _h = random.choice([768, 800, 900, 1080])
+        _ua = random.choice(UA_POOL)
+        ctx = await self._browser.new_context(
+            viewport={"width": _w, "height": _h},
+            user_agent=_ua,
+            locale="tr-TR",
+            timezone_id="Europe/Istanbul",
+            java_script_enabled=True,
+            ignore_https_errors=True,
+            extra_http_headers=get_stealth_headers(_ua),
+        )
+        await ctx.add_init_script(STEALTH_SCRIPT)
+        return ctx
+
     async def start(self) -> None:
-        from playwright.async_api import async_playwright
         async with self._lock:
             if self._started:
                 return
-            self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-gpu",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-extensions",
-                    "--disable-background-networking",
-                    "--disable-default-apps",
-                    "--disable-sync",
-                    "--disable-translate",
-                    "--no-first-run",
-                    "--mute-audio",
-                    "--disable-background-timer-throttling",
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            )
-            _w = random.choice([1280, 1366, 1440, 1920])
-            _h = random.choice([768, 800, 900, 1080])
-            _ua = random.choice(UA_POOL)
-            self._context = await self._browser.new_context(
-                viewport={"width": _w, "height": _h},
-                user_agent=_ua,
-                locale="tr-TR",
-                timezone_id="Europe/Istanbul",
-                java_script_enabled=True,
-                ignore_https_errors=True,
-                extra_http_headers=get_stealth_headers(_ua),
-            )
-            # Stealth
-            await self._context.add_init_script(STEALTH_SCRIPT)
+            if not self._shared:
+                from playwright.async_api import async_playwright
+                self._pw = await async_playwright().start()
+                self._browser = await self._pw.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--no-sandbox",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-default-apps",
+                        "--disable-sync",
+                        "--disable-translate",
+                        "--no-first-run",
+                        "--mute-audio",
+                        "--disable-background-timer-throttling",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
+                )
+            self._context = await self._new_context()
             self._started = True
-            log.info(f"[BrowserPool] Başladı — max_pages={self.max_pages}")
+            log.info(f"[BrowserPool/{self.name}] Başladı — max_pages={self.max_pages}")
 
     async def _restart(self) -> None:
-        """Browser'ı yeniden başlat — bellek birikimini temizler."""
+        """Rolling restart — önce yeni context aç, eski context arka planda kapat.
+        Slot drain yok → sıfır duruş, devam eden sayfalar etkilenmez."""
         async with self._restart_lock:
             if self._page_count < self.RESTART_AFTER:
-                return  # başka coroutine zaten yaptı
-            log.info(f"[BrowserPool] {self._page_count} sayfa sonrası restart — aktif sayfalar bekleniyor...")
-
-            # Tüm aktif sayfalar bitene kadar bekle: semaphore'u tamamen doldur.
-            # Bu aynı zamanda yeni acquire() çağrılarını bloke eder.
-            acquired = 0
+                return
+            self._page_count = 0
+            old_context = self._context
             try:
-                for _ in range(self.max_pages):
-                    await asyncio.wait_for(self._sem.acquire(), timeout=30)
-                    acquired += 1
-            except asyncio.TimeoutError:
-                log.warning(f"[BrowserPool] Drain timeout — {acquired}/{self.max_pages} slot, zorla devam")
+                self._context = await self._new_context()
+                log.info(f"[BrowserPool/{self.name}] Rolling restart — yeni context hazır, eski arka planda kapanıyor")
+            except Exception as e:
+                log.error(f"[BrowserPool/{self.name}] Yeni context açılamadı: {e}")
+                self._context = old_context  # geri al
+                return
 
-            try:
-                await self.stop()
-                await self.start()
-                self._page_count = 0
-                log.info("[BrowserPool] Restart tamamlandı")
-            finally:
-                # Slotları geri ver — bekleyen acquire() çağrıları devam edebilir
-                for _ in range(acquired):
-                    self._sem.release()
+            async def _close_old(ctx):
+                # 0-12 saniye arası random grace: uçuştaki sayfalar bitsin, sonra kapat
+                await asyncio.sleep(random.uniform(0, 12))
+                try:
+                    await ctx.close()
+                    log.info(f"[BrowserPool/{self.name}] Eski context kapatıldı")
+                except Exception:
+                    pass
+
+            if old_context:
+                asyncio.create_task(_close_old(old_context))
 
     async def acquire(self):
         """Havuzdan bir sayfa al (semaphore ile sınırlı)."""
         if not self._started:
             await self.start()
-        # Bellek birikimine karşı periyodik restart
         if self._page_count >= self.RESTART_AFTER:
             await self._restart()
         await self._sem.acquire()
         try:
-            # Restart sürecinde context geçici olarak None olabilir
-            if self._context is None:
-                await self.start()
             page = await self._context.new_page()
             self._page_count += 1
             try:
@@ -260,19 +263,21 @@ class BrowserPool:
                 except Exception:
                     pass
                 self._context = None
-            if self._browser:
-                try:
-                    await self._browser.close()
-                except Exception:
-                    pass
-                self._browser = None
-            if self._pw:
-                try:
-                    await self._pw.stop()
-                except Exception:
-                    pass
-                self._pw = None
+            if not self._shared:
+                if self._browser:
+                    try:
+                        await self._browser.close()
+                    except Exception:
+                        pass
+                    self._browser = None
+                if self._pw:
+                    try:
+                        await self._pw.stop()
+                    except Exception:
+                        pass
+                    self._pw = None
             self._started = False
+            log.info(f"[BrowserPool/{self.name}] Durduruldu")
             log.info("[BrowserPool] Durduruldu")
 
 

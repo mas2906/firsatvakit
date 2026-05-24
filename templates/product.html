@@ -90,9 +90,12 @@
     {% set min_p = history|map(attribute='price_value')|min %}
     <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
       <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0 0 6px;">📊 FİYAT GEÇMİŞİ</h2>
-      <div style="display:flex;gap:16px;margin-bottom:16px;font-size:12px;font-weight:600;">
-        <span style="color:#16a34a;">🟢 En düşük: {{ min_p|price_tr }} TL</span>
-        <span style="color:#dc2626;">🔴 En yüksek: {{ max_p|price_tr }} TL</span>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;gap:16px;font-size:12px;font-weight:600;">
+          <span style="color:#16a34a;">🟢 En düşük: {{ min_p|price_tr }} TL</span>
+          <span style="color:#dc2626;">🔴 En yüksek: {{ max_p|price_tr }} TL</span>
+        </div>
+        <span id="pricePointCount" style="font-size:11px;color:var(--muted);"></span>
       </div>
       <div style="position:relative;height:200px;">
         <canvas id="priceChart"></canvas>
@@ -101,9 +104,25 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function(){
-      var labels = [{% for h in history %}"{{ h.scraped_at[5:16] }}"{% if not loop.last %},{% endif %}{% endfor %}];
-      var prices = [{% for h in history %}{{ "%.2f"|format(h.price_value) }}{% if not loop.last %},{% endif %}{% endfor %}];
+      var rawLabels = [{% for h in history %}"{{ h.scraped_at[5:16] }}"{% if not loop.last %},{% endif %}{% endfor %}];
+      var rawPrices = [{% for h in history %}{{ "%.2f"|format(h.price_value) }}{% if not loop.last %},{% endif %}{% endfor %}];
       var minP = {{ "%.2f"|format(min_p) }};
+      var maxP = {{ "%.2f"|format(max_p) }};
+
+      // Ardışık aynı fiyatları teke indir — sadece fiyat değişimi ve son nokta
+      var labels = [], prices = [];
+      for (var i = 0; i < rawPrices.length; i++) {
+        var isLast = (i === rawPrices.length - 1);
+        var changed = (i === 0) || (rawPrices[i] !== rawPrices[i - 1]);
+        if (changed || isLast) {
+          labels.push(rawLabels[i]);
+          prices.push(rawPrices[i]);
+        }
+      }
+
+      document.getElementById('pricePointCount').textContent =
+        rawPrices.length + ' ölçüm, ' + prices.length + ' farklı fiyat';
+
       var ctx = document.getElementById('priceChart').getContext('2d');
       new Chart(ctx, {
         type: 'line',
@@ -113,22 +132,35 @@
             label: 'Fiyat (TL)',
             data: prices,
             borderColor: '#f4501c',
-            backgroundColor: 'rgba(244,80,28,0.08)',
-            borderWidth: 2,
-            pointRadius: prices.map(function(p){ return p === minP ? 6 : 3; }),
-            pointBackgroundColor: prices.map(function(p){ return p === minP ? '#16a34a' : '#f4501c'; }),
+            backgroundColor: 'rgba(244,80,28,0.07)',
+            borderWidth: 2.5,
+            pointRadius: prices.map(function(p){
+              if (p === minP) return 7;
+              if (p === maxP) return 6;
+              return 5;
+            }),
+            pointBackgroundColor: prices.map(function(p){
+              if (p === minP) return '#16a34a';
+              if (p === maxP) return '#dc2626';
+              return '#f4501c';
+            }),
+            pointBorderColor: '#fff',
+            pointBorderWidth: 1.5,
             fill: true,
-            tension: 0.3,
+            stepped: 'before',
           }]
         },
         options: {
           responsive: true, maintainAspectRatio: false,
           plugins: { legend: { display: false }, tooltip: { callbacks: {
-            label: function(c){ return c.parsed.y.toFixed(0) + ' TL'; }
+            label: function(c){ return c.parsed.y.toLocaleString('tr-TR') + ' TL'; }
           }}},
           scales: {
-            x: { ticks: { maxTicksLimit: 8, font: { size: 10 }, color: '#888' }, grid: { display: false } },
-            y: { ticks: { callback: function(v){ return v.toFixed(0)+' TL'; }, font: { size: 10 }, color: '#888' }, grid: { color: 'rgba(128,128,128,0.1)' } }
+            x: { ticks: { maxTicksLimit: 6, font: { size: 10 }, color: '#888' }, grid: { display: false } },
+            y: {
+              ticks: { callback: function(v){ return v.toLocaleString('tr-TR')+' TL'; }, font: { size: 10 }, color: '#888', maxTicksLimit: 5 },
+              grid: { color: 'rgba(128,128,128,0.1)' }
+            }
           }
         }
       });

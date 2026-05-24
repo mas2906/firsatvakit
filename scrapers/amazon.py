@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Amazon.com.tr scraper — v5 (global session reuse).
+Amazon.com.tr scraper — v6.
 
 Katmanlar:
-1) curl_cffi — global persistent CurlSession, TLS handshake 0
-2) Playwright (son çare)
+1) curl_cffi — Chrome TLS fingerprint, warm-up, circuit breaker
+2) Playwright — persistent BrowserPool, kapsamlı stealth, cookie kalıcılığı
 """
 
 import os
@@ -18,7 +18,7 @@ from typing import Optional
 from bs4 import BeautifulSoup
 from scrapers.utils import (
     UA_POOL, RateLimiter,
-    detect_cart_discount, get_playwright_sem, STEALTH_SCRIPT,
+    detect_cart_discount, get_playwright_sem,
     parse_price_tr_clean, get_stealth_headers,
 )
 
@@ -31,8 +31,140 @@ except ImportError:
 
 log = logging.getLogger("amazon")
 
-_limiter      = RateLimiter(min_delay=0.0, max_delay=0.05)
-_limiter_fast = RateLimiter(min_delay=0.0, max_delay=0.02)
+import time as _time
+
+_limiter      = RateLimiter(min_delay=0.5, max_delay=1.5)
+_limiter_fast = RateLimiter(min_delay=0.3, max_delay=0.8)
+
+# ── Curl circuit breaker ─────────────────────────────────────────
+_curl_block_streak   = 0
+_curl_disabled_until = 0.0
+_CURL_BLOCK_LIMIT    = 3
+_CURL_COOLDOWN       = 120
+
+def _curl_ok() -> bool:
+    return CURL_AVAILABLE and _time.time() > _curl_disabled_until
+
+def _on_curl_block() -> None:
+    global _curl_block_streak, _curl_disabled_until
+    _curl_block_streak += 1
+    if _curl_block_streak >= _CURL_BLOCK_LIMIT:
+        _curl_disabled_until = _time.time() + _CURL_COOLDOWN
+        _curl_block_streak = 0
+        log.warning(f"[amazon/curl] {_CURL_BLOCK_LIMIT} ardışık block → {_CURL_COOLDOWN}s askıya alındı")
+
+def _on_curl_success() -> None:
+    global _curl_block_streak
+    _curl_block_streak = 0
+
+# ── Amazon-specific stealth script ───────────────────────────────
+_AMAZON_STEALTH = """
+(function(){
+  // 1. webdriver izlerini kaldır
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+  try { delete navigator.__proto__.webdriver; } catch(e) {}
+
+  // 2. Gerçek Chrome plugin listesi
+  const makePlugin = (name, filename, desc, mimeTypes) => {
+    const p = Object.create(Plugin.prototype);
+    Object.defineProperties(p, {
+      name: {value: name}, filename: {value: filename},
+      description: {value: desc}, length: {value: mimeTypes.length},
+    });
+    mimeTypes.forEach((mt, i) => { p[i] = mt; });
+    return p;
+  };
+  const plugins = [
+    makePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format', []),
+    makePlugin('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', '', []),
+    makePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', '', []),
+    makePlugin('Microsoft Edge PDF Viewer', 'msedgepdf', '', []),
+    makePlugin('WebKit built-in PDF', 'webkit-web-plugin', '', []),
+  ];
+  Object.defineProperty(navigator, 'plugins', { get: () => plugins });
+  Object.defineProperty(navigator, 'mimeTypes', { get: () => [] });
+
+  // 3. Dil, platform, donanım
+  Object.defineProperty(navigator, 'languages',          {get: () => ['tr-TR','tr','en-US','en']});
+  Object.defineProperty(navigator, 'platform',           {get: () => 'Win32'});
+  Object.defineProperty(navigator, 'hardwareConcurrency',{get: () => 8});
+  Object.defineProperty(navigator, 'deviceMemory',       {get: () => 8});
+  Object.defineProperty(navigator, 'maxTouchPoints',     {get: () => 0});
+  Object.defineProperty(navigator, 'vendor',             {get: () => 'Google Inc.'});
+  Object.defineProperty(navigator, 'appVersion',         {get: () => '5.0 (Windows)'});
+
+  // 4. Chrome runtime objesi (tam)
+  if (!window.chrome) {
+    window.chrome = {
+      app: {isInstalled: false},
+      runtime: {
+        id: undefined,
+        connect: function(){},
+        sendMessage: function(){},
+        onMessage: {addListener: function(){}, removeListener: function(){}},
+      },
+      loadTimes: function(){
+        return {
+          requestTime: Date.now()/1000 - 0.5,
+          startLoadTime: Date.now()/1000 - 0.4,
+          commitLoadTime: Date.now()/1000 - 0.3,
+          finishDocumentLoadTime: Date.now()/1000,
+          finishLoadTime: Date.now()/1000,
+          firstPaintTime: 0, firstPaintAfterLoadTime: 0,
+          navigationType: 'Other',
+          wasFetchedViaSpdy: true, wasNpnNegotiated: true,
+          npnNegotiatedProtocol: 'h2',
+          wasAlternateProtocolAvailable: false,
+          connectionInfo: 'h2',
+        };
+      },
+      csi: function(){
+        return {startE: Date.now(), onloadT: Date.now(), pageT: 500, tran: 15};
+      },
+    };
+  }
+
+  // 5. Permissions API — notifications için gerçek değer
+  if (navigator.permissions && navigator.permissions.query) {
+    const origQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (params) => {
+      if (params && params.name === 'notifications') {
+        return Promise.resolve({state: 'default', onchange: null});
+      }
+      return origQuery(params);
+    };
+  }
+
+  // 6. WebGL fingerprint — yaygın Intel değerleri
+  try {
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel(R) Iris(TM) Plus Graphics 640';
+      return getParam.call(this, p);
+    };
+  } catch(e) {}
+
+  // 7. iframe içinde de webdriver gizle
+  try {
+    const origDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+      get: function() {
+        const cw = origDescriptor.get.call(this);
+        try { Object.defineProperty(cw.navigator, 'webdriver', {get: () => undefined}); } catch(e) {}
+        return cw;
+      }
+    });
+  } catch(e) {}
+
+  // 8. Otomasyon tespit metodlarını kaldır
+  ['$cdc_asdjflasutopfhvcZLmcfl_', '$chrome_asyncScriptInfo', '__$webdriverAsyncExecutor',
+   '__lastWatirAlert', '__lastWatirConfirm', '__lastWatirPrompt'].forEach(k => {
+    try { delete window[k]; } catch(e) {}
+  });
+})();
+"""
+
 
 # ── Cookie cache ─────────────────────────────────────────────────
 _COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "amazon_cookies.json")
@@ -59,29 +191,46 @@ def _load_amazon_cookies() -> dict:
         return {}
 
 
-# ── Global session ───────────────────────────────────────────────
+# ── Session pool (3 paralel session, farklı fingerprint) ────────
 IMPERSONATE_POOL = ["chrome146", "chrome142", "chrome136", "chrome131", "chrome124", "chrome120"]
+_POOL_SIZE = 3
 
-_SESSION: Optional[CurlSession] = None
-_SESSION_LOCK = asyncio.Lock()
+_SESSIONS: list = []
+_SESSIONS_LOCK = asyncio.Lock()
+_session_idx = 0
 
 
 async def _get_or_create_session() -> CurlSession:
-    global _SESSION
-    async with _SESSION_LOCK:
-        if _SESSION is None:
+    global _SESSIONS, _session_idx
+    async with _SESSIONS_LOCK:
+        if len(_SESSIONS) < _POOL_SIZE:
             imp = random.choice(IMPERSONATE_POOL)
-            _SESSION = CurlSession(impersonate=imp, timeout=20)
+            s = CurlSession(impersonate=imp, timeout=20)
             cookies = _load_amazon_cookies()
             if cookies:
-                _SESSION.cookies.update(cookies)
-            log.info(f"[amazon] Yeni session: {imp}" + (f", {len(cookies)} çerez" if cookies else ""))
-        return _SESSION
+                s.cookies.update(cookies)
+            _SESSIONS.append(s)
+            log.info(f"[amazon] Yeni session #{len(_SESSIONS)}: {imp}")
+            # Warm-up: homepage ziyareti ile cookie ve TLS session kur
+            try:
+                await s.get("https://www.amazon.com.tr/", headers=_CURL_HEADERS, timeout=8)
+                log.info(f"[amazon] Session warm-up tamamlandı")
+            except Exception:
+                pass
+        _session_idx = (_session_idx + 1) % len(_SESSIONS)
+        return _SESSIONS[_session_idx]
 
 
 def _reset_session() -> None:
-    global _SESSION
-    _SESSION = None
+    global _SESSIONS, _session_idx
+    if _SESSIONS:
+        bad = _session_idx % len(_SESSIONS)
+        try:
+            _SESSIONS[bad] = None  # type: ignore
+        except Exception:
+            pass
+        _SESSIONS = [s for s in _SESSIONS if s is not None]
+        log.info(f"[amazon] Session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
 
 
 # ── Block/not-found detection ────────────────────────────────────
@@ -123,7 +272,7 @@ def _is_not_found(html: str) -> bool:
 async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
     await (_limiter_fast if price_only else _limiter).wait()
 
-    if CURL_AVAILABLE:
+    if _curl_ok():
         last_data = None
         for attempt in range(2):
             data = await _via_curl(url)
@@ -131,6 +280,7 @@ async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Option
                 _limiter.reset()
                 return data
             if data and data.get("title") and data.get("price"):
+                _on_curl_success()
                 log.info(f"[amazon/curl] ✔ title={data['title'][:50]!r} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
                 return _price_only_filter(data, price_only)
             if data and data.get("title"):
@@ -138,15 +288,17 @@ async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Option
                 if data.get("stock") == "Stok Yok":
                     break
             if attempt == 0:
-                backoff = random.uniform(1.0, 2.5)
-                log.info(f"[amazon/curl] Deneme {attempt+1} başarısız → {backoff:.1f}s backoff")
+                backoff = random.uniform(0.2, 0.5)
                 await asyncio.sleep(backoff)
 
         if last_data:
             log.info(f"[amazon/curl] title var fiyat yok → Playwright atlanıyor (stock={last_data.get('stock')})")
             return _price_only_filter(last_data, price_only)
     else:
-        log.warning("[amazon] curl_cffi yüklü değil")
+        if not CURL_AVAILABLE:
+            log.warning("[amazon] curl_cffi yüklü değil")
+        else:
+            log.info(f"[amazon/curl] circuit breaker aktif — {max(0, _curl_disabled_until - _time.time()):.0f}s kaldı")
 
     log.info("[amazon] → Playwright deneniyor...")
     data = await _via_playwright(url, pool=pool)
@@ -172,13 +324,20 @@ def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]
 # ═══════════════════════════════════════════════════════════════
 
 _CURL_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "max-age=0",
     "Referer": "https://www.amazon.com.tr/",
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-User": "?1",
     "Upgrade-Insecure-Requests": "1",
+    "Dnt": "1",
 }
 
 
@@ -206,6 +365,7 @@ async def _via_curl(url: str) -> Optional[dict]:
         if _is_blocked(html):
             log.info("[amazon/curl] CAPTCHA/block → session sıfırlanıyor")
             _reset_session()
+            _on_curl_block()
             return None
 
         return await asyncio.to_thread(_parse, html)
@@ -221,30 +381,52 @@ async def _via_curl(url: str) -> Optional[dict]:
 # ═══════════════════════════════════════════════════════════════
 
 async def _via_playwright(url: str, pool=None) -> Optional[dict]:
-    if pool:
-        page = await pool.acquire()
-        try:
-            from scrapers.cdp_base import setup_resource_blocking_amazon
-            await setup_resource_blocking_amazon(page)
-            await page.add_init_script(STEALTH_SCRIPT)
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-            await page.mouse.wheel(0, random.randint(300, 700))
-            await asyncio.sleep(random.uniform(0.3, 0.8))
-            html = await page.content()
-            if html and len(html) > 5000:
-                if _is_not_found(html):
-                    log.info("[amazon/playwright+pool] Ürün bulunamadı (404)")
-                    return {"not_found": True}
-                return await asyncio.to_thread(_parse, html)
-            return None
-        except Exception as e:
-            log.error(f"[amazon/playwright+pool] Hata: {e}")
-            return None
-        finally:
-            await pool.release(page)
-    async with get_playwright_sem():
+    if pool is None:
+        log.warning("[amazon/playwright] pool verilmedi — _launch_playwright fallback")
         return await _launch_playwright(url)
+    page = await pool.acquire()
+    try:
+        from scrapers.cdp_base import setup_resource_blocking_amazon
+        await setup_resource_blocking_amazon(page)
+        await page.add_init_script(_AMAZON_STEALTH)
+
+        if random.random() < 0.15:
+            try:
+                await page.goto("https://www.amazon.com.tr/", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(random.uniform(0.5, 1.2))
+            except Exception:
+                pass
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.wait_for_selector(
+                "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_offerDisplay_desktop",
+                timeout=5000,
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(random.uniform(0.3, 0.8))
+        await page.mouse.wheel(0, random.randint(300, 700))
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+        if random.random() > 0.5:
+            await page.mouse.wheel(0, random.randint(100, 300))
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+
+        html = await page.content()
+        if html and len(html) > 5000:
+            if _is_not_found(html):
+                log.info("[amazon/playwright] Ürün bulunamadı (404)")
+                return {"not_found": True}
+            if _is_blocked(html):
+                log.info("[amazon/playwright] CAPTCHA/block algılandı")
+                return None
+            return await asyncio.to_thread(_parse, html)
+        return None
+    except Exception as e:
+        log.error(f"[amazon/playwright] Hata: {e}")
+        return None
+    finally:
+        await pool.release(page)
 
 
 async def _launch_playwright(url: str) -> Optional[dict]:
@@ -272,7 +454,7 @@ async def _launch_playwright(url: str) -> Optional[dict]:
                     viewport={"width": random.randint(1280, 1920), "height": random.randint(768, 1080)},
                     extra_http_headers=get_stealth_headers(_ua),
                 )
-                await context.add_init_script(STEALTH_SCRIPT)
+                await context.add_init_script(_AMAZON_STEALTH)
                 page = await context.new_page()
                 if _stealth:
                     await _stealth.apply_stealth_async(page)
@@ -282,12 +464,17 @@ async def _launch_playwright(url: str) -> Optional[dict]:
                     await page.wait_for_selector("#productTitle", timeout=8000)
                 except Exception:
                     pass
+                # Varyant ürünlerde fiyat JS ile render olur; fiyat div'ini bekle
+                try:
+                    await page.wait_for_selector(
+                        "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_offerDisplay_desktop",
+                        timeout=5000,
+                    )
+                except Exception:
+                    pass
 
                 await page.mouse.wheel(0, random.randint(250, 600))
-                await asyncio.sleep(random.uniform(0.8, 1.8))
-                if random.random() > 0.5:
-                    await page.mouse.wheel(0, random.randint(100, 300))
-                    await asyncio.sleep(random.uniform(0.4, 0.9))
+                await asyncio.sleep(random.uniform(0.3, 0.7))
 
                 html = await page.content()
             finally:
@@ -437,11 +624,43 @@ def _parse_variants(soup: BeautifulSoup, html: str) -> list:
     return variants[:50]
 
 
+_NOISE_SELECTORS = [
+    # Benzer ürünler / carousel / öneri bölümleri
+    "#similarities_feature_div",
+    "#sims-consolidated-1_feature_div",
+    "#sims-consolidated-2_feature_div",
+    "[id*='sims-']",
+    "[id*='p13n']",
+    "[id*='sp_detail']",
+    ".a-carousel-viewport",
+    "#HLCXComparisonWidget_feature_div",
+    "[id*='comparison']",
+    "[id*='viewed-together']",
+    "[id*='discovery']",
+    "#discovery-and-inspiration",
+    "#rhf",
+    "[id*='rhf_']",
+    # "Benzer ürünler" fiyat widget'ı (_vc-pfo prefix)
+    "[class*='_vc-pfo']",
+    "[class*='vc-pfo']",
+    "#buyers-also-bought-recommendation-carousel",
+    "[data-component-type='s-search-results']",
+]
+
+
 def _parse(html: str) -> Optional[dict]:
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
+
+    # Benzer ürünler / öneri / carousel bölümlerini fiyat aramadan önce kaldır
+    for sel in _NOISE_SELECTORS:
+        try:
+            for el in soup.select(sel):
+                el.decompose()
+        except Exception:
+            pass
 
     # ── Başlık ──────────────────────────────────────────────
     title = None
@@ -478,30 +697,32 @@ def _parse(html: str) -> Optional[dict]:
     price = None
     price_text = None
 
+    # 1. Buy box a-offscreen seçicileri (en spesifikten genele)
     for sel in [
-        "span.a-price span.a-offscreen",
         "#corePriceDisplay_desktop_feature_div span.a-offscreen",
-        "#apex_offerDisplay_desktop span.a-offscreen",
-        "[data-a-color='price'] span.a-offscreen",
-        ".a-price .a-offscreen",
-        "#priceblock_ourprice",
-        "#priceblock_dealprice",
         "#corePrice_feature_div span.a-offscreen",
+        "#apex_offerDisplay_desktop span.a-offscreen",
     ]:
         el = soup.select_one(sel)
         if el:
-            price_text = el.get_text(strip=True)
+            price_text = el.get_text(strip=True) or None
             if price_text:
                 break
 
+    # 2. span.a-price-whole + span.a-price-fraction — SADECE buy box container içinde
     if not price_text:
-        whole = soup.select_one("span.a-price-whole")
-        frac = soup.select_one("span.a-price-fraction")
-        if whole:
-            w = whole.get_text(strip=True).replace(".", "").replace(",", "")
-            f = frac.get_text(strip=True) if frac else "00"
-            if w:
-                price_text = f"{w},{f} TL"
+        container = soup.select_one(
+            "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
+            "#apex_offerDisplay_desktop, #buybox, #ppd"
+        )
+        if container:
+            whole = container.select_one("span.a-price-whole")
+            frac  = container.select_one("span.a-price-fraction")
+            if whole:
+                w = whole.get_text(strip=True).replace(".", "").replace(",", "")
+                f = (frac.get_text(strip=True) if frac else "00").strip()
+                if w.isdigit():
+                    price_text = f"{w},{f} TL"
 
     if price_text:
         price = _parse_price_tr(price_text)

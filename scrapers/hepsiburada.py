@@ -43,25 +43,6 @@ def _get_hb_lock() -> asyncio.Semaphore:
         _HB_LOCK = asyncio.Semaphore(5)
     return _HB_LOCK
 
-# HB'ye özel BrowserPool — paylaşımlı context'ten ayrı (security sayfasını önler)
-_HB_POOL = None
-_HB_POOL_LOCK = None
-
-def _get_hb_pool_lock() -> asyncio.Lock:
-    global _HB_POOL_LOCK
-    if _HB_POOL_LOCK is None:
-        _HB_POOL_LOCK = asyncio.Lock()
-    return _HB_POOL_LOCK
-
-async def _get_or_create_hb_pool():
-    global _HB_POOL
-    async with _get_hb_pool_lock():
-        if _HB_POOL is None or not _HB_POOL._started:
-            from scrapers.cdp_base import BrowserPool
-            _HB_POOL = BrowserPool(max_pages=5)
-            await _HB_POOL.start()
-            log.info("[HB] Dedicated BrowserPool başlatıldı")
-    return _HB_POOL
 
 _CURL_SESSION = None
 _CURL_LOCK = asyncio.Lock()
@@ -159,6 +140,19 @@ def _parse_html_only(html: str) -> Optional[dict]:
     if not title:
         og = soup.find("meta", property="og:title")
         if og: title = og.get("content")
+
+    # checkout-price HTML elementi — sepete özel indirim varsa nihai fiyatı override et
+    # JS/productState discountedPrice yerine DOM kaynak alınır
+    m_co = re.search(
+        r'data-test-id=["\']checkout-price["\'][^>]*>.*?'
+        r'([\d]{1,3}(?:\.[\d]{3})*,[\d]{2})\s*TL',
+        html, re.DOTALL | re.IGNORECASE
+    )
+    if m_co:
+        v = parse_price_tr_clean(m_co.group(1))
+        if v and v > 0:
+            price = v
+            cart_discount = True
 
     if not price or not title:
         return None
@@ -282,18 +276,17 @@ async def _run(url: str, pool=None):
             log.error(f"[HB V10] Hata: {e}")
             return None
 
-    use_mobile = False  # pool modunda desktop (pool kendi context'ini yönetir)
+    use_mobile = False
 
-    # pool verilmemişse HB'nin dedicated pool'unu kullan (her scrape'te yeni browser açmak yerine)
     if pool is None:
-        pool = await _get_or_create_hb_pool()
+        log.warning("[HB] pool verilmedi — iş atlanıyor")
+        return None
 
-    if pool:
-        page = await pool.acquire()
-        try:
-            return await worker(page)
-        finally:
-            await pool.release(page)
+    page = await pool.acquire()
+    try:
+        return await worker(page)
+    finally:
+        await pool.release(page)
 
     from playwright.async_api import async_playwright
 
@@ -371,17 +364,20 @@ async def _parse(page, html: str):
             () => {
                 const pricePaths = [
                     () => window.productState?.product?.price?.finalPrice,
-                    () => window.productState?.product?.price?.value,
-                    () => window.productState?.product?.price?.discountedPrice,
                     () => window.productState?.product?.price?.currentPrice,
                     () => window.productState?.product?.buyBoxInfo?.priceInfo?.finalPrice,
                     () => window.productState?.product?.buyBoxInfo?.price,
                     () => window.productModel?.price?.finalPrice,
-                    () => window.productModel?.price?.value,
-                    () => window.productModel?.price?.discountedPrice,
+                    () => window.productModel?.price?.currentPrice,
                     () => window.__INITIAL_STATE__?.product?.price?.finalPrice,
+                    () => window.__INITIAL_STATE__?.product?.price?.currentPrice,
+                    // value (original/list price) — son çare
+                    () => window.productState?.product?.price?.value,
+                    () => window.productModel?.price?.value,
                     () => window.__INITIAL_STATE__?.product?.price?.value,
                 ];
+                // discountedPrice kasıtlı olarak YOK — HB bazen bu alanı
+                // indirim tutarı (örn. 619 TL) olarak kullanır, nihai fiyat değil.
                 let price = null;
                 for (const fn of pricePaths) {
                     try {
@@ -523,18 +519,24 @@ async def _parse(page, html: str):
     # ==================================================
     # 4. DOM PRICE — JSON bulamazsa veya sepete özel varsa
     # ==================================================
-    # checkout-price elementi varsa sepete özel indirim var
+    # checkout-price elementi varsa sepete özel indirim var;
+    # bu durumda DOM fiyatı her zaman nihai fiyattır (JS'deki discountedPrice
+    # bazen indirim tutarını gösterir — 619 TL gibi).
+    has_checkout_price = False
     try:
         co_el = await page.query_selector('[data-test-id="checkout-price"]')
         if co_el:
             cart_discount = True
+            has_checkout_price = True
     except:
         pass
 
     dom_price = await _extract_dom_price(page)
     if dom_price:
-        # DOM fiyatı JSON fiyatından küçükse sepete özel indirim var
-        if not price or dom_price < price:
+        if has_checkout_price:
+            # checkout-price DOM elementı kesin kaynak — JS'yi override et
+            price = dom_price
+        elif not price or dom_price < price:
             if price and dom_price < price:
                 cart_discount = True
             price = dom_price
@@ -594,15 +596,15 @@ def _extract_price_from_state(state: dict) -> Optional[float]:
     """window.productState'den fiyat çıkar — birden fazla path dener."""
     product = state.get("product", {})
 
-    # Doğrudan fiyat objeleri
+    # Doğrudan fiyat objeleri — discountedPrice kasıtlı olarak çıkarıldı:
+    # HB bu alanı bazen indirim tutarı (örn. 619 TL) olarak kullanır.
     for path in [
-        ["price", "value"],
         ["price", "finalPrice"],
-        ["price", "discountedPrice"],
         ["price", "currentPrice"],
         ["buyBoxInfo", "priceInfo", "finalPrice"],
         ["buyBoxInfo", "priceInfo", "value"],
         ["buyBoxInfo", "price"],
+        ["price", "value"],  # son çare: liste fiyatı
     ]:
         d = product
         for k in path:

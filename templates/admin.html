@@ -43,6 +43,101 @@
     {% endfor %}
   </div>
 
+  <!-- ══ SCRAPER MONITOR ══════════════════════════════════ -->
+  <div id="scraper-monitor" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;padding:20px 24px;margin-bottom:20px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:.5px;color:var(--text);margin:0;">🔍 Scraper Durumu</h3>
+      <span id="monitor-updated" style="font-size:11px;color:var(--muted);">yükleniyor…</span>
+    </div>
+    <div id="monitor-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+      <div style="color:var(--muted);font-size:13px;">Veri yükleniyor…</div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    var PLATFORMS = {
+      amazon:      { label: 'Amazon',      color: '#f97316' },
+      trendyol:    { label: 'Trendyol',    color: '#ef4444' },
+      hepsiburada: { label: 'Hepsiburada', color: '#eab308' },
+      n11:         { label: 'N11',         color: '#8b5cf6' },
+    };
+
+    function timeAgo(isoStr) {
+      if (!isoStr) return '—';
+      var diff = Math.floor((Date.now() - new Date(isoStr.replace(' ','T')+'Z').getTime()) / 1000);
+      if (isNaN(diff)) return isoStr.slice(11,16);
+      if (diff < 60) return diff + 's önce';
+      if (diff < 3600) return Math.floor(diff/60) + 'dk önce';
+      if (diff < 86400) return Math.floor(diff/3600) + 'sa önce';
+      return Math.floor(diff/86400) + 'g önce';
+    }
+
+    function statusBadge(d) {
+      var b30 = d.block_errors_30m || 0;
+      var e30 = d.errors_30m || 0;
+      var last = d.last_success;
+      var stale = !last || (Date.now() - new Date(last.replace(' ','T')+'Z').getTime()) > 15 * 60 * 1000;
+
+      if (b30 >= 5) return ['IP BLOK', '#dc2626'];
+      if (b30 >= 2) return ['BLOK RİSKİ', '#f97316'];
+      if (stale)    return ['DURDU?',   '#6b7280'];
+      if (e30 >= 5) return ['HATALI',   '#f59e0b'];
+      return ['ÇALIŞIYOR', '#10b981'];
+    }
+
+    function renderMonitor(data) {
+      var grid = document.getElementById('monitor-grid');
+      var upd  = document.getElementById('monitor-updated');
+      var meta = data._meta || {};
+      var html = '';
+
+      // Genel durum
+      var aliveColor = meta.alive ? '#10b981' : '#dc2626';
+      var aliveText  = meta.alive ? '● Aktif' : '● Durdu';
+      html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;display:flex;align-items:center;gap:10px;">'
+        + '<span style="font-size:20px;">🖥️</span>'
+        + '<div>'
+          + '<div style="font-weight:700;font-size:13px;color:var(--text);">Scraper Servisi</div>'
+          + '<div style="font-size:12px;color:' + aliveColor + ';font-weight:700;">' + aliveText + '</div>'
+        + '</div>'
+      + '</div>';
+
+      Object.keys(PLATFORMS).forEach(function(p) {
+        var d = data[p];
+        if (!d) return;
+        var pInfo = PLATFORMS[p];
+        var badge = statusBadge(d);
+        html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
+            + '<span style="font-weight:700;font-size:13px;color:' + pInfo.color + ';">' + pInfo.label + '</span>'
+            + '<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;background:' + badge[1] + '22;color:' + badge[1] + ';">' + badge[0] + '</span>'
+          + '</div>'
+          + '<div style="font-size:11px;color:var(--muted);line-height:1.8;">'
+            + '⏱ Son başarı: <b style="color:var(--text);">' + timeAgo(d.last_success) + '</b><br>'
+            + '⚠ Hata (30dk): <b style="color:' + (d.errors_30m > 0 ? '#f59e0b' : 'var(--text)') + ';">' + d.errors_30m + '</b>'
+            + (d.block_errors_30m > 0 ? ' <span style="color:#dc2626;font-weight:700;">(🚫 ' + d.block_errors_30m + ' blok)</span>' : '')
+            + '<br>📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
+          + '</div>'
+        + '</div>';
+      });
+
+      grid.innerHTML = html;
+      upd.textContent = 'güncellendi: ' + new Date().toLocaleTimeString('tr-TR');
+    }
+
+    function fetchMonitor() {
+      fetch('/api/scraper-monitor')
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(d){ if(d) renderMonitor(d); })
+        .catch(function(){});
+    }
+
+    fetchMonitor();
+    setInterval(fetchMonitor, 30000);
+  })();
+  </script>
+
   <!-- ══ İSTATİSTİK GRAFİKLERİ ════════════════════════════ -->
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px;">
     <!-- Platform Dağılımı -->

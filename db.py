@@ -261,9 +261,20 @@ def get_db() -> _Connection:
     if conn is None or conn._conn.closed:
         raw = psycopg2.connect(DATABASE_URL)
         raw.autocommit = False
+        # Admin silme işlemleri lock beklemede takılmasın
+        with raw.cursor() as _c:
+            _c.execute("SET lock_timeout = '3s'")
+            _c.execute("SET statement_timeout = '15s'")
         conn = _Connection(raw)
         _local.pg_conn = conn
-        print(f"[db] PostgreSQL ({DATABASE_URL[:40]}...) active")
+        log.info(f"[db] PostgreSQL bağlantısı açıldı ({DATABASE_URL[:40]}...)")
+    else:
+        # Önceki request'ten kalan uncommitted transaction'ı temizle
+        try:
+            if conn._conn.status == psycopg2.extensions.STATUS_IN_TRANSACTION:
+                conn._conn.rollback()
+        except Exception:
+            pass
     return conn
 
 

@@ -29,8 +29,8 @@ import httpx
 
 log = logging.getLogger("trendyol")
 
-_limiter      = RateLimiter(0.0, 0.05)
-_limiter_fast = RateLimiter(0.0, 0.02)
+_limiter      = RateLimiter(0.0, 0.8)
+_limiter_fast = RateLimiter(0.0, 0.4)
 
 _TY_API = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{content_id}"
 

@@ -27,10 +27,8 @@ async def scrape_product(url: str, platform: str, pool=None, price_only: bool = 
     if not fn:
         print(f"[router] Desteklenmeyen platform: {platform}")
         return None
-    # Hepsiburada paylaşımlı context'te security sayfasına düşüyor — kendi browser'ını yönetsin
-    effective_pool = None if platform == "hepsiburada" else pool
     try:
-        return await fn(url, pool=effective_pool, price_only=price_only)
+        return await fn(url, pool=pool, price_only=price_only)
     except Exception as e:
         print(f"[scraper/{platform}] Hata: {e}")
         return None
