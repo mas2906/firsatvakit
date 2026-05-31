@@ -321,11 +321,18 @@ def _run_migrations(db: _Connection):
                 sql = f.read()
             for stmt in sql.split(";"):
                 stmt = stmt.strip()
-                if stmt and not stmt.startswith("--"):
-                    try:
-                        cur.execute(stmt)
-                    except Exception as e:
-                        log.warning(f"[migration] {fname} stmt atlandı: {e}")
+                # Strip leading comment-only lines so statements that begin with
+                # a comment block (e.g. "-- note\nALTER TABLE ...") are not skipped.
+                non_comment = "\n".join(
+                    line for line in stmt.splitlines()
+                    if line.strip() and not line.strip().startswith("--")
+                ).strip()
+                if not non_comment:
+                    continue
+                try:
+                    cur.execute(non_comment)
+                except Exception as e:
+                    log.warning(f"[migration] {fname} stmt atlandı: {e}")
             cur.execute(
                 "INSERT INTO _migrations(filename, applied_at) VALUES(%s, NOW())",
                 (fname,)

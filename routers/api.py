@@ -621,7 +621,7 @@ async def scraper_monitor(request: Request):
 
         # Son 30 dakikada hata sayısı
         errors_30m = db.execute(
-            "SELECT COUNT(*) as cnt, GROUP_CONCAT(DISTINCT error_msg, '|||') as msgs "
+            "SELECT COUNT(*) as cnt, STRING_AGG(error_msg, '|||') as msgs "
             "FROM scraper_errors WHERE platform=? "
             "AND occurred_at::timestamp >= NOW() - INTERVAL '30 minutes'",
             (p,)
