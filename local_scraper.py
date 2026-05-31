@@ -68,8 +68,15 @@ SCHEDULE = {
 def _is_active(platform: str) -> bool:
     return datetime.now().hour in SCHEDULE[platform]
 
+def _is_night() -> bool:
+    """00:00–07:00 arası gece modu — Amazon hız 2x."""
+    return 0 <= datetime.now().hour < 7
+
 def _calc_concurrent(platform: str) -> int:
-    return PLATFORM_CONCURRENT.get(platform, 1)
+    base = PLATFORM_CONCURRENT.get(platform, 1)
+    if platform == "amazon" and _is_night():
+        return base * 2
+    return base
 
 def _calc_batch(concurrent: int) -> int:
     return concurrent * 2  # Pipeline dolsun diye 2x batch çek
@@ -331,7 +338,7 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
 
 
 PLATFORM_MAX = {
-    "amazon":      3,   # concurrent=2 + 1 buffer (eskiden 4)
+    "amazon":      5,   # gece 2x concurrent=4 + 1 buffer; gündüz concurrent=2 + buffer (eskiden 3)
     "trendyol":    5,   # concurrent=4 + 1 buffer (eskiden 6)
     "n11":         4,   # concurrent=3 + 1 buffer (değişmedi)
     "hepsiburada": 3,   # concurrent=2 + 1 buffer (eskiden 4)

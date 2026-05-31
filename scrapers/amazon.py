@@ -38,14 +38,25 @@ except ImportError:
 log = logging.getLogger("amazon")
 
 import time as _time
+from datetime import datetime as _dt
+
+def _is_night_amazon() -> bool:
+    """00:00–07:00 arası — Amazon gece modu (2x hız)."""
+    return 0 <= _dt.now().hour < 7
 
 # ── Rate limiter ─────────────────────────────────────────────────
-# Amazon: CAPTCHA + 503 riski en yüksek platform
-# amzpy referans: 2-5s — biz de o bant genişliğine çektik
-# Beklenen: ~8 istek/dk → 2407 ürün → ~5 tur/gün
-_limiter        = RateLimiter(min_delay=2.0, max_delay=4.0)   # curl_cffi (eskiden 1.0-2.0)
-_limiter_fast   = RateLimiter(min_delay=1.0, max_delay=2.0)   # price_only (eskiden 0.5-1.0)
-_limiter_mobile = RateLimiter(min_delay=3.0, max_delay=6.0)   # iOS Safari birincil (eskiden 1.5-3.5)
+# Gündüz: ~8 istek/dk → 2407 ürün → ~5 tur/gün
+# Gece (00-07): ~16 istek/dk → ~2.5 tur/gün ekstra
+_limiter        = RateLimiter(min_delay=2.0, max_delay=4.0)   # curl_cffi gündüz
+_limiter_fast   = RateLimiter(min_delay=1.0, max_delay=2.0)   # price_only gündüz
+_limiter_mobile = RateLimiter(min_delay=3.0, max_delay=6.0)   # mobile gündüz
+_limiter_night        = RateLimiter(min_delay=1.0, max_delay=2.0)   # curl_cffi gece (2x)
+_limiter_fast_night   = RateLimiter(min_delay=0.5, max_delay=1.0)   # price_only gece (2x)
+_limiter_mobile_night = RateLimiter(min_delay=1.5, max_delay=3.0)   # mobile gece (2x)
+
+def _get_limiter(): return _limiter_night if _is_night_amazon() else _limiter
+def _get_limiter_fast(): return _limiter_fast_night if _is_night_amazon() else _limiter_fast
+def _get_limiter_mobile(): return _limiter_mobile_night if _is_night_amazon() else _limiter_mobile
 
 # ── Curl circuit breaker (Chrome layer) ─────────────────────────
 _curl_block_streak   = 0
@@ -437,7 +448,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
     if not CURL_AVAILABLE:
         return None
     try:
-        await _limiter_mobile.wait()
+        await _get_limiter_mobile().wait()
         session, imp = await _get_mobile_session()
         ua = random.choice(_ANDROID_UAS)
         v  = re.search(r"Chrome/(\d+)", ua)
@@ -620,13 +631,13 @@ async def _via_curl(url: str) -> Optional[dict]:
 
 async def scrape_amazon(url: str, pool=None, price_only: bool = False,
                         cached_image: str = None) -> Optional[dict]:
-    await (_limiter_fast if price_only else _limiter).wait()
+    await (_get_limiter_fast() if price_only else _get_limiter()).wait()
 
     # ── Layer 0: iOS Safari ──────────────────────────────────────────
     if CURL_AVAILABLE:
         data = await _via_mobile(url)
         if data and data.get("not_found"):
-            _limiter.reset()
+            _get_limiter().reset()
             return data
         if data and data.get("dead_url"):
             return data
