@@ -302,7 +302,11 @@ def get_profile(platform: str) -> dict:
     return random.choice(profiles)
 
 
-def make_curl_session(platform: str, proxy: Optional[str] = None) -> tuple:
+def make_curl_session(
+    platform: str,
+    proxy: Optional[str] = None,
+    timeout: float = 20.0,
+) -> tuple:
     """
     Platform için curl_cffi AsyncSession oluştur.
 
@@ -313,7 +317,7 @@ def make_curl_session(platform: str, proxy: Optional[str] = None) -> tuple:
     Dönen session yeniden kullanılabilir; pool yönetimi caller'a ait.
 
     Örnek:
-        session, profile = make_curl_session("amazon")
+        session, profile = make_curl_session("amazon", timeout=25.0)
         headers = {**profile["headers"], "User-Agent": profile["ua"]}
         r = await session.get(url, headers=headers, allow_redirects=True)
     """
@@ -324,7 +328,7 @@ def make_curl_session(platform: str, proxy: Optional[str] = None) -> tuple:
     proxies = {"http": proxy, "https": proxy} if proxy else None
     session = CurlSession(
         impersonate=profile["impersonate"],
-        timeout=15,
+        timeout=timeout,
         proxies=proxies,
     )
     return session, profile
@@ -523,8 +527,15 @@ class LayeredFetcher:
     Bir instance'ı platform başına tek, uzun ömürlü nesne olarak kullan.
     """
 
-    def __init__(self, platform: str):
+    def __init__(
+        self,
+        platform:  str,
+        proxy_url: Optional[str]   = None,
+        timeout:   float           = 20.0,
+    ):
         self.platform  = platform
+        self._proxy:    Optional[str]         = proxy_url
+        self._timeout:  float                 = timeout
         self._session:  Optional[CurlSession] = None
         self._profile:  Optional[dict]        = None
 
@@ -532,8 +543,16 @@ class LayeredFetcher:
 
     def _get_session(self) -> tuple:
         if self._session is None:
-            self._session, self._profile = make_curl_session(self.platform)
+            self._session, self._profile = make_curl_session(
+                self.platform, proxy=self._proxy, timeout=self._timeout
+            )
         return self._session, self._profile
+
+    def set_proxy(self, proxy_url: Optional[str]) -> None:
+        """Proxy değişince session yeniden oluşturulur."""
+        if proxy_url != self._proxy:
+            self._proxy = proxy_url
+            self.reset()
 
     def reset(self) -> None:
         """Mevcut curl session'ı iptal et — bir sonraki istekte yenisi açılır."""
@@ -554,7 +573,11 @@ class LayeredFetcher:
         try:
             profile = get_profile(self.platform)
             headers = {**profile["headers"], "User-Agent": profile["ua"]}
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+            async with httpx.AsyncClient(
+                timeout=10,
+                follow_redirects=True,
+                proxy=self._proxy,
+            ) as c:
                 r = await c.get(url, headers=headers)
             if r.status_code in (404, 410):
                 return FetchResult(not_found=True, layer="httpx")

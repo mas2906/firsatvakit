@@ -29,8 +29,8 @@ log = logging.getLogger("hb_scraper")
 # ── Rate limiter ─────────────────────────────────────────────────
 # Hepsiburada: Playwright ağırlıklı, JS bot tespiti var
 # Beklenen: ~12 istek/dk → 2717 ürün → ~6 tur/gün
-_limiter      = RateLimiter(min_delay=2.0, max_delay=4.5)   # iOS curl_cffi (eskiden 1.5-3.5)
-_limiter_fast = RateLimiter(min_delay=1.2, max_delay=2.5)   # price_only (eskiden 0.5-1.0, çok agresifti)
+_limiter      = RateLimiter(min_delay=0.6, max_delay=1.2)   # iOS curl_cffi — proxy
+_limiter_fast = RateLimiter(min_delay=0.3, max_delay=0.6)   # price_only
 
 # ── iOS Safari UA pool ───────────────────────────────────────────
 _IOS_UAS = [
@@ -51,7 +51,7 @@ _ANDROID_UAS = [
 
 _ALL_MOBILE_UAS = _IOS_UAS + _ANDROID_UAS
 
-_IOS_IMPERS = ["safari18_0", "safari17_5", "safari17_0", "safari16"]
+_IOS_IMPERS = ["safari18_0"]
 
 # ── iOS Safari header seti ───────────────────────────────────────
 _MOBILE_IOS_HEADERS: dict = {
@@ -119,17 +119,22 @@ def _get_sem():
 
 
 async def _get_session() -> tuple:
-    """3 session pool — amazon.py ile aynı pattern."""
+    """3 session pool — proxy destekli, amazon.py ile aynı pattern."""
     global _SESSIONS, _session_idx
     new_entry = None
     async with _SESSIONS_LOCK:
         if len(_SESSIONS) < _POOL_SIZE:
             try:
                 imp = random.choice(_IOS_IMPERS)
-                s   = CurlSession(impersonate=imp, timeout=20)
-                _SESSIONS.append((s, imp))
-                new_entry = (s, imp)
-                log.info(f"[HB/curl] Yeni session #{len(_SESSIONS)}: {imp}")
+                from scrapers.proxy_pool import get_proxy_pool
+                _pp = get_proxy_pool()
+                proxy = _pp.get() if _pp.has_proxies else None
+                proxies_dict = _pp.curl_dict(proxy) if proxy else None
+                s = CurlSession(impersonate=imp, timeout=20,
+                                proxies=proxies_dict if proxies_dict else None)
+                _SESSIONS.append((s, imp, proxy))
+                new_entry = (s, imp, proxy)
+                log.info(f"[HB/curl] Yeni session #{len(_SESSIONS)}: {imp} proxy={'✔' if proxy else '✘'}")
             except Exception as e:
                 log.warning(f"[HB/curl] Session oluşturulamadı: {e}")
                 if not _SESSIONS:
@@ -141,7 +146,7 @@ async def _get_session() -> tuple:
 
     # Warm-up — lock dışında
     if new_entry:
-        s, imp = new_entry
+        s, imp, proxy = new_entry
         try:
             ua = random.choice(_IOS_UAS)
             warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
@@ -218,7 +223,7 @@ async def _scrape(url: str, pool, price_only: bool = False) -> Optional[dict]:
 # ==========================================
 async def _via_ios_safari(url: str) -> Optional[dict]:
     try:
-        session, imp = await _get_session()
+        session, imp, proxy = await _get_session()
         ua    = random.choice(_ALL_MOBILE_UAS)
         is_ios = "iPhone" in ua or "iPad" in ua
 
@@ -250,9 +255,36 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
             _reset_session()
             return None
 
-        low = html[:3000].lower()
-        if any(k in low for k in ("security", "captcha", "challenge", "robot")):
+        # Redirect tespiti: ürün sayfasından başka bir yere gidildiyse dead/blok
+        final_url = str(r.url) if hasattr(r, "url") else url
+        if final_url and final_url.rstrip("/") != url.rstrip("/"):
+            # Ana sayfa, arama veya kategori sayfasına yönlendirildiyse ürün yok
+            fu_lower = final_url.lower()
+            if not any(p in fu_lower for p in ("/pm-", "/p/hb", "-pm-", "/p/hbc")):
+                log.info(f"[HB/curl] Ürün dışı redirect: {final_url[:80]} — dead_url")
+                return {"dead_url": True}
+
+        # Büyük sayfalar (>500KB) genellikle ana sayfa / kategori redirect'i
+        if len(html) > 500_000:
+            log.warning(f"[HB/curl] Yanıt çok büyük ({len(html)//1024}KB) — redirect/blok")
+            _reset_session()
+            return None
+
+        # Blok/challenge tespiti — sadece kesin blok sinyalleri
+        low = html[:5000].lower()
+        if any(k in low for k in ("captcha", "cf-challenge", "just a moment", "access denied")):
             log.info(f"[HB/curl] Challenge sayfası (imp={imp}) — session sıfırlanıyor")
+            _reset_session()
+            return None
+
+        # Temel ürün göstergesi yok — boş/hatalı sayfa (yeni format dahil)
+        has_product_data = (
+            "productstate" in html.lower()
+            or "__next_data__" in html.lower()
+            or "data-test-id" in html.lower()
+        )
+        if not has_product_data:
+            log.info(f"[HB/curl] Ürün verisi bulunamadı — blok?")
             _reset_session()
             return None
 
@@ -260,6 +292,9 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
         if result and result.get("price"):
             log.info(f"[HB/curl] ✔ imp={imp} ua={'iOS' if is_ios else 'Android'} | "
                      f"{(result.get('title') or '')[:50]} | {result.get('price')} ₺")
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_ok(proxy)
         return result
 
     except Exception as e:
@@ -267,6 +302,9 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             return {"dead_url": True}
         log.debug(f"[HB/curl] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_session()
         return None
 
@@ -300,6 +338,24 @@ async def _via_playwright(url: str, pool) -> Optional[dict]:
             await page.wait_for_timeout(2000)
 
         html = await page.content()
+
+        # Redirect / blok tespiti — Playwright için
+        pw_url = page.url
+        if pw_url and pw_url.rstrip("/") != url.rstrip("/"):
+            fu_lower = pw_url.lower()
+            if not any(p in fu_lower for p in ("/pm-", "/p/hb", "-pm-", "/p/hbc")):
+                log.info(f"[HB/pw] Ürün dışı redirect: {pw_url[:80]}")
+                return {"dead_url": True}
+
+        if len(html) > 500_000:
+            log.warning(f"[HB/pw] Sayfa çok büyük ({len(html)//1024}KB) — redirect/blok")
+            return None
+
+        low8 = html[:5000].lower()
+        if any(k in low8 for k in ("captcha", "cf-challenge", "just a moment", "access denied")):
+            log.warning(f"[HB/pw] Challenge sayfası tespit edildi")
+            return None
+
         data = _parse_html(html)
 
         if not data or not data.get("price"):
@@ -353,24 +409,44 @@ def _parse_html(html: str) -> Optional[dict]:
     coupon = variants = None
     ps = None
 
-    # ── Layer 1: window.productState ────────────────────────────
+    # ── Layer 1: productState — eski (window.productState=) ve yeni ({accountState:...,productState:...}) format ──
+    def _extract_json_at(html: str, start: int) -> dict | None:
+        """start pozisyonundaki '{' ile başlayan JSON nesnesini çıkar."""
+        depth = in_str = esc = 0
+        end = start
+        for i, ch in enumerate(html[start:], start):
+            if esc:              esc = False; continue
+            if ch == '\\' and in_str: esc = True; continue
+            if ch == '"':        in_str = not in_str; continue
+            if in_str:           continue
+            if ch == '{':        depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:   end = i + 1; break
+        try:
+            return json.loads(html[start:end])
+        except Exception:
+            return None
+
+    # Format A: window.productState = {...}
     m = re.search(r'window\.productState\s*=\s*(\{)', html)
     if m:
+        obj = _extract_json_at(html, m.start(1))
+        if obj:
+            ps = obj
+
+    # Format B: <script>{"accountState":...,"productState":{...}}</script>  (yeni HB frontend)
+    if not ps:
+        m2 = re.search(r'<script[^>]*>\s*(\{"accountState"\s*:)', html)
+        if m2:
+            brace = html.find('{', m2.start())
+            obj = _extract_json_at(html, brace)
+            if obj and "productState" in obj:
+                ps = obj.get("productState")
+
+    if ps:
         try:
-            start = m.start(1)
-            depth = in_str = esc = 0
-            end = start
-            for i, ch in enumerate(html[start:], start):
-                if esc:              esc = False; continue
-                if ch == '\\' and in_str: esc = True; continue
-                if ch == '"':        in_str = not in_str; continue
-                if in_str:           continue
-                if ch == '{':        depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:   end = i + 1; break
-            ps = json.loads(html[start:end])
-            product = ps.get("product", {})
+            product  = ps.get("product", {})
             title    = product.get("name")
             price    = _price_from_state(ps)
             stock    = _stock_from_state(ps)
@@ -618,6 +694,28 @@ def _get_nested(d, path: list):
 
 def _price_from_state(state: dict) -> Optional[float]:
     product = state.get("product", {})
+
+    # ── Yeni HB format (2025+): listings[0].minimumPrice / prices[].value ──
+    for listing in (product.get("listings") or [])[:1]:
+        if not isinstance(listing, dict): continue
+        for k in ("minimumPrice", "originalPrice", "salePrice"):
+            v = listing.get(k)
+            if isinstance(v, (int, float)) and v > 10:
+                return float(v)
+
+    for price_item in (product.get("prices") or []):
+        if not isinstance(price_item, dict): continue
+        v = price_item.get("value")
+        if isinstance(v, (int, float)) and v > 10:
+            return float(v)
+
+    for variant in (product.get("variants") or [])[:1]:
+        if not isinstance(variant, dict): continue
+        v = variant.get("price")
+        if isinstance(v, (int, float)) and v > 10:
+            return float(v)
+
+    # ── Eski HB format ──────────────────────────────────────────────────────
     for path in [
         ["price", "finalPrice"], ["price", "currentPrice"],
         ["buyBoxInfo", "priceInfo", "finalPrice"], ["buyBoxInfo", "price"],
@@ -628,7 +726,7 @@ def _price_from_state(state: dict) -> Optional[float]:
         v = _get_nested(product, path)
         if v: return v
 
-    for listing in (product.get("listings") or product.get("currentListings") or [])[:3]:
+    for listing in (product.get("currentListings") or [])[:3]:
         if not isinstance(listing, dict): continue
         for lp in [["price", "finalPrice"], ["price", "amount"], ["price", "currentPrice"]]:
             v = _get_nested(listing, lp)
@@ -705,11 +803,21 @@ def _parse_next_data_full(j: dict) -> Optional[dict]:
 
 def _stock_from_state(state: dict) -> str:
     product = state.get("product", {})
+    # Yeni format: isAvailableProduct
+    avail = product.get("isAvailableProduct")
+    if avail is False: return "Stok Yok"
+    if avail is True:  return "Stokta Var"
+    # Eski format
     salable = product.get("isSalable") or product.get("isSaleable")
     if salable is False: return "Stok Yok"
     qty = product.get("stockQty") or product.get("stock")
     if isinstance(qty, (int, float)): return "Stok Yok" if qty == 0 else "Stokta Var"
     if salable is True: return "Stokta Var"
+    # listings[0] stok kontrolü
+    for listing in (product.get("listings") or [])[:1]:
+        if isinstance(listing, dict):
+            if listing.get("available") is False: return "Stok Yok"
+            if listing.get("available") is True:  return "Stokta Var"
     return "Bilinmiyor"
 
 

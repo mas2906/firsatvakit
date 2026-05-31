@@ -37,16 +37,16 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 # Rate limiter paylaşıldığından concurrent artırmak hız kazandırmaz,
 # sadece in-flight sayısını artırır (pipeline). Blok riskine göre ayarlandı.
 #
-# Hedef günlük tur sayısı (ürün sayısı / (istek/dk × 1440)):
-#   Trendyol:    5166 ürün / 14/dk  = ~369 dk/tur → ~4 tur/gün
-#   Amazon:      2407 ürün /  8/dk  = ~301 dk/tur → ~5 tur/gün
-#   Hepsiburada: 2717 ürün / 12/dk  = ~226 dk/tur → ~6 tur/gün
-#   N11:         1984 ürün / 20/dk  = ~99  dk/tur → ~14 tur/gün (GQL hızlı)
+# Hedef günlük tur sayısı — proxy aktif, maksimum hız:
+#   Trendyol:    5166 ürün / 36/dk  = ~144 dk/tur → ~10 tur/gün
+#   Amazon:      2407 ürün / 24/dk  = ~100 dk/tur → ~14 tur/gün
+#   Hepsiburada: 2717 ürün / 18/dk  = ~151 dk/tur → ~10 tur/gün
+#   N11:         1984 ürün / 60/dk  = ~33  dk/tur → ~43 tur/gün (GQL API)
 PLATFORM_CONCURRENT = {
-    "amazon":      2,   # gece 2x → 4 (CAPTCHA riski yüksek)
-    "trendyol":    4,   # Cloudflare bypass → orta
-    "hepsiburada": 2,   # Playwright ağır → az
-    "n11":         3,   # GQL hızlı → orta
+    "amazon":      3,   # HB ile aynı — gece 2x → 6
+    "trendyol":    6,   # mobil API
+    "hepsiburada": 3,   # curl_cffi
+    "n11":         6,   # GQL API
 }
 
 BASE_WEIGHTS = {
@@ -338,10 +338,10 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
 
 
 PLATFORM_MAX = {
-    "amazon":      5,
-    "trendyol":    5,
-    "n11":         5,
-    "hepsiburada": 5,
+    "amazon":      8,
+    "trendyol":    8,
+    "n11":         8,
+    "hepsiburada": 6,
 }
 
 
@@ -364,8 +364,11 @@ async def main():
     for p, c in PLATFORM_CONCURRENT.items():
         log.info(f"  {p}: concurrent={c} batch={c*2} pool={PLATFORM_MAX[p]}")
 
+    # Tüm platformlar proxy üzerinden — proxies.txt boşsa direkt bağlantı
+    from scrapers.proxy_pool import get_proxy_pool as _get_pp
+    _has_proxy = _get_pp().has_proxies
     pools = {
-        p: BrowserPool(max_pages=PLATFORM_MAX[p], name=p)
+        p: BrowserPool(max_pages=PLATFORM_MAX[p], name=p, use_proxy=_has_proxy)
         for p in BASE_WEIGHTS
     }
     try:

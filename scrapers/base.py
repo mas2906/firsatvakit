@@ -88,7 +88,7 @@ class BaseScraper(ABC):
 
     def __init__(self, config: Optional[ScraperConfig] = None):
         self.cfg      = config or ScraperConfig()
-        self._fetcher = LayeredFetcher(self.platform)
+        self._fetcher = LayeredFetcher(self.platform, timeout=self.cfg.timeout)
         self._retry   = RetryEngine(self.cfg)
 
     # ── Soyut metotlar ──────────────────────────────────────────

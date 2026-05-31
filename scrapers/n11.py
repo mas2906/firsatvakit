@@ -66,9 +66,9 @@ except ImportError:
 # N11: %38 timeout vardı — GQL 0.3-0.7s çok agresifti
 # GQL API rate limit: ~60 req/dk max (N11 CDN kısıtlaması)
 # Beklenen: ~20 istek/dk → 1984 ürün → ~7 tur/gün
-_limiter      = RateLimiter(1.2, 2.5)   # HTML fallback (eskiden 0.8-1.8)
-_limiter_fast = RateLimiter(0.6, 1.2)   # price_only (eskiden 0.4-0.9)
-_limiter_gql  = RateLimiter(0.8, 2.0)   # GraphQL birincil (eskiden 0.3-0.7 — blok yiyordu!)
+_limiter      = RateLimiter(0.6, 1.2)   # HB ile aynı
+_limiter_fast = RateLimiter(0.3, 0.6)   # price_only
+_limiter_gql  = RateLimiter(0.6, 1.2)   # GraphQL
 
 # ── Session havuzları — Amazon gibi paralel fingerprint ──────────
 IMPERSONATE_POOL        = ["chrome136", "chrome131", "chrome124", "chrome120"]
@@ -148,14 +148,18 @@ async def _get_or_create_session() -> tuple:
     async with _get_sessions_lock():
         if len(_SESSIONS) < _POOL_SIZE:
             imp = random.choice(IMPERSONATE_POOL)
-            s = CurlSession(impersonate=imp, timeout=12)
-            _SESSIONS.append((s, imp))
-            new_entry = (s, imp)
-            log.info(f"[n11] Yeni curl session: {imp}")
+            from scrapers.proxy_pool import get_proxy_pool
+            _pp = get_proxy_pool()
+            proxy = _pp.get() if _pp.has_proxies else None
+            s = CurlSession(impersonate=imp, timeout=12,
+                            proxies=_pp.curl_dict(proxy) if proxy else None)
+            _SESSIONS.append((s, imp, proxy))
+            new_entry = (s, imp, proxy)
+            log.info(f"[n11] Yeni curl session: {imp} proxy={'✔' if proxy else '✘'}")
         _session_idx = (_session_idx + 1) % len(_SESSIONS)
         result = _SESSIONS[_session_idx]
     if new_entry:
-        s, imp = new_entry
+        s, imp, proxy = new_entry
         try:
             await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(UA_POOL)}, timeout=8)
         except Exception:
@@ -177,14 +181,18 @@ async def _get_mobile_session() -> tuple:
     async with _get_mobile_lock():
         if len(_MOBILE_SESSIONS) < _MOBILE_POOL_SIZE:
             imp = random.choice(MOBILE_IMPERSONATE_POOL)
-            s = CurlSession(impersonate=imp, timeout=12)
-            _MOBILE_SESSIONS.append((s, imp))
-            new_entry = (s, imp)
-            log.info(f"[n11/mobile] Yeni session: {imp}")
+            from scrapers.proxy_pool import get_proxy_pool
+            _pp = get_proxy_pool()
+            proxy = _pp.get() if _pp.has_proxies else None
+            s = CurlSession(impersonate=imp, timeout=12,
+                            proxies=_pp.curl_dict(proxy) if proxy else None)
+            _MOBILE_SESSIONS.append((s, imp, proxy))
+            new_entry = (s, imp, proxy)
+            log.info(f"[n11/mobile] Yeni session: {imp} proxy={'✔' if proxy else '✘'}")
         _mobile_session_idx = (_mobile_session_idx + 1) % len(_MOBILE_SESSIONS)
         result = _MOBILE_SESSIONS[_mobile_session_idx]
     if new_entry:
-        s, imp = new_entry
+        s, imp, proxy = new_entry
         try:
             await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(_N11_MOBILE_UAS)}, timeout=8)
         except Exception:
@@ -647,8 +655,9 @@ async def _via_mobile(url: str) -> Optional[dict]:
     """Layer 1: iOS Safari / Android Chrome TLS fingerprint — az bot tespiti."""
     if not CURL_CFFI_AVAILABLE:
         return None
+    proxy = None
     try:
-        session, imp = await _get_mobile_session()
+        session, imp, proxy = await _get_mobile_session()
         ua = random.choice(_N11_MOBILE_UAS)
         is_ios = "iPhone" in ua or "iPad" in ua
         headers: dict = {
@@ -684,19 +693,26 @@ async def _via_mobile(url: str) -> Optional[dict]:
         result = await asyncio.to_thread(lambda: _parse_html(html))
         if result and result.get("price"):
             log.info(f"[n11/mobile] ✔ ua={'iOS' if is_ios else 'Android'} {result.get('title','')[:50]} | {result.get('price')}")
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_ok(proxy)
         return result
     except Exception as e:
         err = str(e)
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             return {"dead_url": True}
         log.debug(f"[n11/mobile] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_mobile_session()
         return None
 
 
 async def _via_curl_cffi(url: str) -> Optional[dict]:
+    proxy = None
     try:
-        s, imp = await _get_or_create_session()
+        s, imp, proxy = await _get_or_create_session()
         html_text = await stream_fetch(
             s, url, json_markers=["window.model"], max_kb=1000, timeout=12,
             headers={"Referer": "https://www.n11.com/", "User-Agent": random.choice(UA_POOL)}
@@ -712,12 +728,18 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
         result = await asyncio.to_thread(lambda: _parse_html(html_text))
         if result and result.get("price"):
             _on_curl_success()
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_ok(proxy)
         return result
     except Exception as e:
         err = str(e)
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             return {"dead_url": True}
         log.error(f"[n11/curl_cffi] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_curl_session()
         return None
 
@@ -866,33 +888,27 @@ async def _launch_playwright(url: str) -> Optional[dict]:
 
 async def scrape_n11(url: str, pool=None, price_only: bool = False,
                      cached_image: str = None) -> Optional[dict]:
-    await (_limiter_fast if price_only else _limiter).wait()
+    await (_limiter_fast if price_only else _limiter_gql).wait()
 
-    # Layer 0: GraphQL — en hızlı, Cloudflare yok, gerçek fiyat
+    # Primary 0: GraphQL — N11'e özgü hızlı API (HB'deki iOS Safari gibi birincil)
     data = await _via_graphql(url)
     if data and data.get("price"):
         return _price_only_filter(data, price_only, cached_image)
 
-    # Layer 1: Mobil curl (iOS Safari / Android Chrome TLS fingerprint)
-    if CURL_CFFI_AVAILABLE:
+    # Primary 1: iOS Safari curl_cffi — HB ile aynı yapı
+    if CURL_CFFI_AVAILABLE and _curl_ok():
         data = await _via_mobile(url)
         if data and data.get("dead_url"):
             return data
         if data and data.get("price"):
             _on_curl_success()
             return _price_only_filter(data, price_only, cached_image)
-
-    # Layer 2: Desktop curl_cffi + window.model
-    if _curl_ok():
-        data = await _via_curl_cffi(url)
-        if data and data.get("dead_url"):
-            return data
-        if data and data.get("price"):
-            return _price_only_filter(data, price_only, cached_image)
+        _on_curl_block()
+        log.info(f"[n11] mobile başarısız → Playwright")
     else:
         log.info(f"[n11/curl] circuit breaker aktif — {max(0, _curl_disabled_until - _time.time()):.0f}s kaldı")
 
-    # Layer 3: Arama motoru Playwright
+    # Fallback: Playwright — HB ile aynı yapı
     result = await _via_playwright_search(url, pool=pool)
     return _price_only_filter(result, price_only, cached_image)
 

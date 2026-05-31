@@ -17,6 +17,9 @@
           🔄 Kuyruğu Sıfırla
         </button>
       </form>
+      <button id="delete-errored-btn" onclick="deleteErroredProducts()" class="btn-add" style="border:none;cursor:pointer;background:linear-gradient(135deg,#dc2626,#f87171);">
+        🗑 Hatalı Linkleri Sil
+      </button>
       <a href="/" class="btn-tg" style="text-decoration:none;">← Siteye Dön</a>
     </div>
   </div>
@@ -392,7 +395,10 @@
         <span style="font-size:24px;">⏳</span>
         <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0;">ONAY BEKLEYEN FIRSATLAR</h2>
       </div>
-      <span id="pending-deals-badge" style="background:#fef3c7;color:#92400e;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_deals|length }} bekliyor</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="pending-deals-badge" style="background:#fef3c7;color:#92400e;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_deals|length }} bekliyor</span>
+        <button id="reject-all-deals-btn" onclick="rejectAllPendingDeals()" style="background:#dc2626;color:#fff;border:none;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:700;cursor:pointer;">✘ Hepsini Reddet</button>
+      </div>
     </div>
 
     {% for d in pending_deals %}
@@ -867,6 +873,54 @@ function handleDealDelete(e, id) {
   </div>
 </div>
 <script>
+function rejectAllPendingDeals() {
+  var btn = document.getElementById('reject-all-deals-btn');
+  if (!confirm('Onay bekleyen tüm fırsatlar reddedilsin mi?')) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Reddediliyor...';
+  fetch('/admin/deals/reject-all-pending', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var count = d.rejected || 0;
+      document.querySelectorAll('[id^="deal-card-"]').forEach(function(el){ el.remove(); });
+      var badge = document.getElementById('pending-deals-badge');
+      if (badge) badge.textContent = '0 bekliyor';
+      btn.textContent = '✔ ' + count + ' reddedildi';
+      btn.style.background = '#16a34a';
+      setTimeout(function(){
+        btn.disabled = false;
+        btn.textContent = '✘ Hepsini Reddet';
+        btn.style.background = '#dc2626';
+      }, 3000);
+    })
+    .catch(function(){
+      btn.disabled = false;
+      btn.textContent = '✘ Hepsini Reddet';
+    });
+}
+
+function deleteErroredProducts() {
+  var btn = document.getElementById('delete-errored-btn');
+  if (!confirm('Dead URL + 80 üzeri hata birikmiş tüm ürünler kalıcı silinsin mi?')) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Siliniyor...';
+  fetch('/admin/products/delete-errored', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      btn.textContent = '✔ ' + (d.deleted || 0) + ' ürün silindi';
+      btn.style.background = '#16a34a';
+      setTimeout(function(){
+        btn.disabled = false;
+        btn.textContent = '🗑 Hatalı Linkleri Sil';
+        btn.style.background = 'linear-gradient(135deg,#dc2626,#f87171)';
+      }, 3000);
+    })
+    .catch(function(){
+      btn.disabled = false;
+      btn.textContent = '🗑 Hatalı Linkleri Sil';
+    });
+}
+
 function copyWaText() {
   var ta = document.getElementById('wa-text-area');
   ta.select();

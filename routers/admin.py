@@ -183,6 +183,20 @@ async def admin_reject_deal(deal_id: int, request: Request):
     return RedirectResponse("/admin", status_code=302)
 
 
+@router.post("/admin/deals/reject-all-pending")
+async def admin_reject_all_pending_deals(request: Request):
+    """Onay bekleyen tüm fırsatları tek seferde reddet."""
+    from fastapi.responses import JSONResponse
+    require_admin(request)
+    db = get_db()
+    count = db.execute(
+        "UPDATE deals SET active=0, status='rejected' WHERE status='pending'"
+    ).rowcount
+    db.commit()
+    cache_invalidate_index()
+    return JSONResponse({"rejected": count})
+
+
 @router.post("/admin/clear-errors")
 async def admin_clear_errors(request: Request):
     require_admin(request)
@@ -291,6 +305,30 @@ async def admin_run_scan(request: Request):
     db.commit()
     print(f"[admin-reset] stale={stale} failed={failed} → pending'e alındı")
     return RedirectResponse("/admin", status_code=302)
+
+
+@router.post("/admin/products/delete-errored")
+async def admin_delete_errored_products(request: Request):
+    """Hatalı linkleri sil: dead URL olarak işaretlenenler + 80+ scraper hatası birikmiş ürünler."""
+    from fastapi.responses import JSONResponse
+    require_admin(request)
+    db = get_db()
+
+    # scan_queue'da dead olarak işaretlenen ürünlerin ID'leri
+    dead_ids = [r["product_id"] for r in db.execute(
+        "SELECT DISTINCT product_id FROM scan_queue WHERE status='dead'"
+    ).fetchall()]
+
+    # 80+ scraper hatası birikmiş ürünlerin ID'leri
+    error_ids = [r["product_id"] for r in db.execute(
+        "SELECT product_id FROM scraper_errors GROUP BY product_id HAVING COUNT(*) >= 80"
+    ).fetchall()]
+
+    all_ids = list(set(dead_ids + error_ids))
+    for pid in all_ids:
+        _delete_product_cascade(db, pid)
+
+    return JSONResponse({"deleted": len(all_ids)})
 
 
 @router.post("/admin/bulk-add")

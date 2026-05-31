@@ -45,23 +45,23 @@ def _is_night_amazon() -> bool:
 # ── Rate limiter ─────────────────────────────────────────────────
 # Gündüz: ~8 istek/dk → 2407 ürün → ~5 tur/gün
 # Gece (00-07): ~16 istek/dk → ~2.5 tur/gün ekstra
-_limiter        = RateLimiter(min_delay=1.5, max_delay=3.0)   # curl_cffi gündüz
-_limiter_fast   = RateLimiter(min_delay=0.8, max_delay=1.5)   # price_only gündüz
-_limiter_mobile = RateLimiter(min_delay=2.0, max_delay=4.0)   # mobile gündüz
-_limiter_night        = RateLimiter(min_delay=0.75, max_delay=1.5)  # curl_cffi gece (2x)
-_limiter_fast_night   = RateLimiter(min_delay=0.4,  max_delay=0.75) # price_only gece (2x)
-_limiter_mobile_night = RateLimiter(min_delay=1.0,  max_delay=2.0)  # mobile gece (2x)
+_limiter        = RateLimiter(min_delay=1.0, max_delay=2.0)   # gündüz
+_limiter_fast   = RateLimiter(min_delay=0.5, max_delay=1.0)   # price_only
+_limiter_mobile = RateLimiter(min_delay=1.0, max_delay=2.0)   # mobile gündüz
+_limiter_night        = RateLimiter(min_delay=0.5, max_delay=1.0)   # gece 2x
+_limiter_fast_night   = RateLimiter(min_delay=0.25, max_delay=0.5)  # gece price_only
+_limiter_mobile_night = RateLimiter(min_delay=0.5,  max_delay=1.0)  # gece mobile
 
 def _get_limiter(): return _limiter_night if _is_night_amazon() else _limiter
 def _get_limiter_fast(): return _limiter_fast_night if _is_night_amazon() else _limiter_fast
 def _get_limiter_mobile(): return _limiter_mobile_night if _is_night_amazon() else _limiter_mobile
 
-# ── Curl circuit breaker (Chrome layer) ─────────────────────────
+# ── Chrome curl circuit breaker ──────────────────────────────────
 _curl_block_streak   = 0
 _curl_disabled_until = 0.0
-_curl_cooldown_mult  = 1          # exponential backoff çarpanı
-_CURL_BLOCK_LIMIT    = 5          # 5 ardışık block → askı
-_CURL_COOLDOWN_BASE  = 60         # ilk askı: 60s → 120s → 240s → max 300s
+_curl_cooldown_mult  = 1
+_CURL_BLOCK_LIMIT    = 5
+_CURL_COOLDOWN_BASE  = 60
 
 def _curl_ok() -> bool:
     return CURL_AVAILABLE and _time.time() > _curl_disabled_until
@@ -74,12 +74,33 @@ def _on_curl_block() -> None:
         _curl_disabled_until = _time.time() + cooldown
         _curl_cooldown_mult  = min(_curl_cooldown_mult * 2, 5)
         _curl_block_streak   = 0
-        log.warning(f"[amazon/curl] {_CURL_BLOCK_LIMIT} ardışık block → {cooldown}s askı (çarpan={_curl_cooldown_mult})")
+        log.warning(f"[amazon/curl] {_CURL_BLOCK_LIMIT} ardışık block → {cooldown}s askı")
 
 def _on_curl_success() -> None:
     global _curl_block_streak, _curl_cooldown_mult
     _curl_block_streak  = 0
-    _curl_cooldown_mult = 1   # başarı → exponential sıfırla
+    _curl_cooldown_mult = 1
+
+# ── Mobile circuit breaker ────────────────────────────────────────
+_mobile_block_streak   = 0
+_mobile_disabled_until = 0.0
+_MOBILE_BLOCK_LIMIT    = 4    # 4 ardışık block → 90s askı
+_MOBILE_COOLDOWN       = 90
+
+def _mobile_ok() -> bool:
+    return CURL_AVAILABLE and _time.time() > _mobile_disabled_until
+
+def _on_mobile_block() -> None:
+    global _mobile_block_streak, _mobile_disabled_until
+    _mobile_block_streak += 1
+    if _mobile_block_streak >= _MOBILE_BLOCK_LIMIT:
+        _mobile_disabled_until = _time.time() + _MOBILE_COOLDOWN
+        _mobile_block_streak   = 0
+        log.warning(f"[amazon/mobile] {_MOBILE_BLOCK_LIMIT} ardışık block → {_MOBILE_COOLDOWN}s askı")
+
+def _on_mobile_success() -> None:
+    global _mobile_block_streak
+    _mobile_block_streak = 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -384,7 +405,14 @@ async def _save_playwright_cookies(page) -> None:
 # KATMAN 0: iOS Safari session pool
 # ═══════════════════════════════════════════════════════════════
 
-MOBILE_IMPERSONATE_POOL = ["chrome136", "chrome131", "chrome124", "chrome120"]  # safari Amazon'da 403 alıyor
+MOBILE_IMPERSONATE_POOL = ["safari18_0"]  # iOS Safari TLS — HB ile aynı yöntem
+
+_AMAZON_SEM = None
+def _get_amazon_sem():
+    global _AMAZON_SEM
+    if _AMAZON_SEM is None:
+        _AMAZON_SEM = asyncio.Semaphore(3)
+    return _AMAZON_SEM
 _MOBILE_POOL_SIZE   = 3    # 3 paralel session (birincil katman)
 _MOBILE_SESSIONS: list = []
 _MOBILE_SESSIONS_LOCK = asyncio.Lock()
@@ -398,13 +426,19 @@ async def _get_mobile_session() -> tuple:
         if len(_MOBILE_SESSIONS) < _MOBILE_POOL_SIZE:
             try:
                 imp = random.choice(MOBILE_IMPERSONATE_POOL)
-                s   = CurlSession(impersonate=imp, timeout=15)
+                from scrapers.proxy_pool import get_proxy_pool
+                _pp  = get_proxy_pool()
+                proxy = _pp.get() if _pp.has_proxies else None
+                s    = CurlSession(
+                    impersonate=imp, timeout=15,
+                    proxies=_pp.curl_dict(proxy) if proxy else None,
+                )
                 cookies = _load_amazon_cookies()
                 if cookies:
                     s.cookies.update(cookies)
-                _MOBILE_SESSIONS.append((s, imp))
-                new_entry = (s, imp)
-                log.info(f"[amazon/mobile] Yeni session: {imp}")
+                _MOBILE_SESSIONS.append((s, imp, proxy))
+                new_entry = (s, imp, proxy)
+                log.info(f"[amazon/mobile] Yeni session: {imp} proxy={'✔' if proxy else '✘'}")
             except Exception as e:
                 log.warning(f"[amazon/mobile] Session oluşturulamadı: {e}")
                 if not _MOBILE_SESSIONS:
@@ -415,16 +449,10 @@ async def _get_mobile_session() -> tuple:
         result = _MOBILE_SESSIONS[_mobile_session_idx]
 
     if new_entry:
-        s, imp = new_entry
+        s, imp, proxy = new_entry
         try:
-            ua = random.choice(_ANDROID_UAS)
-            v  = re.search(r"Chrome/(\d+)", ua)
-            cv = v.group(1) if v else "136"
-            warmup_hdrs = {
-                **_MOBILE_IOS_HEADERS, **_MOBILE_ANDROID_EXTRA,
-                "User-Agent": ua,
-                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
-            }
+            ua = random.choice(_IOS_UAS)
+            warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
             await s.get("https://www.amazon.com.tr/", headers=warmup_hdrs, timeout=10)
         except Exception:
             pass
@@ -442,25 +470,21 @@ def _reset_mobile_session() -> None:
 
 
 async def _via_mobile(url: str) -> Optional[dict]:
-    """Layer 0: Android Chrome — birincil katman (Safari 403 alıyor, Chrome daha stabil)."""
+    """Layer 0: Android Chrome mobile — proxy destekli birincil katman."""
     if not CURL_AVAILABLE:
         return None
+    proxy = None
     try:
         await _get_limiter_mobile().wait()
-        session, imp = await _get_mobile_session()
-        ua = random.choice(_ANDROID_UAS)
-        v  = re.search(r"Chrome/(\d+)", ua)
-        cv = v.group(1) if v else "136"
-        headers = {
-            **_MOBILE_IOS_HEADERS, **_MOBILE_ANDROID_EXTRA,
-            "User-Agent": ua,
-            "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
-        }
+        session, imp, proxy = await _get_mobile_session()
+        ua = random.choice(_IOS_UAS)
+        headers = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
 
         r = await session.get(url, headers=headers, allow_redirects=True, timeout=15)
         if r.status_code in (404, 410):
             return {"not_found": True}
         if r.status_code in (403, 429, 503):
+            _on_mobile_block()
             _reset_mobile_session()
             return None
         if r.status_code != 200:
@@ -474,6 +498,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
             return {"not_found": True}
         if _is_blocked(html):
             log.info(f"[amazon/mobile] Block algılandı — session sıfırlanıyor (imp={imp})")
+            _on_mobile_block()
             _reset_mobile_session()
             return None
 
@@ -488,7 +513,11 @@ async def _via_mobile(url: str) -> Optional[dict]:
 
         data = await asyncio.to_thread(_parse, html)
         if data:
-            log.info(f"[amazon/mobile] ✔ imp={imp} ua=Android")
+            log.info(f"[amazon/mobile] ✔ imp={imp} ua=iOS proxy={'✔' if proxy else '✘'}")
+            _on_mobile_success()
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_ok(proxy)
         return data
 
     except Exception as e:
@@ -496,6 +525,9 @@ async def _via_mobile(url: str) -> Optional[dict]:
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             return {"dead_url": True}
         log.debug(f"[amazon/mobile] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_mobile_session()
         return None
 
@@ -629,63 +661,59 @@ async def _via_curl(url: str) -> Optional[dict]:
 
 async def scrape_amazon(url: str, pool=None, price_only: bool = False,
                         cached_image: str = None) -> Optional[dict]:
+    async with _get_amazon_sem():
+        result = await _scrape_amazon(url, pool, price_only=price_only)
+    if not result:
+        return None
+    if result.get("dead_url") or result.get("not_found"):
+        return result
+    if price_only:
+        out = {k: result[k] for k in ("price", "stock", "cart_discount", "coupon") if k in result}
+        if cached_image:
+            out["image_url"] = cached_image
+        return out
+    return result
+
+
+async def _scrape_amazon(url: str, pool, price_only: bool = False) -> Optional[dict]:
     await (_get_limiter_fast() if price_only else _get_limiter()).wait()
 
-    # ── Layer 0: iOS Safari ──────────────────────────────────────────
-    if CURL_AVAILABLE:
+    # Layer 0: iOS Safari curl_cffi — birincil (HB ile aynı)
+    if _mobile_ok():
         data = await _via_mobile(url)
-        if data and data.get("not_found"):
-            _get_limiter().reset()
+        if data and data.get("dead_url"):   return data
+        if data and data.get("not_found"):  return data
+        if data and data.get("price"):
+            _on_mobile_success()
             return data
-        if data and data.get("dead_url"):
-            return data
-        if data and data.get("title") and data.get("price"):
-            _on_curl_success()
-            return _price_only_filter(data, price_only, cached_image)
-
-    # ── Layer 1: Chrome curl ─────────────────────────────────────────
-    if _curl_ok():
-        last_data = None
-        for attempt in range(2):
-            data = await _via_curl(url)
-            if data and data.get("not_found"):
-                _limiter.reset()
-                return data
-            if data and data.get("dead_url"):
-                return data
-            if data and data.get("blocked"):
-                break
-            if data and data.get("title") and data.get("price"):
-                _on_curl_success()
-                log.info(f"[amazon/curl] ✔ title={data['title'][:50]!r} price={data['price']}")
-                return _price_only_filter(data, price_only, cached_image)
-            if data and data.get("title"):
-                last_data = data
-                if data.get("stock") == "Stok Yok":
-                    break
-            if attempt == 0:
-                await asyncio.sleep(random.uniform(0.3, 0.7))
-
-        if last_data:
-            return _price_only_filter(last_data, price_only, cached_image)
+        _on_mobile_block()
+        log.info(f"[amazon] mobile başarısız ({_mobile_block_streak}/{_MOBILE_BLOCK_LIMIT}) → Chrome")
     else:
-        if CURL_AVAILABLE:
-            remain = max(0, _curl_disabled_until - _time.time())
-            log.info(f"[amazon/curl] circuit breaker aktif — {remain:.0f}s kaldı")
+        remain = max(0, _mobile_disabled_until - _time.time())
+        log.info(f"[amazon/mobile] circuit breaker aktif ({remain:.0f}s) → Chrome")
 
-    # ── Layer 2: Playwright ──────────────────────────────────────────
-    log.info("[amazon] → Playwright katmanı deneniyor...")
-    data = await _via_playwright_search(url, pool=pool)
-    if data and data.get("not_found"):
-        _limiter.reset()
-        return data
-    if data and data.get("dead_url"):
-        return data
-    if data and data.get("title"):
-        log.info(f"[amazon/search] ✔ title={data['title'][:50]!r} price={data.get('price')}")
-        return _price_only_filter(data, price_only, cached_image)
+    # Layer 1: Chrome curl_cffi — mobile blokta yedek
+    if _curl_ok():
+        data = await _via_curl(url)
+        if data and data.get("dead_url"):   return data
+        if data and data.get("not_found"):  return data
+        if data and data.get("price"):
+            _on_curl_success()
+            return data
+        if data and data.get("blocked"):
+            _on_curl_block()
+    else:
+        remain = max(0, _curl_disabled_until - _time.time())
+        log.info(f"[amazon/curl] circuit breaker aktif ({remain:.0f}s) → Playwright")
 
-    log.error(f"[amazon] ✗ Tüm yöntemler başarısız: {url}")
+    # Layer 2: Playwright — son çare
+    if pool is not None:
+        data = await _via_playwright_search(url, pool=pool)
+        if data and data.get("price"):
+            log.info(f"[amazon/pw] ✔ title={str(data.get('title',''))[:50]} price={data.get('price')}")
+        return data
+
+    log.warning(f"[amazon] pool yok, tüm yöntemler başarısız")
     return None
 
 
@@ -725,32 +753,9 @@ async def _via_playwright_search(url: str, pool=None) -> Optional[dict]:
         await setup_resource_blocking_amazon(page)
         await page.add_init_script(_AMAZON_STEALTH)
 
-        search_url = f"https://www.amazon.com.tr/s?k={asin}"
         log.info(f"[amazon/search] #{_search_counter} ASIN={asin}")
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-        if page.is_closed():
-            return None
-        await asyncio.sleep(random.uniform(0.3, 0.7))
-
-        product_href = None
-        for sel in [
-            f"[data-asin='{asin}'] h2 a",
-            f"[data-asin='{asin}'] a.a-link-normal",
-            ".s-result-item[data-asin] h2 a",
-            "h2.a-size-mini a",
-            "h2 a.a-link-normal",
-        ]:
-            el = await page.query_selector(sel)
-            if el:
-                product_href = await el.get_attribute("href")
-                if product_href:
-                    break
-
-        if product_href:
-            target = product_href if product_href.startswith("http") else f"https://www.amazon.com.tr{product_href}"
-            await page.goto(target, wait_until="domcontentloaded", timeout=25000)
-        else:
-            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        # Direkt ürün sayfasına git — search navigation zaman kaybı
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
 
         if page.is_closed():
             return None

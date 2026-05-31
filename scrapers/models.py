@@ -48,5 +48,5 @@ class ScraperConfig:
     jitter_factor:     float = 0.3    # Backoff'a eklenen rastgele oran (0–1)
     concurrency:       int   = 2      # Domain başına eş zamanlı maksimum istek
     timeout:           float = 30.0   # Tek istek timeout (saniye)
-    request_delay_min: float = 1.0    # İstekler arası minimum bekleme (saniye)
+    request_delay_min: float = 0.8    # İstekler arası minimum bekleme (saniye)
     request_delay_max: float = 3.5    # İstekler arası maksimum bekleme (saniye)

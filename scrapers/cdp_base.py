@@ -157,7 +157,7 @@ class BrowserPool:
         self._use_proxy = use_proxy
         self._current_proxy: str | None = None
 
-    def _get_proxy_dict(self):
+    async def _get_proxy_dict(self):
         if not self._use_proxy:
             return None
         try:
@@ -165,7 +165,7 @@ class BrowserPool:
             pool = get_proxy_pool()
             if not pool.has_proxies:
                 return None
-            self._current_proxy = pool.get()
+            self._current_proxy = await pool.get()
             return pool.playwright_dict(self._current_proxy)
         except Exception:
             return None
@@ -174,7 +174,7 @@ class BrowserPool:
         _w = random.choice([1280, 1366, 1440, 1920])
         _h = random.choice([768, 800, 900, 1080])
         _ua = random.choice(UA_POOL)
-        proxy_dict = self._get_proxy_dict()
+        proxy_dict = await self._get_proxy_dict()
         kwargs: dict = dict(
             viewport={"width": _w, "height": _h},
             user_agent=_ua,

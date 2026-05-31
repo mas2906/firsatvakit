@@ -33,9 +33,9 @@ log = logging.getLogger("trendyol")
 # Mobile (iOS/Android curl_cffi) → birincil katman, orta hız
 # curl_cffi fallback → eskiden 0.3-1.2s'di, çok agresifti → blok yiyordu
 # Beklenen: ~14 istek/dk → 5166 ürün → ~6 tur/gün
-_limiter        = RateLimiter(1.5, 3.0)   # curl_cffi fallback (eskiden 0.3-1.2)
-_limiter_fast   = RateLimiter(0.8, 1.5)   # price_only (eskiden 0.1-0.5)
-_limiter_mobile = RateLimiter(2.0, 4.0)   # iOS/Android birincil (eskiden 1.2-2.8)
+_limiter        = RateLimiter(0.6, 1.2)   # HB ile aynı
+_limiter_fast   = RateLimiter(0.3, 0.6)   # price_only
+_limiter_mobile = RateLimiter(0.6, 1.2)   # mobile
 
 _TY_API = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{content_id}"
 
@@ -68,21 +68,26 @@ _HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 _HTTPX_LOCK = asyncio.Lock()
 
 
-async def _get_curl_session() -> CurlSession:
+async def _get_curl_session() -> tuple:
     global _SESSIONS, _session_idx
     new_entry = None
     async with _SESSIONS_LOCK:
         if len(_SESSIONS) < _TY_POOL_SIZE:
             imp = random.choice(IMPERSONATE_POOL)
-            s = CurlSession(impersonate=imp, timeout=20)
-            _SESSIONS.append(s)
-            new_entry = s
-            log.info(f"[trendyol] curl session oluşturuldu: {imp}")
+            from scrapers.proxy_pool import get_proxy_pool
+            _pp = get_proxy_pool()
+            proxy = _pp.get() if _pp.has_proxies else None
+            s = CurlSession(impersonate=imp, timeout=20,
+                            proxies=_pp.curl_dict(proxy) if proxy else None)
+            _SESSIONS.append((s, imp, proxy))
+            new_entry = (s, imp, proxy)
+            log.info(f"[trendyol] curl session oluşturuldu: {imp} proxy={'✔' if proxy else '✘'}")
         _session_idx = (_session_idx + 1) % len(_SESSIONS)
         result = _SESSIONS[_session_idx]
     if new_entry:
+        s, imp, proxy = new_entry
         try:
-            await new_entry.get("https://www.trendyol.com/", timeout=8)
+            await s.get("https://www.trendyol.com/", timeout=8)
         except Exception:
             pass
     return result
@@ -97,17 +102,21 @@ def _reset_curl_session() -> None:
         log.info(f"[trendyol] Session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
 
 
-async def _get_mobile_session() -> CurlSession:
+async def _get_mobile_session() -> tuple:
     global _MOBILE_SESSIONS, _mobile_session_idx
     new_entry = None
     async with _MOBILE_SESSIONS_LOCK:
         if len(_MOBILE_SESSIONS) < _TY_MOBILE_POOL_SIZE:
             try:
                 imp = random.choice(MOBILE_IMPERSONATE_POOL)
-                s = CurlSession(impersonate=imp, timeout=15)
-                _MOBILE_SESSIONS.append(s)
-                new_entry = s
-                log.info(f"[trendyol] Mobil session oluşturuldu: {imp}")
+                from scrapers.proxy_pool import get_proxy_pool
+                _pp = get_proxy_pool()
+                proxy = _pp.get() if _pp.has_proxies else None
+                s = CurlSession(impersonate=imp, timeout=15,
+                                proxies=_pp.curl_dict(proxy) if proxy else None)
+                _MOBILE_SESSIONS.append((s, imp, proxy))
+                new_entry = (s, imp, proxy)
+                log.info(f"[trendyol] Mobil session oluşturuldu: {imp} proxy={'✔' if proxy else '✘'}")
             except Exception as e:
                 log.warning(f"[trendyol] Mobil session oluşturulamadı: {e}")
                 if not _MOBILE_SESSIONS:
@@ -115,9 +124,10 @@ async def _get_mobile_session() -> CurlSession:
         _mobile_session_idx = (_mobile_session_idx + 1) % len(_MOBILE_SESSIONS)
         result = _MOBILE_SESSIONS[_mobile_session_idx]
     if new_entry:
+        s, imp, proxy = new_entry
         try:
-            await new_entry.get("https://www.trendyol.com/", timeout=8,
-                                headers={"User-Agent": random.choice(_TY_MOBILE_UAS)})
+            await s.get("https://www.trendyol.com/", timeout=8,
+                        headers={"User-Agent": random.choice(_TY_MOBILE_UAS)})
         except Exception:
             pass
     return result
@@ -214,49 +224,27 @@ async def trendyol_api_fetch(url: str) -> Optional[dict]:
 
 async def scrape_trendyol(url: str, pool=None, price_only: bool = False,
                           cached_image: str = None) -> Optional[dict]:
-    """Çok katmanlı Trendyol scraper."""
-    await (_limiter_fast if price_only else _limiter).wait()
+    """HB ile aynı 2 katmanlı yapı: iOS Safari → Playwright."""
+    await (_limiter_fast if price_only else _limiter_mobile).wait()
 
-    # NOT: public.trendyol.com NXDOMAIN — Layer 0 API devre dışı
-
-    # ── Katman 0: Mobil curl_cffi (iOS Safari / Android TLS fingerprint) ──
+    # Primary: iOS Safari curl_cffi — HB ile aynı yapı
     if CURL_AVAILABLE:
         data = await _via_mobile(url)
         if data and data.get("dead_url"):
             return data
-        if data and data.get("title") and data.get("price"):
-            log.info(f"[trendyol/mobile] ✔ title={data['title']!r:.50} price={data['price']}")
+        if data and data.get("price"):
+            log.info(f"[trendyol/mobile] ✔ title={str(data.get('title',''))[:50]!r} price={data['price']}")
             return _price_only_filter(data, price_only, cached_image)
 
-    # ── Katman 1: curl_cffi (stream_fetch + __envoy__PROPS) ──
-    if CURL_AVAILABLE:
-        data = await _via_curl_cffi(url)
-        if data and data.get("dead_url"):
-            return data
-        if data and data.get("title") and data.get("price"):
-            log.info(f"[trendyol/curl_cffi] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-            return _price_only_filter(data, price_only, cached_image)
-
-        # ── Katman 2: httpx (curl_cffi varken fallback) ──────
-        data = await _via_httpx(url)
-        if data and data.get("dead_url"):
-            return data
-        if data and data.get("title") and data.get("price"):
-            log.info(f"[trendyol/httpx] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-            return _price_only_filter(data, price_only, cached_image)
-    else:
-        log.warning("[trendyol] curl_cffi yüklü değil, direkt Playwright kullanılıyor")
-
-    # ── Katman 3: Arama motoru Playwright ────────────────────
-    log.info(f"[trendyol] Arama motoru Playwright deneniyor...")
+    # Fallback: Playwright — HB ile aynı yapı
+    log.info(f"[trendyol] Playwright deneniyor...")
     data = await _via_playwright_search(url, pool=pool)
     if data and data.get("dead_url"):
         return data
-    if data and data.get("title"):
-        log.info(f"[trendyol/playwright] ✔ title={data['title']!r:.50} price={data.get('price')} image={'✔' if data.get('image_url') else '✘'}")
+    if data and data.get("price"):
+        log.info(f"[trendyol/pw] ✔ title={str(data.get('title',''))[:50]!r} price={data.get('price')}")
         return _price_only_filter(data, price_only, cached_image)
 
-    log.error(f"[trendyol] ✗ Tüm yöntemler başarısız: {url}")
     return None
 
 
@@ -318,7 +306,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
         return None
     try:
         await _limiter_mobile.wait()
-        session = await _get_mobile_session()
+        session, imp_mob, proxy = await _get_mobile_session()
         ua = random.choice(_TY_MOBILE_UAS)
         is_ios = "iPhone" in ua or "iPad" in ua
         headers: dict = {
@@ -350,12 +338,18 @@ async def _via_mobile(url: str) -> Optional[dict]:
         data = await asyncio.to_thread(_parse, html, url)
         if data and data.get("title"):
             log.info(f"[trendyol/mobile] ✔ ua={'iOS' if is_ios else 'Android'} title={data['title'][:40]!r}")
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_ok(proxy)
         return data
     except Exception as e:
         err = str(e)
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             return {"dead_url": True}
         log.debug(f"[trendyol/mobile] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_mobile_session()
         return None
 
@@ -365,8 +359,9 @@ async def _via_mobile(url: str) -> Optional[dict]:
 # ═══════════════════════════════════════════════════════════════
 
 async def _via_curl_cffi(url: str) -> Optional[dict]:
+    proxy = None
     try:
-        session = await _get_curl_session()
+        session, _imp, proxy = await _get_curl_session()
         html = await stream_fetch(
             session, url,
             json_markers=["__envoy__PROPS"],
@@ -385,16 +380,26 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
 
         if _is_blocked(html):
             log.info("[trendyol/curl_cffi] Block algılandı — session sıfırlanıyor")
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_failed(proxy)
             _reset_curl_session()
             return None
 
-        return await asyncio.to_thread(_parse, html, url)
+        result = await asyncio.to_thread(_parse, html, url)
+        if result and proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_ok(proxy)
+        return result
     except Exception as e:
         err = str(e)
         if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
             log.warning(f"[trendyol/curl_cffi] Ölü URL tespit edildi: {url}")
             return {"dead_url": True}
         log.error(f"[trendyol/curl_cffi] Hata: {e}")
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_failed(proxy)
         _reset_curl_session()
         return None
 
