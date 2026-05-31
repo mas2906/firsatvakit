@@ -1330,6 +1330,7 @@ def _cli_asin_from_url(url: str) -> str:
 
 
 def _cli_fetch_html(target_url: str, token: str) -> str:
+    import requests
     r = requests.get(
         f"{API_BASE}/",
         params={"token": token, "url": target_url, "render": "true"},
@@ -1340,6 +1341,7 @@ def _cli_fetch_html(target_url: str, token: str) -> str:
 
 
 def _cli_fetch_raw(target_url: str, token: str) -> str:
+    import requests
     r = requests.get(
         f"{API_BASE}/",
         params={"token": token, "url": target_url},
@@ -1430,6 +1432,7 @@ def scrape_product_html(target_url: str, token: str) -> dict:
 
 def scrape_product_api(asin: str, token: str, geocode: str = "us", zipcode: str = "10001") -> dict:
     """Scrape.do PDP endpoint'i ile yapılandırılmış JSON döndürür."""
+    import requests
     return requests.get(
         f"{API_BASE}/plugin/amazon/pdp",
         params={"token": token, "asin": asin, "geocode": geocode, "zipcode": zipcode},
@@ -1637,6 +1640,7 @@ def scrape_sellers_html(asin: str, token: str) -> list:
 
 def scrape_sellers_api(asin: str, token: str, geocode: str = "us", zipcode: str = "10001") -> dict:
     """Scrape.do offer-listing endpoint'i ile yapılandırılmış JSON döndürür."""
+    import requests
     return requests.get(
         f"{API_BASE}/plugin/amazon/offer-listing",
         params={"token": token, "asin": asin, "geocode": geocode, "zipcode": zipcode},
