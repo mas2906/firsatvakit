@@ -43,10 +43,10 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 #   Hepsiburada: 2717 ürün / 12/dk  = ~226 dk/tur → ~6 tur/gün
 #   N11:         1984 ürün / 20/dk  = ~99  dk/tur → ~14 tur/gün (GQL hızlı)
 PLATFORM_CONCURRENT = {
-    "amazon":      2,   # CAPTCHA riski yüksek → az concurrent (eskiden 3)
-    "trendyol":    4,   # Cloudflare bypass → orta (eskiden 5)
-    "hepsiburada": 2,   # Playwright ağır → az concurrent (eskiden 3)
-    "n11":         3,   # GQL hızlı → orta concurrent (değişmedi)
+    "amazon":      2,   # gece 2x → 4 (CAPTCHA riski yüksek)
+    "trendyol":    4,   # Cloudflare bypass → orta
+    "hepsiburada": 2,   # Playwright ağır → az
+    "n11":         3,   # GQL hızlı → orta
 }
 
 BASE_WEIGHTS = {
@@ -338,10 +338,10 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
 
 
 PLATFORM_MAX = {
-    "amazon":      5,   # gece 2x concurrent=4 + 1 buffer; gündüz concurrent=2 + buffer (eskiden 3)
-    "trendyol":    5,   # concurrent=4 + 1 buffer (eskiden 6)
-    "n11":         4,   # concurrent=3 + 1 buffer (değişmedi)
-    "hepsiburada": 3,   # concurrent=2 + 1 buffer (eskiden 4)
+    "amazon":      5,
+    "trendyol":    5,
+    "n11":         5,
+    "hepsiburada": 5,
 }
 
 

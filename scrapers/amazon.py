@@ -18,9 +18,7 @@ import logging
 import json
 import random
 import asyncio
-from datetime import datetime
 from typing import Optional
-import requests
 from bs4 import BeautifulSoup
 from scrapers.utils import (
     UA_POOL, RateLimiter,
@@ -47,12 +45,12 @@ def _is_night_amazon() -> bool:
 # ── Rate limiter ─────────────────────────────────────────────────
 # Gündüz: ~8 istek/dk → 2407 ürün → ~5 tur/gün
 # Gece (00-07): ~16 istek/dk → ~2.5 tur/gün ekstra
-_limiter        = RateLimiter(min_delay=2.0, max_delay=4.0)   # curl_cffi gündüz
-_limiter_fast   = RateLimiter(min_delay=1.0, max_delay=2.0)   # price_only gündüz
-_limiter_mobile = RateLimiter(min_delay=3.0, max_delay=6.0)   # mobile gündüz
-_limiter_night        = RateLimiter(min_delay=1.0, max_delay=2.0)   # curl_cffi gece (2x)
-_limiter_fast_night   = RateLimiter(min_delay=0.5, max_delay=1.0)   # price_only gece (2x)
-_limiter_mobile_night = RateLimiter(min_delay=1.5, max_delay=3.0)   # mobile gece (2x)
+_limiter        = RateLimiter(min_delay=1.5, max_delay=3.0)   # curl_cffi gündüz
+_limiter_fast   = RateLimiter(min_delay=0.8, max_delay=1.5)   # price_only gündüz
+_limiter_mobile = RateLimiter(min_delay=2.0, max_delay=4.0)   # mobile gündüz
+_limiter_night        = RateLimiter(min_delay=0.75, max_delay=1.5)  # curl_cffi gece (2x)
+_limiter_fast_night   = RateLimiter(min_delay=0.4,  max_delay=0.75) # price_only gece (2x)
+_limiter_mobile_night = RateLimiter(min_delay=1.0,  max_delay=2.0)  # mobile gece (2x)
 
 def _get_limiter(): return _limiter_night if _is_night_amazon() else _limiter
 def _get_limiter_fast(): return _limiter_fast_night if _is_night_amazon() else _limiter_fast
