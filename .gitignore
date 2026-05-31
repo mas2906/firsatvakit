@@ -5,3 +5,45 @@
 __pycache__/
 .venv/
 scraper_venv/
+venv_wsl/
+
+# Tarayıcı durumu ve geçici dosyalar
+.hb_browser_state/
+*.pkl
+*.log
+*.lock
+
+# Hassas veriler
+amazon_cookies.json
+hb_cookies.json
+proxies.txt
+
+# Geçici teşhis/test scriptleri
+check_*.py
+test_*.py
+debug_*.py
+diag_*.py
+hb_diag.py
+fix_*.py
+reset_*.py
+restart_*.py
+deploy_*.py
+verify_*.py
+wait_*.py
+get_*.py
+reject_*.py
+clear_*.py
+n11_del_*.py
+pip_*.txt
+scraper_speed.py
+amazon_speed.py
+check_api.sh
+check_scraper.sh
+start_scraper.sh
+
+# IDE ve OS dosyaları
+.DS_Store
+*.DS_Store
+
+# Büyük geçici dizinler
+"D\：／firsatvakti_temp/"

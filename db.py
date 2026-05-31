@@ -350,6 +350,7 @@ def _create_schema(db: _Connection):
             rating REAL, review_count INTEGER,
             brand TEXT, category TEXT, barcode TEXT,
             stock TEXT DEFAULT 'unknown',
+            ai_review_summary TEXT,
             first_seen_at TEXT, last_seen_at TEXT
         )""",
         """CREATE TABLE IF NOT EXISTS price_history (
@@ -520,6 +521,20 @@ def _create_schema(db: _Connection):
             published_at TEXT NOT NULL,
             deal_id INTEGER REFERENCES deals(id)
         )""",
+        # ── Amazon satıcı teklifleri ──────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS seller_offers (
+            id SERIAL PRIMARY KEY,
+            asin TEXT NOT NULL,
+            price TEXT,
+            condition TEXT,
+            seller TEXT,
+            seller_rating TEXT,
+            rating_count TEXT,
+            positive_pct TEXT,
+            ships_from TEXT,
+            scraped_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_so_asin ON seller_offers(asin, scraped_at)",
         # ── İndeksler ────────────────────────────────────────────────────
         "CREATE INDEX IF NOT EXISTS idx_products_platform ON products(platform)",
         "CREATE INDEX IF NOT EXISTS idx_ph_product ON price_history(product_id)",

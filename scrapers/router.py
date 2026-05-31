@@ -16,7 +16,8 @@ from scrapers.n11         import scrape_n11
 from scrapers.hepsiburada import scrape_hepsiburada
 
 
-async def scrape_product(url: str, platform: str, pool=None, price_only: bool = False) -> Optional[dict]:
+async def scrape_product(url: str, platform: str, pool=None, price_only: bool = False,
+                         cached_image: str = None) -> Optional[dict]:
     scrapers = {
         "amazon":      scrape_amazon,
         "trendyol":    scrape_trendyol,
@@ -28,7 +29,7 @@ async def scrape_product(url: str, platform: str, pool=None, price_only: bool = 
         print(f"[router] Desteklenmeyen platform: {platform}")
         return None
     try:
-        return await fn(url, pool=pool, price_only=price_only)
+        return await fn(url, pool=pool, price_only=price_only, cached_image=cached_image)
     except Exception as e:
         print(f"[scraper/{platform}] Hata: {e}")
         return None

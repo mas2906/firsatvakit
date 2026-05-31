@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Hepsiburada scraper — v3  (amazon.py v8 ile aynı iyileştirmeler)
+
+Primary : iOS Safari TLS impersonation (curl_cffi) — 3 session pool, exp backoff
+Fallback: Playwright + stealth
+"""
 
 import re
 import json
@@ -9,110 +15,469 @@ import logging
 from typing import Optional
 from bs4 import BeautifulSoup
 
-import httpx
-from scrapers.utils import (
-    UA_POOL,
-    MOBILE_UA_POOL,
-    MOBILE_VIEWPORTS,
-    MOBILE_STEALTH_SCRIPT,
-    RateLimiter,
-    STEALTH_SCRIPT,
-    parse_price_tr_clean,
-    get_stealth_headers,
-)
+from scrapers.utils import STEALTH_SCRIPT, parse_price_tr_clean, RateLimiter
 
 try:
     from curl_cffi.requests import AsyncSession as CurlSession
-    CURL_CFFI_AVAILABLE = True
+    _CURL_OK = True
 except ImportError:
     CurlSession = None
-    CURL_CFFI_AVAILABLE = False
+    _CURL_OK = False
 
-log = logging.getLogger("hb_v11")
+log = logging.getLogger("hb_scraper")
+
+# ── Rate limiter ─────────────────────────────────────────────────
+# Hepsiburada: Playwright ağırlıklı, JS bot tespiti var
+# Beklenen: ~12 istek/dk → 2717 ürün → ~6 tur/gün
+_limiter      = RateLimiter(min_delay=2.0, max_delay=4.5)   # iOS curl_cffi (eskiden 1.5-3.5)
+_limiter_fast = RateLimiter(min_delay=1.2, max_delay=2.5)   # price_only (eskiden 0.5-1.0, çok agresifti)
+
+# ── iOS Safari UA pool ───────────────────────────────────────────
+_IOS_UAS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.7 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+]
+
+# ── Android Chrome UA pool ───────────────────────────────────────
+_ANDROID_UAS = [
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+]
+
+_ALL_MOBILE_UAS = _IOS_UAS + _ANDROID_UAS
+
+_IOS_IMPERS = ["safari18_0", "safari17_5", "safari17_0", "safari16"]
+
+# ── iOS Safari header seti ───────────────────────────────────────
+_MOBILE_IOS_HEADERS: dict = {
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+    "Cache-Control":   "no-cache",
+    "Pragma":          "no-cache",
+    "Referer":         "https://www.hepsiburada.com/",
+}
+
+# ── Android Chrome ek headerları ────────────────────────────────
+_ANDROID_EXTRA: dict = {
+    "Sec-Ch-Ua-Mobile":  "?1",
+    "Sec-Ch-Ua-Platform": '"Android"',
+    "Sec-Fetch-Dest":    "document",
+    "Sec-Fetch-Mode":    "navigate",
+    "Sec-Fetch-Site":    "none",
+    "Sec-Fetch-User":    "?1",
+}
+
+# Kaynak engelle (Playwright fallback)
+_BLOCKED_TYPES = {"image", "stylesheet", "font", "media"}
+_BLOCKED_EXTS  = re.compile(r'\.(png|jpg|jpeg|gif|svg|webp|ico|woff2?|ttf|eot|mp4|pdf)(\?|$)', re.I)
+
+# ── Session pool (3 paralel iOS session) ────────────────────────
+_POOL_SIZE          = 3
+_SESSIONS: list     = []
+_SESSIONS_LOCK      = asyncio.Lock()
+_session_idx        = 0
+
+# ── Exponential backoff circuit breaker ─────────────────────────
+_fail_streak        = 0
+_disabled_until     = 0.0
+_cooldown_mult      = 1
+_MAX_FAIL           = 5
+_COOLDOWN_BASE      = 60   # 60s → 120s → 240s → max 300s
+
+import time as _time
+
+def _curl_enabled() -> bool:
+    return _CURL_OK and _time.time() > _disabled_until
+
+def _on_fail() -> None:
+    global _fail_streak, _disabled_until, _cooldown_mult
+    _fail_streak += 1
+    if _fail_streak >= _MAX_FAIL:
+        cooldown = min(_COOLDOWN_BASE * _cooldown_mult, 300)
+        _disabled_until = _time.time() + cooldown
+        _cooldown_mult  = min(_cooldown_mult * 2, 5)
+        _fail_streak    = 0
+        log.warning(f"[HB/curl] {_MAX_FAIL} ardışık hata → {cooldown}s askı (çarpan={_cooldown_mult})")
+
+def _on_success() -> None:
+    global _fail_streak, _cooldown_mult
+    _fail_streak  = 0
+    _cooldown_mult = 1
+
+_HB_SEM = None
+def _get_sem():
+    global _HB_SEM
+    if _HB_SEM is None:
+        _HB_SEM = asyncio.Semaphore(3)
+    return _HB_SEM
+
+
+async def _get_session() -> tuple:
+    """3 session pool — amazon.py ile aynı pattern."""
+    global _SESSIONS, _session_idx
+    new_entry = None
+    async with _SESSIONS_LOCK:
+        if len(_SESSIONS) < _POOL_SIZE:
+            try:
+                imp = random.choice(_IOS_IMPERS)
+                s   = CurlSession(impersonate=imp, timeout=20)
+                _SESSIONS.append((s, imp))
+                new_entry = (s, imp)
+                log.info(f"[HB/curl] Yeni session #{len(_SESSIONS)}: {imp}")
+            except Exception as e:
+                log.warning(f"[HB/curl] Session oluşturulamadı: {e}")
+                if not _SESSIONS:
+                    raise
+        if not _SESSIONS:
+            raise RuntimeError("HB session pool boş")
+        _session_idx = (_session_idx + 1) % len(_SESSIONS)
+        result = _SESSIONS[_session_idx]
+
+    # Warm-up — lock dışında
+    if new_entry:
+        s, imp = new_entry
+        try:
+            ua = random.choice(_IOS_UAS)
+            warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
+            await s.get("https://www.hepsiburada.com/", headers=warmup_hdrs, timeout=10)
+        except Exception:
+            pass
+    return result
+
+
+def _reset_session() -> None:
+    global _SESSIONS, _session_idx
+    if not _SESSIONS:
+        return
+    bad = _session_idx % len(_SESSIONS)
+    _SESSIONS[bad] = None  # type: ignore
+    _SESSIONS = [s for s in _SESSIONS if s is not None]
+    log.info(f"[HB/curl] Session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
+
 
 # ==========================================
-# CONFIG
+# ENTRY POINT
 # ==========================================
-_limiter      = RateLimiter(min_delay=0.5, max_delay=1.0)
-_limiter_fast = RateLimiter(min_delay=0.0, max_delay=0.1)
-_HB_LOCK = None
+async def scrape_hepsiburada(url: str, pool=None,
+                              price_only: bool = False,
+                              cached_image: str = None) -> Optional[dict]:
+    async with _get_sem():
+        result = await _scrape(url, pool, price_only=price_only)
 
-def _get_hb_lock() -> asyncio.Semaphore:
-    global _HB_LOCK
-    if _HB_LOCK is None:
-        _HB_LOCK = asyncio.Semaphore(5)
-    return _HB_LOCK
-
-
-_CURL_SESSION = None
-_CURL_LOCK = asyncio.Lock()
-
-IMPERSONATE_POOL = ["chrome136", "chrome131", "chrome124", "chrome120"]
-
-
-async def _get_curl_session():
-    global _CURL_SESSION
-    async with _CURL_LOCK:
-        if _CURL_SESSION is None:
-            imp = random.choice(IMPERSONATE_POOL)
-            _CURL_SESSION = CurlSession(impersonate=imp, timeout=12)
-            log.info(f"[HB] curl session oluşturuldu: {imp}")
-        return _CURL_SESSION
+    if not result:
+        return None
+    if result.get("dead_url"):
+        return result
+    if price_only:
+        out = {k: result[k] for k in ("price", "stock", "cart_discount", "coupon") if k in result}
+        if cached_image:
+            out["image_url"] = cached_image
+        return out
+    return result
 
 
-def _reset_curl_session():
-    global _CURL_SESSION
-    _CURL_SESSION = None
+# ==========================================
+# CORE — iOS Safari önce, Playwright fallback
+# ==========================================
+async def _scrape(url: str, pool, price_only: bool = False) -> Optional[dict]:
+    await (_limiter_fast if price_only else _limiter).wait()
+
+    # Primary: iOS Safari curl_cffi
+    if _curl_enabled():
+        result = await _via_ios_safari(url)
+        if result and result.get("dead_url"):
+            return result
+        if result and result.get("price"):
+            _on_success()
+            return result
+        _on_fail()
+        log.info(f"[HB] curl başarısız ({_fail_streak}/{_MAX_FAIL}) → Playwright deneniyor")
+    else:
+        remain = max(0, _disabled_until - _time.time())
+        log.info(f"[HB/curl] circuit breaker aktif — {remain:.0f}s kaldı")
+
+    # Fallback: Playwright + stealth + kaynak engelleme
+    if pool is not None:
+        result = await _via_playwright(url, pool)
+        if result and result.get("price"):
+            _on_success()
+        return result
+
+    log.warning("[HB] pool yok, curl başarısız — atlanıyor")
+    return None
 
 
-def _parse_html_only(html: str) -> Optional[dict]:
-    """Playwright gerektirmeden HTML'den parse — curl_cffi layer için."""
-    soup = BeautifulSoup(html, "html.parser")
+# ==========================================
+# PRIMARY — iOS Safari TLS impersonation
+# ==========================================
+async def _via_ios_safari(url: str) -> Optional[dict]:
+    try:
+        session, imp = await _get_session()
+        ua    = random.choice(_ALL_MOBILE_UAS)
+        is_ios = "iPhone" in ua or "iPad" in ua
+
+        headers = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
+        if not is_ios:
+            v  = re.search(r"Chrome/(\d+)", ua)
+            cv = v.group(1) if v else "136"
+            headers.update({
+                **_ANDROID_EXTRA,
+                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
+            })
+
+        r = await session.get(url, headers=headers, allow_redirects=True, timeout=20)
+
+        if r.status_code in (404, 410):
+            return {"dead_url": True}
+        if r.status_code in (403, 429, 503):
+            log.warning(f"[HB/curl] HTTP {r.status_code} — blok, session sıfırlanıyor")
+            _reset_session()
+            return None
+        if r.status_code != 200:
+            log.debug(f"[HB/curl] HTTP {r.status_code}")
+            _reset_session()
+            return None
+
+        html = r.text
+        if not html or len(html) < 3000:
+            log.warning(f"[HB/curl] Kısa yanıt ({len(html or '')}B) — blok")
+            _reset_session()
+            return None
+
+        low = html[:3000].lower()
+        if any(k in low for k in ("security", "captcha", "challenge", "robot")):
+            log.info(f"[HB/curl] Challenge sayfası (imp={imp}) — session sıfırlanıyor")
+            _reset_session()
+            return None
+
+        result = _parse_html(html)
+        if result and result.get("price"):
+            log.info(f"[HB/curl] ✔ imp={imp} ua={'iOS' if is_ios else 'Android'} | "
+                     f"{(result.get('title') or '')[:50]} | {result.get('price')} ₺")
+        return result
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.debug(f"[HB/curl] Hata: {e}")
+        _reset_session()
+        return None
+
+
+# ==========================================
+# FALLBACK — Playwright + stealth
+# ==========================================
+async def _via_playwright(url: str, pool) -> Optional[dict]:
+    page = await pool.acquire()
+
+    async def _route(route):
+        req = route.request
+        if req.resource_type in _BLOCKED_TYPES or _BLOCKED_EXTS.search(req.url):
+            await route.abort()
+        else:
+            await route.continue_()
+
+    try:
+        await page.add_init_script(STEALTH_SCRIPT)
+        await page.route("**/*", _route)
+
+        log.info(f"[HB/pw] → {url[:80]}")
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+
+        try:
+            await page.wait_for_selector(
+                '[data-test-id="default-price"],[data-test-id="checkout-price"]',
+                timeout=7000
+            )
+        except Exception:
+            await page.wait_for_timeout(2000)
+
+        html = await page.content()
+        data = _parse_html(html)
+
+        if not data or not data.get("price"):
+            js_p = await _js_price(page)
+            if js_p:
+                data = data or {}
+                data["price"] = js_p
+
+        if not data or not data.get("price"):
+            dom_p = await _dom_price(page)
+            if dom_p:
+                data = data or {}
+                data["price"] = dom_p
+
+        if data and not data.get("title"):
+            try:
+                el = await page.query_selector('meta[property="og:title"]')
+                if el:
+                    data["title"] = await el.get_attribute("content")
+            except Exception:
+                pass
+
+        if data and data.get("price"):
+            log.info(f"[HB/pw] ✔ {(data.get('title') or '')[:50]} | {data.get('price')} ₺")
+        else:
+            log.warning(f"[HB/pw] ✘ fiyat yok — {url[:60]}")
+        return data
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.error(f"[HB/pw] Hata: {e}")
+        return None
+    finally:
+        try:
+            await page.unroute("**/*", _route)
+        except Exception:
+            pass
+        await pool.release(page)
+
+
+# ==========================================
+# HTML PARSE — 5 katmanlı, data-test-id öncelikli
+# ==========================================
+def _parse_html(html: str) -> Optional[dict]:
     title = price = image = None
+    rating = review_count = None
     stock = "Bilinmiyor"
     cart_discount = False
-
-    # 1) window.productState
-    m = re.search(r'window\.productState\s*=\s*(\{)', html)
+    coupon = variants = None
     ps = None
+
+    # ── Layer 1: window.productState ────────────────────────────
+    m = re.search(r'window\.productState\s*=\s*(\{)', html)
     if m:
         try:
             start = m.start(1)
-            depth, in_str, esc, end = 0, False, False, start
+            depth = in_str = esc = 0
+            end = start
             for i, ch in enumerate(html[start:], start):
-                if esc: esc = False; continue
+                if esc:              esc = False; continue
                 if ch == '\\' and in_str: esc = True; continue
-                if ch == '"': in_str = not in_str; continue
-                if in_str: continue
-                if ch == '{': depth += 1
+                if ch == '"':        in_str = not in_str; continue
+                if in_str:           continue
+                if ch == '{':        depth += 1
                 elif ch == '}':
                     depth -= 1
-                    if depth == 0: end = i + 1; break
+                    if depth == 0:   end = i + 1; break
             ps = json.loads(html[start:end])
             product = ps.get("product", {})
-            title = product.get("name")
-            price = _extract_price_from_state(ps)
-            stock = _extract_stock_from_state(ps)
-            image = _extract_image_from_state(ps)
+            title    = product.get("name")
+            price    = _price_from_state(ps)
+            stock    = _stock_from_state(ps)
+            image    = _image_from_state(ps)
+            coupon   = _coupon_from_state(ps)
+            variants = _variants_from_state(ps)
         except Exception:
             pass
 
-    # 2) __NEXT_DATA__
+    # ── Layer 2: __NEXT_DATA__ (genişletilmiş) ───────────────────
     if not title or not price:
         m2 = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>', html)
         if m2:
             try:
                 j = json.loads(m2.group(1))
-                txt = json.dumps(j, ensure_ascii=False)
-                if not title:
-                    tm = re.search(r'"name"\s*:\s*"([^"]{10,})"', txt)
-                    if tm: title = tm.group(1)
-                if not price:
-                    price = _extract_price_from_next_data(j)
+                nd = _parse_next_data_full(j)
+                if nd:
+                    if not title and nd.get("title"):        title = nd["title"]
+                    if not price and nd.get("price"):        price = nd["price"]
+                    if stock == "Bilinmiyor" and nd.get("stock"): stock = nd["stock"]
+                    if not image and nd.get("image"):        image = nd["image"]
+                    if not rating and nd.get("rating"):      rating = nd["rating"]
+                    if not review_count and nd.get("review_count"): review_count = nd["review_count"]
             except Exception:
                 pass
 
-    # 3) JSON-LD
+    # ── Layer 3: BeautifulSoup data-test-id seçicileri ──────────
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Başlık
+    if not title:
+        for sel in ['[data-test-id="title"]', '[data-test-id^="title-"]']:
+            el = soup.select_one(sel)
+            if el:
+                t = el.get_text(strip=True)
+                if t and len(t) > 5:
+                    title = t; break
+
+    # Fiyat — indirimli (sepete özel) önce, sonra normal fiyat
+    if not price:
+        for sel in [
+            '[data-test-id="price-current-price"]',
+            '[data-test-id^="final-price-"]',
+        ]:
+            el = soup.select_one(sel)
+            if el:
+                v = parse_price_tr_clean(el.get_text(strip=True))
+                if v and v > 0:
+                    price = v; cart_discount = True; break
+    if not price:
+        el = soup.select_one('[data-test-id="default-price"]')
+        if el:
+            v = parse_price_tr_clean(el.get_text(strip=True))
+            if v and v > 0: price = v
+
+    # checkout-price regex (eski sepete özel format)
+    if not price:
+        m_co = re.search(
+            r'data-test-id=["\']checkout-price["\'][^>]*>.*?([\d]{1,3}(?:\.[\d]{3})*,[\d]{2})\s*TL',
+            html, re.DOTALL | re.IGNORECASE
+        )
+        if m_co:
+            v = parse_price_tr_clean(m_co.group(1))
+            if v and v > 0:
+                price = v; cart_discount = True
+
+    # Stok — addToCart butonu varlığı en güvenilir gösterge
+    if stock == "Bilinmiyor":
+        for sel in ['[data-test-id="addToCart"]', '[data-test-id^="add-to-cart-button-"]']:
+            if soup.select_one(sel):
+                stock = "Stokta Var"; break
+
+    # Puan / Yorum sayısı
+    if not rating or not review_count:
+        for sel in ['[data-test-id="has-review"]', '[data-test-id^="rating-"]']:
+            el = soup.select_one(sel)
+            if not el: continue
+            txt = el.get_text(strip=True)
+            if not rating:
+                mr = re.search(r'([\d]+[.,][\d]+)', txt)
+                if mr:
+                    try:
+                        r = float(mr.group(1).replace(',', '.'))
+                        if 0 < r <= 5: rating = r
+                    except Exception: pass
+            if not review_count:
+                mc = re.search(r'\((\d[\d.]*)\)', txt)
+                if mc:
+                    try: review_count = int(mc.group(1).replace('.', ''))
+                    except Exception: pass
+            if rating and review_count: break
+
+    # Varyantlar — data-test-id^="variant-box-"
+    if not variants:
+        var_els = soup.select('[data-test-id^="variant-box-"]')
+        if var_els:
+            parsed_vars, seen = [], set()
+            for el in var_els[:50]:
+                name = el.get_text(strip=True)
+                if not name or name in seen: continue
+                seen.add(name)
+                cls_str = " ".join(el.get("class") or [])
+                in_stock = "disabled" not in cls_str.lower()
+                parsed_vars.append({"name": name[:100], "price": None, "in_stock": in_stock})
+            if parsed_vars: variants = parsed_vars
+
+    # ── Layer 4: JSON-LD (başlık, resim fallback) ─────────────────
     if not title or not image:
         for sc in soup.find_all("script", type="application/ld+json"):
             try:
@@ -124,16 +489,15 @@ def _parse_html_only(html: str) -> Optional[dict]:
                         img = j.get("image")
                         if isinstance(img, list) and img:
                             image = img[0] if isinstance(img[0], str) else img[0].get("url")
-                        elif isinstance(img, str):
-                            image = img
+                        elif isinstance(img, str): image = img
                     if not price:
                         offers = j.get("offers", {})
-                        p = offers.get("price") if isinstance(offers, dict) else None
-                        if p: price = parse_price_tr_clean(str(p))
-            except Exception:
-                pass
+                        if isinstance(offers, dict):
+                            p = offers.get("price")
+                            if p: price = parse_price_tr_clean(str(p))
+            except Exception: pass
 
-    # 4) og fallbacks
+    # ── Layer 5: og meta fallbacks ────────────────────────────────
     if not image:
         og = soup.find("meta", property="og:image")
         if og: image = og.get("content")
@@ -141,765 +505,259 @@ def _parse_html_only(html: str) -> Optional[dict]:
         og = soup.find("meta", property="og:title")
         if og: title = og.get("content")
 
-    # checkout-price HTML elementi — sepete özel indirim varsa nihai fiyatı override et
-    # JS/productState discountedPrice yerine DOM kaynak alınır
-    m_co = re.search(
-        r'data-test-id=["\']checkout-price["\'][^>]*>.*?'
-        r'([\d]{1,3}(?:\.[\d]{3})*,[\d]{2})\s*TL',
-        html, re.DOTALL | re.IGNORECASE
-    )
-    if m_co:
-        v = parse_price_tr_clean(m_co.group(1))
-        if v and v > 0:
-            price = v
-            cart_discount = True
-
     if not price or not title:
         return None
-
     if "güvenlik" in (title or "").lower() or "hata" in (title or "").lower():
         return None
-
-    # Kupon ve varyantlar — zaten parse edilmiş ps'den al
-    coupon = None
-    variants_list = None
-    if ps:
-        coupon = _extract_coupon_from_state(ps)
-        variants_list = _extract_variants_from_state(ps)
 
     return {
         "title": title, "price": price, "image_url": image,
         "stock": stock, "cart_discount": cart_discount,
-        "coupon": coupon, "variants": variants_list,
+        "rating": rating, "review_count": review_count,
+        "coupon": coupon, "variants": variants,
     }
 
 
-async def _via_curl_cffi(url: str) -> Optional[dict]:
-    """Layer 0: curl_cffi (Chrome TLS fingerprint) — Playwright gerektirmez."""
-    if not CURL_CFFI_AVAILABLE:
-        return None
+# ==========================================
+# JS / DOM PRICE — Playwright fallback içinde
+# ==========================================
+async def _js_price(page) -> Optional[float]:
     try:
-        await _limiter_fast.wait()
-        session = await _get_curl_session()
-        ua = random.choice(MOBILE_UA_POOL + UA_POOL)
-        headers = {
-            "User-Agent": ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "tr-TR,tr;q=0.9",
-            "Referer": "https://www.hepsiburada.com/",
-        }
-        r = await session.get(url, headers=headers, timeout=12, allow_redirects=True)
-        if r.status_code != 200:
-            return None
-        html = r.text
-        if "security" in html[:2000].lower() or "captcha" in html[:2000].lower():
-            _reset_curl_session()
-            return None
-        result = _parse_html_only(html)
-        if result:
-            log.info(f"[HB/curl] ✔ {result.get('title','')[:50]} | {result.get('price')}")
-        return result
-    except Exception as e:
-        log.debug(f"[HB/curl] Hata: {e}")
-        _reset_curl_session()
-        return None
-
-
-# ==========================================
-# ENTRY
-# ==========================================
-async def scrape_hepsiburada(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
-    # Layer 0: curl_cffi — browser gerektirmez, ~3x hızlı
-    if CURL_CFFI_AVAILABLE:
-        data = await _via_curl_cffi(url)
-        if data and data.get("price"):
-            if price_only:
-                return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
-            return data
-
-    # Layer 1: Playwright fallback
-    async with _get_hb_lock():
-        result = await _run(url, pool)
-        if price_only and result:
-            return {k: result[k] for k in ("price", "stock", "cart_discount", "coupon") if k in result}
-        return result
-
-
-# ==========================================
-# CORE
-# ==========================================
-async def _run(url: str, pool=None):
-
-    async def worker(page):
-
-        await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {} };
-        """)
-
-        if use_mobile:
-            await page.add_init_script(MOBILE_STEALTH_SCRIPT)
-        else:
-            await page.add_init_script(STEALTH_SCRIPT)
-
-        await _limiter.wait()
-
-        try:
-            log.info(f"[HB V11] Açılıyor: {url}")
-
-            await page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=45000
-            )
-
-            # Fiyat elementinin DOM'a gelmesini bekle (sabit timeout yerine)
-            try:
-                await page.wait_for_selector(
-                    '[data-test-id="default-price"], [data-test-id="checkout-price"], [data-test-id="price"]',
-                    timeout=8000
-                )
-            except Exception:
-                await page.wait_for_timeout(3500)
-
-            html = await page.content()
-
-            data = await _parse(page, html)
-
-            if data:
-                log.info(f"[HB V11] ✔ {data.get('title', '')[:60]} | {data.get('price')}")
-                return data
-
-            return None
-
-        except Exception as e:
-            log.error(f"[HB V10] Hata: {e}")
-            return None
-
-    use_mobile = False
-
-    if pool is None:
-        log.warning("[HB] pool verilmedi — iş atlanıyor")
-        return None
-
-    page = await pool.acquire()
-    try:
-        return await worker(page)
-    finally:
-        await pool.release(page)
-
-    from playwright.async_api import async_playwright
-
-    async with async_playwright() as p:
-        try:
-            from playwright_stealth import Stealth
-            _stealth = Stealth()
-        except Exception:
-            _stealth = None
-
-        browser = await p.chromium.launch(
-            headless=True,
-            channel="chrome",
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-
-        # %35 ihtimalle mobil UA kullan
-        use_mobile = random.random() < 0.35
-        if use_mobile:
-            _ua = random.choice(MOBILE_UA_POOL)
-            vw, vh, dpr = random.choice(MOBILE_VIEWPORTS)
-            context = await browser.new_context(
-                user_agent=_ua,
-                locale="tr-TR",
-                timezone_id="Europe/Istanbul",
-                viewport={"width": vw, "height": vh},
-                device_scale_factor=dpr,
-                is_mobile=True,
-                has_touch=True,
-                extra_http_headers=get_stealth_headers(_ua),
-            )
-            log.info(f"[HB] Mobil mod: {vw}x{vh} DPR={dpr}")
-        else:
-            _ua = random.choice(UA_POOL)
-            context = await browser.new_context(
-                user_agent=_ua,
-                locale="tr-TR",
-                timezone_id="Europe/Istanbul",
-                viewport={"width": 1920, "height": 1080},
-                extra_http_headers=get_stealth_headers(_ua),
-            )
-
-        page = await context.new_page()
-        if _stealth:
-            await _stealth.apply_stealth_async(page)
-
-        try:
-            return await worker(page)
-        finally:
-            await browser.close()
-
-
-# ==========================================
-# PARSER (V11 - JSON-FIRST PRICE ENGINE)
-# ==========================================
-async def _parse(page, html: str):
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    title = None
-    image = None
-    price = None
-    stock = "Bilinmiyor"
-    cart_discount = False
-
-    # ==================================================
-    # 0. JS page evaluation — en güvenilir yöntem
-    # ==================================================
-    try:
-        js_data = await page.evaluate("""
-            () => {
-                const pricePaths = [
-                    () => window.productState?.product?.price?.finalPrice,
-                    () => window.productState?.product?.price?.currentPrice,
-                    () => window.productState?.product?.buyBoxInfo?.priceInfo?.finalPrice,
-                    () => window.productState?.product?.buyBoxInfo?.price,
-                    () => window.productModel?.price?.finalPrice,
-                    () => window.productModel?.price?.currentPrice,
-                    () => window.__INITIAL_STATE__?.product?.price?.finalPrice,
-                    () => window.__INITIAL_STATE__?.product?.price?.currentPrice,
-                    // value (original/list price) — son çare
-                    () => window.productState?.product?.price?.value,
-                    () => window.productModel?.price?.value,
-                    () => window.__INITIAL_STATE__?.product?.price?.value,
-                ];
-                // discountedPrice kasıtlı olarak YOK — HB bazen bu alanı
-                // indirim tutarı (örn. 619 TL) olarak kullanır, nihai fiyat değil.
-                let price = null;
-                for (const fn of pricePaths) {
-                    try {
-                        const v = fn();
-                        if (v && typeof v === 'number' && v > 10) { price = v; break; }
-                        if (v && typeof v === 'string') {
-                            const n = parseFloat(v.replace(/\\./g,'').replace(',','.'));
-                            if (n > 10) { price = n; break; }
-                        }
-                    } catch(e) {}
-                }
-
-                // Stock: productModel veya productState'den
-                let stock = null;
-                const pm = window.productModel || window.productState?.product || {};
-                const salable = pm.isSalable ?? pm.isSaleable ?? pm.isAvailable ?? null;
-                const qty = pm.stockQty ?? pm.stock ?? null;
-                if (salable === false || qty === 0) stock = 'Stok Yok';
-                else if (salable === true || (typeof qty === 'number' && qty > 0)) stock = 'Stokta Var';
-
-                // Title: productModel veya productState'den
-                const title = window.productModel?.name
-                    || window.productState?.product?.name
-                    || window.__INITIAL_STATE__?.product?.name
-                    || null;
-
-                return { price, stock, title };
+        v = await page.evaluate("""
+        () => {
+            const paths = [
+                () => window.productState?.product?.price?.finalPrice,
+                () => window.productState?.product?.price?.currentPrice,
+                () => window.productState?.product?.buyBoxInfo?.priceInfo?.finalPrice,
+                () => window.productState?.product?.currentListing?.price?.finalPrice,
+                () => window.productState?.product?.currentListing?.price?.amount,
+                () => window.productModel?.price?.finalPrice,
+                () => window.productModel?.price?.currentPrice,
+            ];
+            for (const fn of paths) {
+                try {
+                    const v = fn();
+                    if (v && typeof v === 'number' && v > 10) return v;
+                } catch(e) {}
             }
+            try {
+                const disc = window.productState?.product?.price?.discountedPrice;
+                const orig = window.productState?.product?.price?.value;
+                if (disc && typeof disc === 'number' && disc > 10) {
+                    if (!orig || (disc >= orig * 0.15 && disc <= orig)) return disc;
+                }
+            } catch(e) {}
+            try {
+                const v = window.productState?.product?.price?.value
+                    || window.productModel?.price?.value;
+                if (v && typeof v === 'number' && v > 10) return v;
+            } catch(e) {}
+            return null;
+        }
         """)
-        if js_data:
-            if js_data.get("price"):
-                price = float(js_data["price"])
-            if js_data.get("stock"):
-                stock = js_data["stock"]
-            if js_data.get("title"):
-                title = js_data["title"]
+        return float(v) if v and float(v) > 10 else None
+    except Exception:
+        return None
+
+
+async def _dom_price(page) -> Optional[float]:
+    try:
+        await page.evaluate("""
+            ['[data-test-id="see-earnings"]','[data-test-id="payment-options"]',
+             '[data-test-id="prev-price"]'
+            ].forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
+        """)
     except Exception:
         pass
 
-    # ==================================================
-    # 1. window.productState — title, image ve fiyat (HTML regex)
-    # ==================================================
-    # Brace-balanced extraction (lazy {.*?} nested JSON'da bozulur)
-    m = re.search(r'window\.productState\s*=\s*(\{)', html)
-    productState = None
-    if m:
+    for sel in [
+        '[data-test-id="price-current-price"]',
+        '[data-test-id^="final-price-"]',
+        '[data-test-id="checkout-price"]',
+        '[data-test-id="default-price"]',
+        '[data-test-id="price-value"]',
+        'span[itemprop="price"]',
+        'meta[itemprop="price"]',
+    ]:
         try:
-            start = m.start(1)
-            depth = 0
-            in_str = False
-            esc = False
-            end = start
-            for i, ch in enumerate(html[start:], start):
-                if esc:
-                    esc = False
-                    continue
-                if ch == '\\' and in_str:
-                    esc = True
-                    continue
-                if ch == '"':
-                    in_str = not in_str
-                    continue
-                if in_str:
-                    continue
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            productState = json.loads(html[start:end])
-            product = productState.get("product", {})
-            if not title:
-                title = product.get("name")
-            if not price:
-                price = _extract_price_from_state(productState)
-            stock = _extract_stock_from_state(productState)
-            if not image:
-                image = _extract_image_from_state(productState)
-        except Exception:
-            pass
-
-    # ==================================================
-    # 2. __NEXT_DATA__ — title, image, fiyat için
-    # ==================================================
-    if not title or not price:
-        # Script içeriğini tag sınırına kadar al (lazy {.*?} nested JSON'u keser)
-        m2 = re.search(
-            r'<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>',
-            html
-        )
-        if m2:
-            try:
-                j = json.loads(m2.group(1))
-                txt = json.dumps(j, ensure_ascii=False)
-                if not title:
-                    title = _find(txt, [r'"name"\s*:\s*"([^"]{10,})"', r'"title"\s*:\s*"([^"]{10,})"'])
-                if not price:
-                    price = _extract_price_from_next_data(j)
-            except:
-                pass
-
-    # ==================================================
-    # 3. JSON-LD — title, image, fiyat için
-    # ==================================================
-    if not title or not image:
-        for sc in soup.find_all("script", type="application/ld+json"):
-            try:
-                j = json.loads(sc.string or sc.text)
-                if isinstance(j, list):
-                    j = j[0]
-                if isinstance(j, dict):
-                    if not title:
-                        title = j.get("name")
-                    if not image:
-                        img = j.get("image")
-                        if isinstance(img, list) and img:
-                            image = img[0] if isinstance(img[0], str) else img[0].get("url")
-                        elif isinstance(img, str):
-                            image = img
-                    if not price:
-                        offers = j.get("offers", {})
-                        if isinstance(offers, dict):
-                            p = offers.get("price")
-                            if p:
-                                price = parse_price_tr_clean(str(p))
-            except:
-                pass
-
-    # ==================================================
-    # 3b. og:image — JSON-LD'de yoksa fallback
-    # ==================================================
-    if not image:
-        og_img = soup.find("meta", property="og:image")
-        if og_img:
-            image = og_img.get("content")
-
-    # ==================================================
-    # 4. DOM PRICE — JSON bulamazsa veya sepete özel varsa
-    # ==================================================
-    # checkout-price elementi varsa sepete özel indirim var;
-    # bu durumda DOM fiyatı her zaman nihai fiyattır (JS'deki discountedPrice
-    # bazen indirim tutarını gösterir — 619 TL gibi).
-    has_checkout_price = False
-    try:
-        co_el = await page.query_selector('[data-test-id="checkout-price"]')
-        if co_el:
-            cart_discount = True
-            has_checkout_price = True
-    except:
-        pass
-
-    dom_price = await _extract_dom_price(page)
-    if dom_price:
-        if has_checkout_price:
-            # checkout-price DOM elementı kesin kaynak — JS'yi override et
-            price = dom_price
-        elif not price or dom_price < price:
-            if price and dom_price < price:
-                cart_discount = True
-            price = dom_price
-
-    # ==================================================
-    # 5. FALLBACK TITLE
-    # ==================================================
-    if not title:
-        og = soup.find("meta", property="og:title")
-        title = og.get("content") if og else None
-
-    if not title and soup.title:
-        raw_title = soup.title.text.strip()
-        # "Hepsiburada | Güvenlik" gibi hata sayfası başlıklarını reddet
-        if "Hepsiburada" not in raw_title or len(raw_title) > 30:
-            title = raw_title
-
-    # ==================================================
-    # RESULT
-    # ==================================================
-    if title and "güvenlik" not in title.lower() and "hata" not in title.lower():
-        # Kupon ve varyantlar — zaten parse edilmiş productState'den al
-        coupon = None
-        variants_list = None
-        if productState:
-            coupon = _extract_coupon_from_state(productState)
-            variants_list = _extract_variants_from_state(productState)
-
-        if not coupon:
-            try:
-                co_coupon = await page.query_selector('[data-test-id="merchant-coupons"]')
-                if co_coupon:
-                    t = (await co_coupon.inner_text()).strip()
-                    if t:
-                        coupon = t[:200]
-            except Exception:
-                pass
-
-        log.info(f"[HB V11] title={title[:60]!r} price={price} stock={stock} cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants_list or [])}")
-        return {
-            "title": title,
-            "price": price,
-            "image_url": image,
-            "stock": stock,
-            "cart_discount": cart_discount,
-            "coupon": coupon,
-            "variants": variants_list,
-            "platform": "Hepsiburada",
-            "success": True
-        }
-
-    log.warning(f"[HB V11] Geçersiz sayfa — title={title!r}")
-    return None
-
-
-def _extract_price_from_state(state: dict) -> Optional[float]:
-    """window.productState'den fiyat çıkar — birden fazla path dener."""
-    product = state.get("product", {})
-
-    # Doğrudan fiyat objeleri — discountedPrice kasıtlı olarak çıkarıldı:
-    # HB bu alanı bazen indirim tutarı (örn. 619 TL) olarak kullanır.
-    for path in [
-        ["price", "finalPrice"],
-        ["price", "currentPrice"],
-        ["buyBoxInfo", "priceInfo", "finalPrice"],
-        ["buyBoxInfo", "priceInfo", "value"],
-        ["buyBoxInfo", "price"],
-        ["price", "value"],  # son çare: liste fiyatı
-    ]:
-        d = product
-        for k in path:
-            if isinstance(d, dict):
-                d = d.get(k)
-            else:
-                d = None
-                break
-        if isinstance(d, (int, float)) and d > 0:
-            return float(d)
-        if isinstance(d, str):
-            v = parse_price_tr_clean(d)
-            if v:
+            el = await page.query_selector(sel)
+            if not el: continue
+            content = await el.get_attribute("content") if sel.startswith("meta") else None
+            text = content or (await el.inner_text()).strip().split('\n')[0]
+            v = parse_price_tr_clean(text)
+            if v and v > 0:
                 return v
+        except Exception:
+            continue
 
-    # promotions / campaigns
-    for promo in product.get("promotions", []) or []:
-        if isinstance(promo, dict):
-            fp = promo.get("finalPrice") or promo.get("discountedPrice")
-            if isinstance(fp, (int, float)) and fp > 0:
-                return float(fp)
-
+    try:
+        pb = await page.query_selector('[data-test-id="price"]')
+        if pb:
+            text = await pb.inner_text()
+            candidates = [parse_price_tr_clean(r) for r in re.findall(r'([\d\.]+[,]\d{2})', text)]
+            candidates = [v for v in candidates if v and v > 0]
+            if candidates:
+                return min(candidates)
+    except Exception:
+        pass
     return None
 
 
-def _extract_image_from_state(state: dict) -> Optional[str]:
+# ==========================================
+# PRICE / STOCK / IMAGE HELPERS
+# ==========================================
+def _get_nested(d, path: list):
+    for k in path:
+        if isinstance(d, dict):   d = d.get(k)
+        elif isinstance(d, list) and isinstance(k, int) and len(d) > k: d = d[k]
+        else: return None
+    if isinstance(d, (int, float)) and d > 10: return float(d)
+    if isinstance(d, str): return parse_price_tr_clean(d)
+    return None
+
+
+def _price_from_state(state: dict) -> Optional[float]:
     product = state.get("product", {})
     for path in [
-        ["mainImageUrl"],
-        ["imageUrl"],
-        ["images", 0, "url"],
-        ["images", 0],
-        ["image"],
-        ["thumbnailUrl"],
+        ["price", "finalPrice"], ["price", "currentPrice"],
+        ["buyBoxInfo", "priceInfo", "finalPrice"], ["buyBoxInfo", "price"],
+        ["currentListing", "price", "finalPrice"],
+        ["currentListing", "price", "amount"],
+        ["currentListing", "price", "currentPrice"],
     ]:
-        d = product
-        for k in path:
-            if isinstance(d, dict):
-                d = d.get(k)
-            elif isinstance(d, list) and isinstance(k, int) and len(d) > k:
-                d = d[k]
-            else:
-                d = None
-                break
-        if isinstance(d, str) and d.startswith("http"):
-            return d
-    return None
+        v = _get_nested(product, path)
+        if v: return v
+
+    for listing in (product.get("listings") or product.get("currentListings") or [])[:3]:
+        if not isinstance(listing, dict): continue
+        for lp in [["price", "finalPrice"], ["price", "amount"], ["price", "currentPrice"]]:
+            v = _get_nested(listing, lp)
+            if v: return v
+
+    disc = _get_nested(product, ["price", "discountedPrice"])
+    orig = (_get_nested(product, ["price", "value"]) or
+            _get_nested(product, ["price", "originalPrice"]))
+    if disc:
+        if orig:
+            if orig * 0.15 <= disc <= orig: return disc
+        else:
+            return disc
+
+    v = _get_nested(product, ["buyBoxInfo", "priceInfo", "value"])
+    if v: return v
+    return orig
 
 
-def _extract_stock_from_state(state: dict) -> str:
+def _parse_next_data_full(j: dict) -> Optional[dict]:
+    """__NEXT_DATA__ JSON'undan tüm ürün alanlarını çıkarır."""
+    result: dict = {}
+
+    def _dig(d, depth=0):
+        if depth > 8 or not isinstance(d, dict): return
+        if not result.get("price"):
+            for key in ("finalPrice", "currentPrice", "salePrice", "discountedPrice"):
+                v = d.get(key)
+                if isinstance(v, (int, float)) and v > 10:
+                    result["price"] = float(v); break
+                if isinstance(v, str):
+                    pv = parse_price_tr_clean(v)
+                    if pv: result["price"] = pv; break
+        if not result.get("title"):
+            for key in ("name", "displayName", "title", "productName"):
+                v = d.get(key)
+                if isinstance(v, str) and len(v) > 5:
+                    result["title"] = v; break
+        if not result.get("image"):
+            for key in ("imageUrl", "mainImageUrl", "thumbnailUrl"):
+                v = d.get(key)
+                if isinstance(v, str) and v.startswith("http"):
+                    result["image"] = v; break
+        if not result.get("stock"):
+            salable = d.get("isSalable") or d.get("isSaleable") or d.get("available")
+            if salable is False: result["stock"] = "Stok Yok"
+            elif salable is True: result["stock"] = "Stokta Var"
+            qty = d.get("stockQty") or d.get("stockCount") or d.get("quantity")
+            if isinstance(qty, (int, float)):
+                result["stock"] = "Stok Yok" if qty == 0 else "Stokta Var"
+        if not result.get("rating"):
+            for key in ("rating", "averageRating", "ratingScore", "score"):
+                v = d.get(key)
+                if isinstance(v, (int, float)) and 0 < v <= 5:
+                    result["rating"] = float(v); break
+                if isinstance(v, dict):
+                    inner = v.get("average") or v.get("averageScore") or v.get("value")
+                    if isinstance(inner, (int, float)) and 0 < inner <= 5:
+                        result["rating"] = float(inner); break
+                    if isinstance(inner, (int, float)) and 0 < inner <= 100:
+                        result["rating"] = round(inner / 20, 1); break
+        if not result.get("review_count"):
+            for key in ("reviewCount", "ratingCount", "totalReviews", "commentCount"):
+                v = d.get(key)
+                if isinstance(v, int) and v >= 0:
+                    result["review_count"] = v; break
+        for key in ("product", "pageProps", "productDetail", "data", "price", "listing"):
+            sub = d.get(key)
+            if isinstance(sub, dict): _dig(sub, depth + 1)
+
+    _dig(j)
+    return result if (result.get("price") or result.get("title")) else None
+
+
+def _stock_from_state(state: dict) -> str:
     product = state.get("product", {})
-    is_salable = product.get("isSalable") or product.get("isSaleable")
-    if is_salable is False:
-        return "Stok Yok"
-    stock_qty = product.get("stockQty") or product.get("stock")
-    if isinstance(stock_qty, (int, float)):
-        return "Stok Yok" if stock_qty == 0 else "Stokta Var"
-    if is_salable is True:
-        return "Stokta Var"
+    salable = product.get("isSalable") or product.get("isSaleable")
+    if salable is False: return "Stok Yok"
+    qty = product.get("stockQty") or product.get("stock")
+    if isinstance(qty, (int, float)): return "Stok Yok" if qty == 0 else "Stokta Var"
+    if salable is True: return "Stokta Var"
     return "Bilinmiyor"
 
 
-def _extract_coupon_from_state(state: dict) -> Optional[str]:
-    """window.productState'den kupon bilgisini çıkar."""
-    product = state.get("product", {}) or {}
-    for key in ("couponText", "couponTitle", "couponName", "merchantCoupon", "couponDescription"):
-        val = product.get(key)
-        if val and isinstance(val, str) and val.strip():
-            return val.strip()[:200]
-    coupons = product.get("coupons") or product.get("merchantCoupons") or []
-    for c in (coupons if isinstance(coupons, list) else []):
-        if isinstance(c, dict):
-            t = c.get("title") or c.get("text") or c.get("name") or c.get("description") or ""
-            if t:
-                return str(t)[:200]
+def _image_from_state(state: dict) -> Optional[str]:
+    product = state.get("product", {})
+    for path in [["mainImageUrl"], ["imageUrl"], ["images", 0, "url"], ["images", 0], ["image"]]:
+        d = product
+        for k in path:
+            if isinstance(d, dict): d = d.get(k)
+            elif isinstance(d, list) and isinstance(k, int) and len(d) > k: d = d[k]
+            else: d = None; break
+        if isinstance(d, str) and d.startswith("http"): return d
     return None
 
 
-def _extract_variants_from_state(state: dict) -> Optional[list]:
-    """window.productState'den varyantları çıkar."""
+def _coupon_from_state(state: dict) -> Optional[str]:
+    product = state.get("product", {}) or {}
+    for key in ("couponText", "couponTitle", "couponName", "merchantCoupon"):
+        val = product.get(key)
+        if val and isinstance(val, str) and val.strip(): return val.strip()[:200]
+    for c in (product.get("coupons") or product.get("merchantCoupons") or []):
+        if isinstance(c, dict):
+            t = c.get("title") or c.get("text") or c.get("name") or ""
+            if t: return str(t)[:200]
+    return None
+
+
+def _variants_from_state(state: dict) -> Optional[list]:
     product = state.get("product", {}) or {}
     raw = (product.get("variants") or product.get("listings") or
            product.get("skus") or product.get("variantList") or [])
-    if not raw or not isinstance(raw, list):
-        return None
-    parsed = []
-    seen: set = set()
+    if not raw or not isinstance(raw, list): return None
+    parsed, seen = [], set()
     for var in raw:
-        if not isinstance(var, dict):
-            continue
+        if not isinstance(var, dict): continue
         name_parts = []
-        for attr_key in ("color", "colorName", "size", "sizeName", "attribute", "attributeValue", "description"):
-            v = (var.get(attr_key) or "").strip()
-            if v and v not in name_parts:
-                name_parts.append(v)
-        name = " / ".join(name_parts) if name_parts else (var.get("id") or var.get("sku") or "")
-        if not name or name in seen:
-            continue
+        for attr in ("color", "colorName", "size", "sizeName", "attribute", "attributeValue"):
+            v = (var.get(attr) or "").strip()
+            if v and v not in name_parts: name_parts.append(v)
+        name = " / ".join(name_parts) or (var.get("id") or var.get("sku") or "")
+        if not name or name in seen: continue
         seen.add(name)
         vp = None
         for pk in ("price", "finalPrice", "discountedPrice", "currentPrice"):
             pv = var.get(pk)
-            if isinstance(pv, dict):
-                pv = pv.get("value") or pv.get("finalPrice")
-            if isinstance(pv, (int, float)) and pv > 0:
-                vp = float(pv)
-                break
+            if isinstance(pv, dict): pv = pv.get("value") or pv.get("finalPrice")
+            if isinstance(pv, (int, float)) and pv > 0: vp = float(pv); break
         in_stock = not (var.get("outOfStock") or (var.get("stockQty") or 1) == 0)
         parsed.append({"name": str(name)[:100], "price": vp, "in_stock": in_stock})
-        if len(parsed) >= 50:
-            break
-    return parsed if parsed else None
-
-
-def _extract_price_from_next_data(j: dict) -> Optional[float]:
-    """__NEXT_DATA__ içindeki fiyatı bul — recursive arama."""
-    txt = json.dumps(j, ensure_ascii=False)
-    for pattern in [
-        r'"finalPrice"\s*:\s*([\d]+(?:\.\d+)?)',
-        r'"discountedPrice"\s*:\s*([\d]+(?:\.\d+)?)',
-        r'"currentPrice"\s*:\s*([\d]+(?:\.\d+)?)',
-        r'"salePrice"\s*:\s*([\d]+(?:\.\d+)?)',
-        r'"price"\s*:\s*([\d]+(?:\.\d+)?)',
-    ]:
-        m = re.search(pattern, txt)
-        if m:
-            try:
-                v = float(m.group(1))
-                if v > 0:
-                    return v
-            except:
-                pass
-    return None
-
-
-# ==========================================
-# DOM PRICE ENGINE V11
-# Obfuscated class isimlerine bağımlılık kaldırıldı.
-# data-test-id attributeları + geniş fallback'ler.
-# ==========================================
-async def _extract_dom_price(page) -> Optional[float]:
-
-    # Kirletici elementleri DOM'dan kaldır
-    try:
-        await page.evaluate("""
-            ['[data-test-id="see-earnings"]',
-             '[data-test-id="see-earnings-tooltip"]',
-             '[data-test-id="payment-options"]',
-             '[data-test-id="PremiumBanner"]',
-             '[data-test-id="merchant-coupons"]',
-             '[data-test-id="prev-price"]'
-            ].forEach(sel => document.querySelectorAll(sel).forEach(el => el.remove()));
-        """)
-    except:
-        pass
-
-    # --------------------------------------------------
-    # 1. Sepete özel fiyat — checkout-price container
-    # --------------------------------------------------
-    try:
-        el = await page.query_selector('[data-test-id="checkout-price"]')
-        if el:
-            text = (await el.inner_text()).strip()
-            for raw in re.findall(r'([\d\.]+[,]\d{2}|\d+\.?\d*)\s*(?:TL|₺)', text):
-                v = parse_price_tr_clean(raw)
-                if v and v > 0:
-                    log.debug(f"[HB DOM] checkout-price → {v}")
-                    return v
-    except:
-        pass
-
-    # --------------------------------------------------
-    # 2. Normal fiyat — default-price
-    # --------------------------------------------------
-    try:
-        el = await page.query_selector('[data-test-id="default-price"]')
-        if el:
-            text = (await el.inner_text()).strip().split('\n')[0]
-            v = parse_price_tr_clean(text)
-            if v and v > 0:
-                log.debug(f"[HB DOM] default-price → {v}")
-                return v
-    except:
-        pass
-
-    # --------------------------------------------------
-    # 3. price-box / price-value attribute'ları (alternatif)
-    # --------------------------------------------------
-    try:
-        for sel in [
-            '[data-test-id="price-value"]',
-            '[data-test-id="buybox-price"]',
-            '[data-test-id="price"] [data-test-id="default-price"]',
-            '[class*="price-value"]',
-            '[class*="priceValue"]',
-            '[class*="finalPrice"]',
-            '[class*="product-price"]',
-            'span[itemprop="price"]',
-        ]:
-            el = await page.query_selector(sel)
-            if el:
-                text = (await el.inner_text()).strip()
-                v = parse_price_tr_clean(text)
-                if v and v > 0:
-                    log.debug(f"[HB DOM] {sel} → {v}")
-                    return v
-    except:
-        pass
-
-    # --------------------------------------------------
-    # 4. price bloğu — TL değerlerini tara (en küçük = satış fiyatı)
-    # --------------------------------------------------
-    try:
-        price_block = await page.query_selector('[data-test-id="price"]')
-        if price_block:
-            text = (await price_block.inner_text()).strip()
-            candidates = []
-            for raw in re.findall(r'([\d\.]+[,]\d{2})', text):
-                v = parse_price_tr_clean(raw)
-                if v and v > 0:
-                    candidates.append(v)
-            if candidates:
-                result = min(candidates)
-                log.debug(f"[HB DOM] price-block min → {result}")
-                return result
-    except:
-        pass
-
-    # --------------------------------------------------
-    # 5. itemprop="price" meta tag
-    # --------------------------------------------------
-    try:
-        el = await page.query_selector('meta[itemprop="price"]')
-        if el:
-            content = await el.get_attribute("content")
-            if content:
-                v = parse_price_tr_clean(content)
-                if v and v > 0:
-                    log.debug(f"[HB DOM] itemprop meta → {v}")
-                    return v
-    except:
-        pass
-
-    log.warning("[HB DOM] Hiçbir DOM seçici fiyat bulamadı")
-    return None
-
-
-# ==========================================
-# HELPERS
-# ==========================================
-def _extract_price_dict(d):
-    if not isinstance(d, dict):
-        return None
-
-    keys = [
-        "sortPrice",
-        "priceValue",
-        "discountedPrice",
-        "finalPrice",
-        "currentPrice",
-        "salePrice",
-        "price",
-        "value"
-    ]
-
-    for k in keys:
-        v = d.get(k)
-        if v:
-            return parse_price_tr_clean(str(v))
-
-    return None
-
-
-def _extract_price_text(text):
-
-    patterns = [
-        r'"sortPrice":("?[\d\.,]+"?)',
-        r'"priceValue":("?[\d\.,]+"?)',
-        r'"finalPrice":("?[\d\.,]+"?)',
-        r'"currentPrice":("?[\d\.,]+"?)',
-        r'"price":("?[\d\.,]+"?)',
-        r'([\d\.\,]+)\s*(TL|₺)'
-    ]
-
-    for p in patterns:
-        m = re.search(p, text)
-        if m:
-            return parse_price_tr_clean(m.group(1))
-
-    return None
-
-
-def _find(text, patterns):
-    for p in patterns:
-        m = re.search(p, text, re.DOTALL)
-        if m:
-            return m.group(1)
-    return None
+        if len(parsed) >= 50: break
+    return parsed or None

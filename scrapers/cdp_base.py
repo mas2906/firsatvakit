@@ -142,24 +142,40 @@ class BrowserPool:
     RESTART_AFTER = 100
 
     def __init__(self, max_pages: int = 8, name: str = "pool",
-                 shared_browser=None, shared_pw=None):
+                 shared_browser=None, shared_pw=None, use_proxy: bool = False):
         self.max_pages = max_pages
         self.name = name
         self._pw = shared_pw
         self._browser = shared_browser
-        self._shared = shared_browser is not None  # browser'ı biz başlatmadık
+        self._shared = shared_browser is not None
         self._context = None
         self._sem = asyncio.Semaphore(max_pages)
         self._lock = asyncio.Lock()
         self._started = False
         self._page_count = 0
         self._restart_lock = asyncio.Lock()
+        self._use_proxy = use_proxy
+        self._current_proxy: str | None = None
+
+    def _get_proxy_dict(self):
+        if not self._use_proxy:
+            return None
+        try:
+            from scrapers.proxy_pool import get_proxy_pool
+            pool = get_proxy_pool()
+            if not pool.has_proxies:
+                return None
+            self._current_proxy = pool.get()
+            return pool.playwright_dict(self._current_proxy)
+        except Exception:
+            return None
 
     async def _new_context(self):
         _w = random.choice([1280, 1366, 1440, 1920])
         _h = random.choice([768, 800, 900, 1080])
         _ua = random.choice(UA_POOL)
-        ctx = await self._browser.new_context(
+        proxy_dict = self._get_proxy_dict()
+        kwargs: dict = dict(
             viewport={"width": _w, "height": _h},
             user_agent=_ua,
             locale="tr-TR",
@@ -168,6 +184,10 @@ class BrowserPool:
             ignore_https_errors=True,
             extra_http_headers=get_stealth_headers(_ua),
         )
+        if proxy_dict:
+            kwargs["proxy"] = proxy_dict
+            log.info(f"[BrowserPool/{self.name}] Proxy aktif: {proxy_dict['server']}")
+        ctx = await self._browser.new_context(**kwargs)
         await ctx.add_init_script(STEALTH_SCRIPT)
         return ctx
 

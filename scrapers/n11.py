@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import asyncio
+import time as _time
 from typing import Optional
 
 import httpx
@@ -62,22 +63,76 @@ except ImportError:
     CurlSession = None
     CURL_CFFI_AVAILABLE = False
 
-_limiter      = RateLimiter(0.0, 0.05)
-_limiter_fast = RateLimiter(0.0, 0.02)
-_limiter_gql  = RateLimiter(0.0, 0.02)
+# N11: %38 timeout vardı — GQL 0.3-0.7s çok agresifti
+# GQL API rate limit: ~60 req/dk max (N11 CDN kısıtlaması)
+# Beklenen: ~20 istek/dk → 1984 ürün → ~7 tur/gün
+_limiter      = RateLimiter(1.2, 2.5)   # HTML fallback (eskiden 0.8-1.8)
+_limiter_fast = RateLimiter(0.6, 1.2)   # price_only (eskiden 0.4-0.9)
+_limiter_gql  = RateLimiter(0.8, 2.0)   # GraphQL birincil (eskiden 0.3-0.7 — blok yiyordu!)
 
-# Global persistent sessions — TCP/TLS maliyetini ortadan kaldırır
-_CURL_SESSION: Optional[CurlSession] = None
-_CURL_LOCK: Optional[asyncio.Lock] = None
+# ── Session havuzları — Amazon gibi paralel fingerprint ──────────
+IMPERSONATE_POOL        = ["chrome136", "chrome131", "chrome124", "chrome120"]
+MOBILE_IMPERSONATE_POOL = ["safari18_0", "safari17_5", "safari17_0", "safari16"]
+_POOL_SIZE        = 2
+_MOBILE_POOL_SIZE = 2
+
+_SESSIONS: list = []
+_SESSIONS_LOCK: Optional[asyncio.Lock] = None
+_session_idx = 0
+
+_MOBILE_SESSIONS: list = []
+_MOBILE_SESSIONS_LOCK: Optional[asyncio.Lock] = None
+_mobile_session_idx = 0
+
+_N11_MOBILE_UAS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.7 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+]
+
+# ── Arama oturumu sayacı ─────────────────────────────────────────
+_search_counter = 0
+_SEARCH_RESET_EVERY = 40
+
+# ── Circuit breaker ──────────────────────────────────────────────
+_curl_block_streak   = 0
+_curl_disabled_until = 0.0
+_CURL_BLOCK_LIMIT    = 4
+_CURL_COOLDOWN       = 90
+
+def _curl_ok() -> bool:
+    return CURL_CFFI_AVAILABLE and _time.time() > _curl_disabled_until
+
+def _on_curl_block() -> None:
+    global _curl_block_streak, _curl_disabled_until
+    _curl_block_streak += 1
+    if _curl_block_streak >= _CURL_BLOCK_LIMIT:
+        _curl_disabled_until = _time.time() + _CURL_COOLDOWN
+        _curl_block_streak = 0
+        log.warning(f"[n11/curl] {_CURL_BLOCK_LIMIT} ardışık block → {_CURL_COOLDOWN}s askıya alındı")
+
+def _on_curl_success() -> None:
+    global _curl_block_streak
+    _curl_block_streak = 0
+
+# ── httpx client ─────────────────────────────────────────────────
 _HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 _HTTPX_LOCK: Optional[asyncio.Lock] = None
 
 
-def _get_curl_lock() -> asyncio.Lock:
-    global _CURL_LOCK
-    if _CURL_LOCK is None:
-        _CURL_LOCK = asyncio.Lock()
-    return _CURL_LOCK
+def _get_sessions_lock() -> asyncio.Lock:
+    global _SESSIONS_LOCK
+    if _SESSIONS_LOCK is None:
+        _SESSIONS_LOCK = asyncio.Lock()
+    return _SESSIONS_LOCK
+
+
+def _get_mobile_lock() -> asyncio.Lock:
+    global _MOBILE_SESSIONS_LOCK
+    if _MOBILE_SESSIONS_LOCK is None:
+        _MOBILE_SESSIONS_LOCK = asyncio.Lock()
+    return _MOBILE_SESSIONS_LOCK
 
 
 def _get_httpx_lock() -> asyncio.Lock:
@@ -87,19 +142,62 @@ def _get_httpx_lock() -> asyncio.Lock:
     return _HTTPX_LOCK
 
 
-async def _get_curl_session() -> CurlSession:
-    global _CURL_SESSION
-    async with _get_curl_lock():
-        if _CURL_SESSION is None:
-            imp = random.choice(["chrome124", "chrome120", "chrome136"])
-            _CURL_SESSION = CurlSession(impersonate=imp, timeout=15)
-            log.info(f"[n11] curl session oluşturuldu: {imp}")
-        return _CURL_SESSION
+async def _get_or_create_session() -> tuple:
+    global _SESSIONS, _session_idx
+    new_entry = None
+    async with _get_sessions_lock():
+        if len(_SESSIONS) < _POOL_SIZE:
+            imp = random.choice(IMPERSONATE_POOL)
+            s = CurlSession(impersonate=imp, timeout=12)
+            _SESSIONS.append((s, imp))
+            new_entry = (s, imp)
+            log.info(f"[n11] Yeni curl session: {imp}")
+        _session_idx = (_session_idx + 1) % len(_SESSIONS)
+        result = _SESSIONS[_session_idx]
+    if new_entry:
+        s, imp = new_entry
+        try:
+            await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(UA_POOL)}, timeout=8)
+        except Exception:
+            pass
+    return result
 
 
 def _reset_curl_session() -> None:
-    global _CURL_SESSION
-    _CURL_SESSION = None
+    global _SESSIONS, _session_idx
+    if _SESSIONS:
+        bad = _session_idx % len(_SESSIONS)
+        _SESSIONS[bad] = None  # type: ignore
+        _SESSIONS = [s for s in _SESSIONS if s is not None]
+
+
+async def _get_mobile_session() -> tuple:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    new_entry = None
+    async with _get_mobile_lock():
+        if len(_MOBILE_SESSIONS) < _MOBILE_POOL_SIZE:
+            imp = random.choice(MOBILE_IMPERSONATE_POOL)
+            s = CurlSession(impersonate=imp, timeout=12)
+            _MOBILE_SESSIONS.append((s, imp))
+            new_entry = (s, imp)
+            log.info(f"[n11/mobile] Yeni session: {imp}")
+        _mobile_session_idx = (_mobile_session_idx + 1) % len(_MOBILE_SESSIONS)
+        result = _MOBILE_SESSIONS[_mobile_session_idx]
+    if new_entry:
+        s, imp = new_entry
+        try:
+            await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(_N11_MOBILE_UAS)}, timeout=8)
+        except Exception:
+            pass
+    return result
+
+
+def _reset_mobile_session() -> None:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    if _MOBILE_SESSIONS:
+        bad = _mobile_session_idx % len(_MOBILE_SESSIONS)
+        _MOBILE_SESSIONS[bad] = None  # type: ignore
+        _MOBILE_SESSIONS = [s for s in _MOBILE_SESSIONS if s is not None]
 
 
 async def _get_httpx_client() -> httpx.AsyncClient:
@@ -261,9 +359,19 @@ def _parse_window_model(html: str) -> tuple:
         return None, False, None, None, None
 
     start = m.start() + len(m.group(0)) - 1
-    depth = 0
-    end = start
+    depth, in_str, esc, end = 0, False, False, start
     for i, ch in enumerate(html[start:], start):
+        if esc:
+            esc = False
+            continue
+        if ch == '\\' and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
         if ch == '{':
             depth += 1
         elif ch == '}':
@@ -535,24 +643,167 @@ def _parse_soup(soup: BeautifulSoup) -> dict:
     }
 
 
+async def _via_mobile(url: str) -> Optional[dict]:
+    """Layer 1: iOS Safari / Android Chrome TLS fingerprint — az bot tespiti."""
+    if not CURL_CFFI_AVAILABLE:
+        return None
+    try:
+        session, imp = await _get_mobile_session()
+        ua = random.choice(_N11_MOBILE_UAS)
+        is_ios = "iPhone" in ua or "iPad" in ua
+        headers: dict = {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.n11.com/",
+        }
+        if not is_ios:
+            v = re.search(r"Chrome/(\d+)", ua)
+            cv = v.group(1) if v else "136"
+            headers.update({
+                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+            })
+        r = await session.get(url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code == 404:
+            return {"dead_url": True}
+        if r.status_code in (403, 429) or r.status_code != 200:
+            _reset_mobile_session()
+            return None
+        html = r.text
+        if not html or len(html) < 3000:
+            return None
+        if any(t.lower() in html[:3000].lower() for t in CLOUDFLARE_TITLES):
+            _reset_mobile_session()
+            return None
+        result = await asyncio.to_thread(lambda: _parse_html(html))
+        if result and result.get("price"):
+            log.info(f"[n11/mobile] ✔ ua={'iOS' if is_ios else 'Android'} {result.get('title','')[:50]} | {result.get('price')}")
+        return result
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.debug(f"[n11/mobile] Hata: {e}")
+        _reset_mobile_session()
+        return None
+
+
 async def _via_curl_cffi(url: str) -> Optional[dict]:
     try:
-        s = await _get_curl_session()
+        s, imp = await _get_or_create_session()
         html_text = await stream_fetch(
             s, url, json_markers=["window.model"], max_kb=1000, timeout=12,
-            headers={"Referer": "https://www.n11.com/"}
+            headers={"Referer": "https://www.n11.com/", "User-Agent": random.choice(UA_POOL)}
         )
         if not html_text or len(html_text) < 5000:
-            return None
-        if any(t.lower() in html_text.lower() for t in CLOUDFLARE_TITLES):
+            _on_curl_block()
             _reset_curl_session()
             return None
-
-        return await asyncio.to_thread(lambda: _parse_html(html_text))
+        if any(t.lower() in html_text.lower() for t in CLOUDFLARE_TITLES):
+            _on_curl_block()
+            _reset_curl_session()
+            return None
+        result = await asyncio.to_thread(lambda: _parse_html(html_text))
+        if result and result.get("price"):
+            _on_curl_success()
+        return result
     except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
         log.error(f"[n11/curl_cffi] Hata: {e}")
         _reset_curl_session()
         return None
+
+
+async def _via_playwright_search(url: str, pool=None) -> Optional[dict]:
+    """N11 arama motorunda content_id ile arama yapıp ürün sayfasını parse eder.
+    Her 40 aramada bir ana sayfaya giderek oturumu yeniler."""
+    global _search_counter
+
+    content_id = _extract_content_id(url)
+    if not content_id:
+        log.warning(f"[n11/search] content_id çıkarılamadı, doğrudan gidiliyor")
+        return await _via_playwright(url, pool=pool)
+
+    _search_counter += 1
+    do_reset = (_search_counter % _SEARCH_RESET_EVERY == 1)
+
+    if pool is None:
+        async with get_playwright_sem():
+            return await _launch_playwright(url)
+
+    page = await pool.acquire()
+    try:
+        from scrapers.cdp_base import setup_resource_blocking
+        await setup_resource_blocking(page)
+        await page.add_init_script(STEALTH_SCRIPT)
+
+        if do_reset:
+            log.info(f"[n11/search] #{_search_counter} — oturum yenileniyor (ana sayfa)")
+            try:
+                await page.goto("https://www.n11.com/", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+            except Exception:
+                pass
+
+        search_url = f"https://www.n11.com/arama?q={content_id}"
+        log.info(f"[n11/search] #{_search_counter} content_id={content_id}")
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+        if page.is_closed():
+            return None
+        await asyncio.sleep(random.uniform(0.8, 1.5))
+
+        product_href = None
+        for sel in [
+            ".product-item a.product-image",
+            ".product-item a.product-title-link",
+            ".column.a a[href*='/urun/']",
+            ".prd-grid li a[href*='/urun/']",
+            "a[href*='/urun/']",
+        ]:
+            el = await page.query_selector(sel)
+            if el:
+                product_href = await el.get_attribute("href")
+                if product_href:
+                    break
+
+        if product_href:
+            target = product_href if product_href.startswith("http") else f"https://www.n11.com{product_href}"
+            log.info(f"[n11/search] Arama sonucu → {target[:80]}")
+            await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+        else:
+            log.info(f"[n11/search] Arama sonucu yok, doğrudan URL deneniyor")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        if page.is_closed():
+            return None
+
+        await page.mouse.wheel(0, 500)
+        await asyncio.sleep(2)
+
+        html = await page.content() if not page.is_closed() else None
+        if html:
+            data = _parse_html(html)
+            if data and data.get("price"):
+                log.info(f"[n11/search] ✔ {data.get('title','')[:50]} | {data.get('price')}")
+            return data
+        return None
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.error(f"[n11/search] Hata: {e}")
+        return None
+    finally:
+        await pool.release(page)
 
 
 async def _via_playwright(url: str, pool=None) -> Optional[dict]:
@@ -613,25 +864,43 @@ async def _launch_playwright(url: str) -> Optional[dict]:
     return None
 
 
-async def scrape_n11(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
+async def scrape_n11(url: str, pool=None, price_only: bool = False,
+                     cached_image: str = None) -> Optional[dict]:
+    await (_limiter_fast if price_only else _limiter).wait()
+
     # Layer 0: GraphQL — en hızlı, Cloudflare yok, gerçek fiyat
     data = await _via_graphql(url)
     if data and data.get("price"):
-        return _price_only_filter(data, price_only)
+        return _price_only_filter(data, price_only, cached_image)
 
-    # Layer 1: curl_cffi + window.model
-    await (_limiter_fast if price_only else _limiter).wait()
+    # Layer 1: Mobil curl (iOS Safari / Android Chrome TLS fingerprint)
     if CURL_CFFI_AVAILABLE:
+        data = await _via_mobile(url)
+        if data and data.get("dead_url"):
+            return data
+        if data and data.get("price"):
+            _on_curl_success()
+            return _price_only_filter(data, price_only, cached_image)
+
+    # Layer 2: Desktop curl_cffi + window.model
+    if _curl_ok():
         data = await _via_curl_cffi(url)
-        if data:
-            return _price_only_filter(data, price_only)
+        if data and data.get("dead_url"):
+            return data
+        if data and data.get("price"):
+            return _price_only_filter(data, price_only, cached_image)
+    else:
+        log.info(f"[n11/curl] circuit breaker aktif — {max(0, _curl_disabled_until - _time.time()):.0f}s kaldı")
 
-    # Layer 2: Playwright
-    result = await _via_playwright(url, pool=pool)
-    return _price_only_filter(result, price_only)
+    # Layer 3: Arama motoru Playwright
+    result = await _via_playwright_search(url, pool=pool)
+    return _price_only_filter(result, price_only, cached_image)
 
 
-def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
+def _price_only_filter(data: Optional[dict], price_only: bool, cached_image: str = None) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    result = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    if cached_image:
+        result["image_url"] = cached_image
+    return result

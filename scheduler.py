@@ -62,7 +62,7 @@ async def _cleanup_worker():
         try:
             db = get_db()
             cur = db.execute(
-                "DELETE FROM scraper_errors WHERE occurred_at < datetime('now', '-24 hours')"
+                "DELETE FROM scraper_errors WHERE occurred_at::timestamp < NOW() - INTERVAL '24 hours'"
             )
             deleted = cur.rowcount
             db.commit()
@@ -85,7 +85,7 @@ async def _requeue_worker():
             stale = db.execute("""
                 UPDATE scan_queue SET status='pending', updated_at=?
                 WHERE status='processing'
-                  AND updated_at < datetime('now', '-10 minutes')
+                  AND updated_at::timestamp < NOW() - INTERVAL '10 minutes'
             """, (now,)).rowcount
             if stale:
                 log.info(f"[requeue] {stale} takılı iş pending'e döndürüldü")
@@ -122,7 +122,7 @@ async def _requeue_worker():
                 WHERE d.active = 1
                   AND p.platform IS NOT NULL
                   AND p.source_url IS NOT NULL
-                  AND (p.last_seen_at IS NULL OR p.last_seen_at < datetime('now', '-5 minutes'))
+                  AND (p.last_seen_at IS NULL OR p.last_seen_at::timestamp < NOW() - INTERVAL '5 minutes')
                   AND NOT EXISTS (
                       SELECT 1 FROM scan_queue sq
                       WHERE sq.product_id = p.id
@@ -238,7 +238,7 @@ async def _requeue_worker():
             # 5. Zaman bazlı temizlik — 48 saatlik done/failed kayıtları sil
             cleaned = db.execute(
                 "DELETE FROM scan_queue WHERE status IN ('done', 'failed')"
-                " AND updated_at < datetime('now', '-48 hours')"
+                " AND updated_at::timestamp < NOW() - INTERVAL '48 hours'"
             ).rowcount
             if cleaned:
                 db.commit()

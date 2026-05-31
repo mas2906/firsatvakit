@@ -33,53 +33,46 @@ API_KEY       = os.getenv("SCRAPER_SERVICE_KEY", "firsatvakti-scraper-key")
 WEBHOOK_KEY   = os.getenv("FRONTEND_WEBHOOK_KEY", "firsatvakti-webhook-key")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 
-# Toplam slot havuzu — aktif platform sayısına göre orantılı dağıtılır
-TOTAL_SLOTS = 24
-
-# Her platformun ağırlığı — eşit dağılım
-BASE_WEIGHTS = {
-    "amazon":      6,
-    "trendyol":    6,
-    "n11":         6,
-    "hepsiburada": 6,
+# Platform başına eş zamanlı iş sayısı
+# Rate limiter paylaşıldığından concurrent artırmak hız kazandırmaz,
+# sadece in-flight sayısını artırır (pipeline). Blok riskine göre ayarlandı.
+#
+# Hedef günlük tur sayısı (ürün sayısı / (istek/dk × 1440)):
+#   Trendyol:    5166 ürün / 14/dk  = ~369 dk/tur → ~4 tur/gün
+#   Amazon:      2407 ürün /  8/dk  = ~301 dk/tur → ~5 tur/gün
+#   Hepsiburada: 2717 ürün / 12/dk  = ~226 dk/tur → ~6 tur/gün
+#   N11:         1984 ürün / 20/dk  = ~99  dk/tur → ~14 tur/gün (GQL hızlı)
+PLATFORM_CONCURRENT = {
+    "amazon":      2,   # CAPTCHA riski yüksek → az concurrent (eskiden 3)
+    "trendyol":    4,   # Cloudflare bypass → orta (eskiden 5)
+    "hepsiburada": 2,   # Playwright ağır → az concurrent (eskiden 3)
+    "n11":         3,   # GQL hızlı → orta concurrent (değişmedi)
 }
 
-# Saate göre aktif platformlar
-#   00-07 → sadece Amazon  (gece algoritma güncellemeleri)
-#   07-09 → Amazon + Trendyol
-#   09-21 → tüm platformlar
-#   21-00 → Amazon + Trendyol
+BASE_WEIGHTS = {
+    "amazon":      1,
+    "trendyol":    1,
+    "n11":         1,
+    "hepsiburada": 1,
+}
+
 SCHEDULE = {
+    # curl_cffi mobile bypass — gece de güvenli
+    "trendyol":    list(range(0, 24)),
+    # GQL API — blok riski çok düşük
+    "n11":         list(range(0, 24)),
     "amazon":      list(range(0, 24)),
-    "trendyol":    list(range(7, 24)),
-    "n11":         list(range(9, 21)),
-    "hepsiburada": list(range(9, 21)),
+    "hepsiburada": list(range(0, 24)),
 }
 
 def _is_active(platform: str) -> bool:
     return datetime.now().hour in SCHEDULE[platform]
 
-_AMAZON_SLOTS_BY_HOUR = {
-    # gece (00-07): sadece Amazon → 24
-    **{h: 24 for h in range(0, 7)},
-    # sabah / akşam (07-09, 21-00): Amazon + Trendyol → 12+12
-    **{h: 12 for h in range(7, 9)},
-    **{h: 12 for h in range(21, 24)},
-    # gündüz (09-21): 4 platform → 6+6+6+6
-    **{h: 6 for h in range(9, 21)},
-}
-
 def _calc_concurrent(platform: str) -> int:
-    """Aktif platformlara TOTAL_SLOTS'u ağırlıklı olarak dağıt."""
-    if platform == "amazon":
-        return _AMAZON_SLOTS_BY_HOUR.get(datetime.now().hour, 24)
-    active = [p for p in SCHEDULE if _is_active(p)]
-    total_w = sum(BASE_WEIGHTS[p] for p in active)
-    slots = max(6, round(TOTAL_SLOTS * BASE_WEIGHTS[platform] / total_w))
-    return slots
+    return PLATFORM_CONCURRENT.get(platform, 1)
 
 def _calc_batch(concurrent: int) -> int:
-    return max(concurrent, round(concurrent * 1.25))
+    return concurrent * 2  # Pipeline dolsun diye 2x batch çek
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scrapers.router import scrape_product
@@ -88,23 +81,47 @@ from scrapers.cdp_base import BrowserPool
 # Platform başına son başarılı tarama zamanı — hata izleme için
 _last_success: dict[str, float] = {}
 _error_streak_logged: dict[str, bool] = {}
-ERROR_RESET_SECS = 5 * 60  # 5 dakika
+ERROR_RESET_SECS = 15 * 60  # 15 dakika (concurrent artınca false positive azaltmak için)
+
+
+def _task_done_callback(task: asyncio.Task):
+    """Future exception yakalanmıyor hatasını önler."""
+    if not task.cancelled():
+        exc = task.exception() if not task.cancelled() else None
+        if exc:
+            log.error(f"[task] Yakalanmamış exception: {exc}")
 
 
 async def process_job(job, client, sem, pool):
     async with sem:
-        pid        = job["product_id"]
-        url        = job["url"]
-        platform   = job["platform"]
-        price_only = job.get("price_only", False)
+        pid          = job["product_id"]
+        url          = job["url"]
+        platform     = job["platform"]
+        price_only   = job.get("price_only", False)
+        cached_image = job.get("cached_image") or None
 
         log.info(f"[{platform}] Scraping #{pid}{' [fiyat]' if price_only else ''}")
-        _timeout = 60 if platform in ("hepsiburada", "amazon") else 30
+        # Timeout: ağ + parse + rate limiter bekleme dahil
+        # HB 150s → 90s (Playwright yavaş ama 150s çok fazla)
+        # Amazon 65s → 50s (curl_cffi + mobile yeterince hızlı)
+        # Trendyol 45s → 35s (mobile layer genellikle 3-8s'de biter)
+        # N11 45s → 25s (GQL birincil → çok hızlı)
+        _timeout = (90  if platform == "hepsiburada" else
+                    50  if platform == "amazon"       else
+                    25  if platform == "n11"          else
+                    35)
         try:
             data = await asyncio.wait_for(
-                scrape_product(url, platform, pool=pool, price_only=price_only),
+                scrape_product(url, platform, pool=pool, price_only=price_only, cached_image=cached_image),
                 timeout=_timeout,
             )
+
+            # Ölü URL tespiti — DNS çözümlenemedi, ürün kaldırılmış veya 404
+            if data and (data.get("dead_url") or data.get("not_found")):
+                log.warning(f"[{platform}] ☠ #{pid} ÖLÜURL — pasife alınıyor: {url[:60]}")
+                await send_webhook(client, pid, url, platform, {"error": "dead_url"})
+                return
+
             if data and data.get("price"):
                 title = (data.get("title") or "")[:50]
                 log.info(f"[{platform}] ✔ #{pid} fiyat={data['price']} stok={data.get('stock','-')} title={title!r}")
@@ -188,6 +205,7 @@ async def poll_platform(platform: str, client: httpx.AsyncClient, pool):
                                 task = asyncio.create_task(process_job(job, client, sem, pool))
                                 running.add(task)
                                 task.add_done_callback(running.discard)
+                                task.add_done_callback(_task_done_callback)
                             await asyncio.sleep(2)
                             continue
                 except Exception:
@@ -236,6 +254,7 @@ async def poll_platform(platform: str, client: httpx.AsyncClient, pool):
                 task = asyncio.create_task(process_job(job, client, sem, pool))
                 running.add(task)
                 task.add_done_callback(running.discard)
+                task.add_done_callback(_task_done_callback)
 
             await asyncio.sleep(0.1)
 
@@ -302,6 +321,7 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
                         task = asyncio.create_task(process_job(job, client, sem, pool))
                         running.add(task)
                         task.add_done_callback(running.discard)
+                        task.add_done_callback(_task_done_callback)
                     await asyncio.sleep(0.5)
                     continue
             await asyncio.sleep(2)
@@ -311,20 +331,31 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
 
 
 PLATFORM_MAX = {
-    "amazon":      24,
-    "trendyol":    12,
-    "n11":         6,
-    "hepsiburada": 6,
+    "amazon":      3,   # concurrent=2 + 1 buffer (eskiden 4)
+    "trendyol":    5,   # concurrent=4 + 1 buffer (eskiden 6)
+    "n11":         4,   # concurrent=3 + 1 buffer (değişmedi)
+    "hepsiburada": 3,   # concurrent=2 + 1 buffer (eskiden 4)
 }
 
 
+async def _run_platform(platform: str, client, pool, fn):
+    """Tek platform loop'unu süresiz çalıştır — crash sonrası 10s bekleyip yeniden başlat."""
+    while True:
+        try:
+            await fn(platform, client, pool)
+        except Exception as e:
+            log.error(f"[{platform}/{fn.__name__}] Beklenmeyen çıkış: {e} — 10s sonra yeniden başlıyor")
+            await asyncio.sleep(10)
+        except BaseException as e:
+            log.error(f"[{platform}/{fn.__name__}] Kritik çıkış: {e} — 10s sonra yeniden başlıyor")
+            await asyncio.sleep(10)
+
+
 async def main():
-    log.info(f"WSL Local Scraper başladı — TOTAL_SLOTS={TOTAL_SLOTS}")
-    log.info("Slot dağılımı:")
-    log.info(f"  Gece  (00-07): amazon=24")
-    log.info(f"  Sabah (07-09): amazon=12  trendyol=12")
-    log.info(f"  Gündüz(09-21): amazon=6   trendyol=6   n11=6   hepsiburada=6")
-    log.info(f"  Aksam (21-00): amazon=12  trendyol=12")
+    total_c = sum(PLATFORM_CONCURRENT.values())
+    log.info(f"WSL Local Scraper başladı — toplam concurrent={total_c}")
+    for p, c in PLATFORM_CONCURRENT.items():
+        log.info(f"  {p}: concurrent={c} batch={c*2} pool={PLATFORM_MAX[p]}")
 
     pools = {
         p: BrowserPool(max_pages=PLATFORM_MAX[p], name=p)
@@ -337,10 +368,10 @@ async def main():
         async with httpx.AsyncClient() as client:
             await reset_stale_jobs(client)
             await asyncio.gather(*[
-                poll_platform(p, client, pools[p])
+                _run_platform(p, client, pools[p], poll_platform)
                 for p in BASE_WEIGHTS
             ], *[
-                express_lane(p, client, pools[p])
+                _run_platform(p, client, pools[p], express_lane)
                 for p in BASE_WEIGHTS
             ])
     finally:

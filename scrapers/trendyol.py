@@ -29,38 +29,106 @@ import httpx
 
 log = logging.getLogger("trendyol")
 
-_limiter      = RateLimiter(0.0, 0.8)
-_limiter_fast = RateLimiter(0.0, 0.4)
+# Trendyol anti-bot: Cloudflare + JS challenge
+# Mobile (iOS/Android curl_cffi) → birincil katman, orta hız
+# curl_cffi fallback → eskiden 0.3-1.2s'di, çok agresifti → blok yiyordu
+# Beklenen: ~14 istek/dk → 5166 ürün → ~6 tur/gün
+_limiter        = RateLimiter(1.5, 3.0)   # curl_cffi fallback (eskiden 0.3-1.2)
+_limiter_fast   = RateLimiter(0.8, 1.5)   # price_only (eskiden 0.1-0.5)
+_limiter_mobile = RateLimiter(2.0, 4.0)   # iOS/Android birincil (eskiden 1.2-2.8)
 
 _TY_API = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{content_id}"
 
 IMPERSONATE_POOL = ["chrome146", "chrome142", "chrome136", "chrome131", "chrome124", "chrome120"]
+MOBILE_IMPERSONATE_POOL = ["safari18_0", "safari17_5", "safari17_0", "safari16"]
 
-# Global persistent sessions — her scrape'de yeni TCP/TLS kurmayı önler
-_CURL_SESSION: Optional[CurlSession] = None
-_CURL_LOCK = asyncio.Lock()
+_TY_MOBILE_UAS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.7 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+]
+
+_TY_POOL_SIZE = 2
+_SESSIONS: list = []
+_SESSIONS_LOCK = asyncio.Lock()
+_session_idx = 0
+
+# ── Arama oturumu sayacı ─────────────────────────────────────────
+_search_counter = 0
+_SEARCH_RESET_EVERY = 40
+
+# Mobil session pool (iOS Safari / Android Chrome TLS fingerprint)
+_TY_MOBILE_POOL_SIZE = 2
+_MOBILE_SESSIONS: list = []
+_MOBILE_SESSIONS_LOCK = asyncio.Lock()
+_mobile_session_idx = 0
+
 _HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 _HTTPX_LOCK = asyncio.Lock()
 
 
 async def _get_curl_session() -> CurlSession:
-    global _CURL_SESSION
-    async with _CURL_LOCK:
-        if _CURL_SESSION is None:
+    global _SESSIONS, _session_idx
+    new_entry = None
+    async with _SESSIONS_LOCK:
+        if len(_SESSIONS) < _TY_POOL_SIZE:
             imp = random.choice(IMPERSONATE_POOL)
-            _CURL_SESSION = CurlSession(impersonate=imp, timeout=20)
-            # Warm-up tek seferlik — cookie ve TLS session oluştur
-            try:
-                await _CURL_SESSION.get("https://www.trendyol.com/", timeout=8)
-            except Exception:
-                pass
+            s = CurlSession(impersonate=imp, timeout=20)
+            _SESSIONS.append(s)
+            new_entry = s
             log.info(f"[trendyol] curl session oluşturuldu: {imp}")
-        return _CURL_SESSION
+        _session_idx = (_session_idx + 1) % len(_SESSIONS)
+        result = _SESSIONS[_session_idx]
+    if new_entry:
+        try:
+            await new_entry.get("https://www.trendyol.com/", timeout=8)
+        except Exception:
+            pass
+    return result
 
 
 def _reset_curl_session() -> None:
-    global _CURL_SESSION
-    _CURL_SESSION = None
+    global _SESSIONS, _session_idx
+    if _SESSIONS:
+        bad = _session_idx % len(_SESSIONS)
+        _SESSIONS[bad] = None  # type: ignore
+        _SESSIONS = [s for s in _SESSIONS if s is not None]
+        log.info(f"[trendyol] Session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
+
+
+async def _get_mobile_session() -> CurlSession:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    new_entry = None
+    async with _MOBILE_SESSIONS_LOCK:
+        if len(_MOBILE_SESSIONS) < _TY_MOBILE_POOL_SIZE:
+            try:
+                imp = random.choice(MOBILE_IMPERSONATE_POOL)
+                s = CurlSession(impersonate=imp, timeout=15)
+                _MOBILE_SESSIONS.append(s)
+                new_entry = s
+                log.info(f"[trendyol] Mobil session oluşturuldu: {imp}")
+            except Exception as e:
+                log.warning(f"[trendyol] Mobil session oluşturulamadı: {e}")
+                if not _MOBILE_SESSIONS:
+                    raise
+        _mobile_session_idx = (_mobile_session_idx + 1) % len(_MOBILE_SESSIONS)
+        result = _MOBILE_SESSIONS[_mobile_session_idx]
+    if new_entry:
+        try:
+            await new_entry.get("https://www.trendyol.com/", timeout=8,
+                                headers={"User-Agent": random.choice(_TY_MOBILE_UAS)})
+        except Exception:
+            pass
+    return result
+
+
+def _reset_mobile_session() -> None:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    if _MOBILE_SESSIONS:
+        bad = _mobile_session_idx % len(_MOBILE_SESSIONS)
+        _MOBILE_SESSIONS[bad] = None  # type: ignore
+        _MOBILE_SESSIONS = [s for s in _MOBILE_SESSIONS if s is not None]
 
 
 async def _get_httpx_client() -> httpx.AsyncClient:
@@ -144,42 +212,65 @@ async def trendyol_api_fetch(url: str) -> Optional[dict]:
         return None
 
 
-async def scrape_trendyol(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
+async def scrape_trendyol(url: str, pool=None, price_only: bool = False,
+                          cached_image: str = None) -> Optional[dict]:
     """Çok katmanlı Trendyol scraper."""
     await (_limiter_fast if price_only else _limiter).wait()
 
     # NOT: public.trendyol.com NXDOMAIN — Layer 0 API devre dışı
 
+    # ── Katman 0: Mobil curl_cffi (iOS Safari / Android TLS fingerprint) ──
+    if CURL_AVAILABLE:
+        data = await _via_mobile(url)
+        if data and data.get("dead_url"):
+            return data
+        if data and data.get("title") and data.get("price"):
+            log.info(f"[trendyol/mobile] ✔ title={data['title']!r:.50} price={data['price']}")
+            return _price_only_filter(data, price_only, cached_image)
+
     # ── Katman 1: curl_cffi (stream_fetch + __envoy__PROPS) ──
     if CURL_AVAILABLE:
         data = await _via_curl_cffi(url)
+        if data and data.get("dead_url"):
+            return data
         if data and data.get("title") and data.get("price"):
             log.info(f"[trendyol/curl_cffi] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-            return _price_only_filter(data, price_only)
+            return _price_only_filter(data, price_only, cached_image)
 
         # ── Katman 2: httpx (curl_cffi varken fallback) ──────
         data = await _via_httpx(url)
+        if data and data.get("dead_url"):
+            return data
         if data and data.get("title") and data.get("price"):
             log.info(f"[trendyol/httpx] ✔ title={data['title']!r:.50} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-            return _price_only_filter(data, price_only)
+            return _price_only_filter(data, price_only, cached_image)
     else:
         log.warning("[trendyol] curl_cffi yüklü değil, direkt Playwright kullanılıyor")
 
-    # ── Katman 3: Playwright (son çare) ──────────────────────
-    log.info(f"[trendyol] Playwright deneniyor...")
-    data = await _via_playwright(url, pool=pool)
+    # ── Katman 3: Arama motoru Playwright ────────────────────
+    log.info(f"[trendyol] Arama motoru Playwright deneniyor...")
+    data = await _via_playwright_search(url, pool=pool)
+    if data and data.get("dead_url"):
+        return data
     if data and data.get("title"):
         log.info(f"[trendyol/playwright] ✔ title={data['title']!r:.50} price={data.get('price')} image={'✔' if data.get('image_url') else '✘'}")
-        return _price_only_filter(data, price_only)
+        return _price_only_filter(data, price_only, cached_image)
 
     log.error(f"[trendyol] ✗ Tüm yöntemler başarısız: {url}")
     return None
 
 
-def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
+def _is_dead_url(data) -> bool:
+    return isinstance(data, dict) and data.get("dead_url") is True
+
+
+def _price_only_filter(data: Optional[dict], price_only: bool, cached_image: str = None) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    result = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    if cached_image:
+        result["image_url"] = cached_image
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -209,7 +300,63 @@ async def _via_httpx(url: str) -> Optional[dict]:
 
         return await asyncio.to_thread(_parse, html, url)
     except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            log.warning(f"[trendyol/httpx] Ölü URL tespit edildi: {url}")
+            return {"dead_url": True}
         log.error(f"[trendyol/httpx] Hata: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# KATMAN 1b: Mobil curl_cffi (iOS Safari / Android TLS fingerprint)
+# ═══════════════════════════════════════════════════════════════
+
+async def _via_mobile(url: str) -> Optional[dict]:
+    """iOS Safari / Android Chrome TLS fingerprint ile mobil sayfa — daha az bot tespiti."""
+    if not CURL_AVAILABLE:
+        return None
+    try:
+        await _limiter_mobile.wait()
+        session = await _get_mobile_session()
+        ua = random.choice(_TY_MOBILE_UAS)
+        is_ios = "iPhone" in ua or "iPad" in ua
+        headers: dict = {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.trendyol.com/",
+        }
+        if not is_ios:
+            v = re.search(r"Chrome/(\d+)", ua)
+            cv = v.group(1) if v else "136"
+            headers.update({
+                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": '"Android"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+            })
+        r = await session.get(url, headers=headers)
+        if r.status_code != 200:
+            _reset_mobile_session()
+            return None
+        html = r.text
+        if not html or len(html) < 2000 or _is_blocked(html):
+            _reset_mobile_session()
+            return None
+        data = await asyncio.to_thread(_parse, html, url)
+        if data and data.get("title"):
+            log.info(f"[trendyol/mobile] ✔ ua={'iOS' if is_ios else 'Android'} title={data['title'][:40]!r}")
+        return data
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.debug(f"[trendyol/mobile] Hata: {e}")
+        _reset_mobile_session()
         return None
 
 
@@ -243,14 +390,112 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
 
         return await asyncio.to_thread(_parse, html, url)
     except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            log.warning(f"[trendyol/curl_cffi] Ölü URL tespit edildi: {url}")
+            return {"dead_url": True}
         log.error(f"[trendyol/curl_cffi] Hata: {e}")
         _reset_curl_session()
         return None
 
 
 # ═══════════════════════════════════════════════════════════════
-# KATMAN 3: Playwright (Python 3.14'te çalışmayabilir)
+# KATMAN 3: Playwright — Arama motoru üzerinden
 # ═══════════════════════════════════════════════════════════════
+
+async def _via_playwright_search(url: str, pool=None) -> Optional[dict]:
+    """Trendyol arama motorunda content_id ile arama yapıp ürün sayfasını parse eder.
+    Her 40 aramada bir ana sayfaya giderek oturumu yeniler."""
+    global _search_counter
+
+    content_id = _extract_content_id(url)
+    if not content_id:
+        log.warning(f"[trendyol/search] content_id çıkarılamadı, doğrudan gidiliyor")
+        return await _via_playwright(url, pool=pool)
+
+    _search_counter += 1
+    do_reset = (_search_counter % _SEARCH_RESET_EVERY == 1)
+
+    if pool is None:
+        return await _launch_playwright(url)
+
+    page = await pool.acquire()
+    try:
+        from scrapers.cdp_base import setup_resource_blocking
+        await setup_resource_blocking(page)
+        await page.add_init_script(STEALTH_SCRIPT)
+
+        if do_reset:
+            log.info(f"[trendyol/search] #{_search_counter} — oturum yenileniyor (ana sayfa)")
+            try:
+                await page.goto("https://www.trendyol.com/", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+            except Exception:
+                pass
+
+        search_url = f"https://www.trendyol.com/sr?q={content_id}"
+        log.info(f"[trendyol/search] #{_search_counter} content_id={content_id}")
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+        if page.is_closed():
+            return None
+        await asyncio.sleep(random.uniform(0.6, 1.2))
+
+        product_href = None
+        for sel in [
+            f"[data-id='{content_id}'] a",
+            ".p-card-wrppr a[href*='-p-']",
+            "div[class*='product-card'] a[href*='-p-']",
+            "a[href*='-p-']",
+        ]:
+            el = await page.query_selector(sel)
+            if el:
+                product_href = await el.get_attribute("href")
+                if product_href:
+                    break
+
+        if product_href:
+            target = product_href if product_href.startswith("http") else f"https://www.trendyol.com{product_href}"
+            log.info(f"[trendyol/search] Arama sonucu → {target[:80]}")
+            await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+        else:
+            log.info(f"[trendyol/search] Arama sonucu yok, doğrudan URL deneniyor")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        if page.is_closed():
+            return None
+
+        await asyncio.sleep(random.uniform(2.0, 3.5))
+        if not page.is_closed():
+            await page.mouse.wheel(0, random.randint(200, 500))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+
+        if page.is_closed():
+            return None
+
+        # JS evaluation ile doğrudan __envoy__PROPS oku — HTML parse'dan daha güvenilir
+        data = await _extract_via_js(page, url)
+        if data and data.get("price"):
+            log.info(f"[trendyol/search] ✔(JS) title={str(data.get('title',''))[:50]!r} price={data.get('price')}")
+            return data
+
+        # JS başarısız → HTML fallback
+        html = await page.content() if not page.is_closed() else None
+        if html and not _is_blocked(html):
+            data = await asyncio.to_thread(_parse, html, url)
+            if data:
+                log.info(f"[trendyol/search] ✔ title={str(data.get('title',''))[:50]!r} price={data.get('price')}")
+            return data
+        return None
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.error(f"[trendyol/search] Hata: {e}")
+        return None
+    finally:
+        await pool.release(page)
+
 
 async def _via_playwright(url: str, pool=None) -> Optional[dict]:
     if pool:
@@ -260,14 +505,26 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             await setup_resource_blocking(page)
             await page.add_init_script(STEALTH_SCRIPT)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if page.is_closed():
+                return None
             await asyncio.sleep(random.uniform(2.0, 3.5))
-            await page.mouse.wheel(0, random.randint(200, 500))
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-            html = await page.content()
+            if not page.is_closed():
+                await page.mouse.wheel(0, random.randint(200, 500))
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+            if page.is_closed():
+                return None
+            data = await _extract_via_js(page, url)
+            if data and data.get("price"):
+                return data
+            html = await page.content() if not page.is_closed() else None
             if html and not _is_blocked(html):
                 return await asyncio.to_thread(_parse, html, url)
             return None
         except Exception as e:
+            err = str(e)
+            if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+                log.warning(f"[trendyol/playwright+pool] Ölü URL tespit edildi: {url}")
+                return {"dead_url": True}
             log.error(f"[trendyol/playwright+pool] Hata: {e}")
             return None
         finally:
@@ -368,6 +625,53 @@ def _pv(obj) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+
+TRENDYOL_SELECTORS = {
+    "fiyat": {
+        "guncel_fiyat":         '[data-testid="current-price"]',
+        "fiyat_wrapper":        '[data-testid="price-wrapper"]',
+        "en_dusuk_fiyat_btn":   '[data-testid="lowest-price"]',
+        "en_dusuk_fiyat_label": '[data-testid="lowest-price-label"]',
+        "orijinal_fiyat":       '.price-view .original',
+        "indirimli_fiyat":      '.price-view .discounted',
+    },
+    "kampanya": {
+        "kampanya_kutu":      '.campaign-price',
+        "indirim_aciklama":   '.campaign-price-info .info-text',
+        "sepette_etiket":     '.campaign-price-wrapper .text',
+        "sepette_yeni_fiyat": '.campaign-price-wrapper .new-price',
+        "sepette_eski_fiyat": '.campaign-price-content .old-price',
+    },
+    "promosyon": {
+        "promosyonlar":  '[data-testid="promotions-container"]',
+        "kargo_bedava":  '[data-testid="free-cargo-promotion"]',
+    },
+    "barkod": {
+        "ozellik_listesi": 'ul.info-list',
+        "ozellik_satiri":  'li.content-description-item-description',
+        "ozellik_butonu":  '[data-testid="attr-modal-button"]',
+    },
+    "stok": {
+        "tukeniyor_badge": '[data-testid="running-out-of-stock-badge"]',
+        "sepete_ekle_btn": '[data-testid="add-to-cart-button"]',
+        "hemen_al_btn":    '[data-testid="buy-now-button"]',
+    },
+    "yorum": {
+        "ortalama_puan":        '[data-testid="average-rating"]',
+        "yildizlar":            '[data-testid="star-rating"]',
+        "toplam_degerlendirme": '[data-testid="total-reviews-desktop"]',
+        "toplam_yorum":         '[data-testid="total-comments-desktop"]',
+        "degerlendirme_link":   '[data-testid="review-info-link"]',
+        "soru_cevap_link":      '[data-testid="questions-summary-link"]',
+        "ai_yorum_ozeti":       '[data-testid="ai-review-summary-text"]',
+        "yorum_blok":           '[data-testid="review"]',
+        "yorum_metni":          '[data-testid="comment"]',
+        "kullanici_adi":        '[data-testid="user-full-name"]',
+        "tarih":                '[data-testid="comment-date"]',
+        "begeni_btn":           '[data-testid="like-button"]',
+        "begeni_sayisi":        '[data-testid="likes-count"]',
+    },
+}
 
 # Sepet/kampanya fiyatı anahtar isimleri — öncelik sırasıyla
 _BASKET_KEYS = (
@@ -499,16 +803,37 @@ def _parse(html: str, current_url: str = "") -> dict:
             )
 
     if not price:
+        # Fiyatı sadece price-wrapper container'ı içinde ara — sayfa genelindeki
+        # önerilen ürünlerin fiyatlarını yanlışlıkla almayı önler.
+        _SF = TRENDYOL_SELECTORS["fiyat"]
+        _price_wrapper = soup.select_one(_SF["fiyat_wrapper"])
+        _price_scope = _price_wrapper if _price_wrapper else soup
+        _candidate = None
         for sel in [
-            "[data-testid='price-current-price']", ".prc-dsc",
-            ".product-price-container span", ".prc-slg",
+            _SF["guncel_fiyat"],           # [data-testid="current-price"]
+            _SF["indirimli_fiyat"],        # .price-view .discounted
+            _SF["orijinal_fiyat"],         # .price-view .original
+            ".prc-dsc", ".product-price-container span",
             "span.discounted", "p.new-price", "[class*='new-price']",
         ]:
-            el = soup.select_one(sel)
+            el = _price_scope.select_one(sel)
             if el:
-                price = parse_price_tr_clean(el.get_text())
-                if price:
+                _candidate = parse_price_tr_clean(el.get_text())
+                if _candidate:
                     break
+        # Aynı fiyat sayfada başka yerde de görünüyorsa (widget/öneri) reddet
+        if _candidate and _price_wrapper is None:
+            _all_prices_on_page = [
+                parse_price_tr_clean(e.get_text())
+                for e in soup.select(".prc-dsc, [class*='new-price'], [data-testid='current-price']")
+                if e
+            ]
+            _same_count = sum(1 for p in _all_prices_on_page if p and p == _candidate)
+            if _same_count >= 3:
+                log.warning(f"[trendyol] HTML fiyat ({_candidate}) sayfada {_same_count}x görünüyor — widget/öneri fiyatı olabilir, reddedildi")
+                _candidate = None
+        if _candidate:
+            price = _candidate
 
     if not image_url:
         soup = soup or BeautifulSoup(html, "html.parser")
@@ -537,13 +862,19 @@ def _parse(html: str, current_url: str = "") -> dict:
 
     if not stock:
         soup = soup or BeautifulSoup(html, "html.parser")
-        body_text = soup.get_text().lower()
-        if any(kw in body_text for kw in ["tükendi", "stokta yok", "stok yok", "satışta değil", "out of stock"]):
-            stock = "Stok Yok"
-        elif any(kw in body_text for kw in ["sepete ekle", "hemen al", "satın al"]):
+        _SS = TRENDYOL_SELECTORS["stok"]
+        if soup.select_one(_SS["sepete_ekle_btn"]) or soup.select_one(_SS["hemen_al_btn"]):
             stock = "Stokta Var"
+            if soup.select_one(_SS["tukeniyor_badge"]):
+                stock = "Son Ürünler"
         else:
-            stock = "Bilinmiyor"
+            body_text = soup.get_text().lower()
+            if any(kw in body_text for kw in ["tükendi", "stokta yok", "stok yok", "satışta değil", "out of stock"]):
+                stock = "Stok Yok"
+            elif any(kw in body_text for kw in ["sepete ekle", "hemen al", "satın al"]):
+                stock = "Stokta Var"
+            else:
+                stock = "Bilinmiyor"
 
     if not barcode:
         barcode = _extract_barcode_regex(html)
@@ -642,11 +973,38 @@ def _parse(html: str, current_url: str = "") -> dict:
         if parsed_variants:
             variants_list = parsed_variants[:50]
 
-    # ── Sepette kampanya fiyatı — JSON fiyatından daha düşükse override ──
+    # ── Rating / yorum sayısı HTML fallback ─────────────────────
     soup = soup or BeautifulSoup(html, "html.parser")
+    _SY = TRENDYOL_SELECTORS["yorum"]
+    if not rating:
+        el = soup.select_one(_SY["ortalama_puan"])
+        if el:
+            try:
+                rating = float(el.get_text(strip=True).replace(",", "."))
+            except (ValueError, TypeError):
+                pass
+    if not reviews:
+        for sel in [_SY["toplam_degerlendirme"], _SY["toplam_yorum"]]:
+            el = soup.select_one(sel)
+            if el:
+                txt = re.sub(r"[^\d]", "", el.get_text())
+                if txt:
+                    try:
+                        reviews = int(txt)
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+    # ── AI yorum özeti ───────────────────────────────────────────
+    ai_review_summary = None
+    el = soup.select_one(_SY["ai_yorum_ozeti"])
+    if el:
+        ai_review_summary = el.get_text(" ", strip=True)[:500] or None
+
     log.info(
         f"[trendyol] title={title} price={price} brand={brand} seller={seller} stock={stock} "
-        f"cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants_list or [])}"
+        f"cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants_list or [])} "
+        f"ai_summary={'✔' if ai_review_summary else '✘'}"
     )
     return {
         "title": title,
@@ -662,6 +1020,7 @@ def _parse(html: str, current_url: str = "") -> dict:
         "cart_discount": cart_discount,
         "coupon": coupon,
         "variants": variants_list,
+        "ai_review_summary": ai_review_summary,
     }
 
 
@@ -682,7 +1041,22 @@ def _extract_basket_price_html(soup, html: str) -> tuple:
                 if p:
                     return (p, True)
 
-    # 0b) Öncelikli: <div class="campaign-price-content"> yapısı
+    # 0b) TRENDYOL_SELECTORS["kampanya"] ile sepette fiyatı — en güvenilir yol
+    _SK = TRENDYOL_SELECTORS["kampanya"]
+    # sepette_yeni_fiyat: '.campaign-price-wrapper .new-price'
+    el = soup.select_one(_SK["sepette_yeni_fiyat"])
+    if el:
+        # Etiketin "Sepette" veya "Kampanya" içerdiğini doğrula
+        _wrapper = soup.select_one(_SK["kampanya_kutu"]) or soup.select_one(".campaign-price-wrapper")
+        _label_el = _wrapper.select_one(_SK["sepette_etiket"]) if _wrapper else None
+        _label_txt = (_label_el.get_text(strip=True) if _label_el else "")
+        if not _wrapper or re.search(r"Sepette|Kampanya", _label_txt, re.I) or \
+                (_wrapper and _wrapper.find(string=re.compile(r"Sepette|Kampanya", re.I))):
+            p = parse_price_tr_clean(el.get_text())
+            if p:
+                return (p, True)
+
+    # 0c) Öncelikli: <div class="campaign-price-content"> yapısı
     #    <p class="text">Sepette</p> + <p class="new-price">7.051,85 TL</p>
     #    UYARI: .campaign-price-info altındaki "2000 TL'ye 200 TL İndirim" gibi
     #    kampanya eşik metinlerini fiyat olarak almamak için .new-price CSS'e güveniyoruz.
@@ -822,6 +1196,81 @@ def _detect_stock_trendyol(product: dict, winner: dict) -> Optional[str]:
         return "Stok Yok"
 
     return None  # Bilinmiyor — HTML fallback devreye girecek
+
+
+async def _extract_via_js(page, url: str) -> Optional[dict]:
+    """Playwright page'den doğrudan JS evaluation ile __envoy__PROPS oku.
+    HTML parse'dan çok daha güvenilir — sayfadaki başka ürünlerin fiyatını almaz."""
+    try:
+        if page.is_closed():
+            return None
+        envoy = await page.evaluate("""() => {
+            for (const key of Object.keys(window)) {
+                if (key.includes('__envoy') && key.includes('PROPS')) {
+                    const v = window[key];
+                    if (v && v.product) return v;
+                }
+            }
+            return null;
+        }""")
+        if not envoy or not isinstance(envoy, dict) or not envoy.get("product"):
+            return None
+        # envoy dict'i __parse'a stub HTML yerine doğrudan ver
+        current_url = url.split("?")[0].split("#")[0]
+        product = envoy.get("product") or {}
+        title = product.get("name") or product.get("title")
+
+        ml = product.get("merchantListing") or {}
+        winner = ml.get("winnerVariant") or product.get("winnerVariant") or {}
+        p_obj = winner.get("price") or {}
+
+        price = None
+        for _bk in _BASKET_KEYS:
+            _bv = _pv(p_obj.get(_bk))
+            if _bv and _bv > 0:
+                price = _bv
+                break
+        if price is None:
+            v_disc = _pv(p_obj.get("discountedPrice")) or _pv(p_obj.get("originalPrice"))
+            v_sell = _pv(p_obj.get("sellingPrice"))
+            if v_disc and v_sell:
+                price = min(v_disc, v_sell)
+            elif v_disc:
+                price = v_disc
+            elif v_sell:
+                price = v_sell
+
+        if not price:
+            return None
+
+        brand = (product.get("brand") or {}).get("name") or product.get("brandName")
+        stock = _detect_stock_trendyol(product, winner)
+        if not stock:
+            stock = "Stokta Var" if (winner.get("inStock") or winner.get("hasStock")) else "Bilinmiyor"
+        barcode = _normalize_barcode(winner.get("barcode"))
+        image_url = _extract_image_from_json(product)
+        rs = product.get("ratingScore") or {}
+
+        log.info(f"[trendyol/js] ✔ title={str(title or '')[:50]!r} price={price}")
+        return {
+            "title": title,
+            "price": float(price),
+            "image_url": image_url,
+            "rating": rs.get("averageRating"),
+            "review_count": rs.get("totalCount"),
+            "brand": brand,
+            "seller": ((ml.get("merchant") or {}).get("name")),
+            "stock": stock,
+            "barcode": barcode,
+            "url": current_url,
+            "cart_discount": any(_pv(p_obj.get(k)) for k in _BASKET_KEYS),
+            "coupon": None,
+            "variants": None,
+            "ai_review_summary": None,
+        }
+    except Exception as e:
+        log.debug(f"[trendyol/js] Hata: {e}")
+        return None
 
 
 def _extract_envoy(html: str) -> Optional[dict]:

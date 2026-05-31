@@ -96,10 +96,27 @@ def build_deal_message(product: dict, new_price: float, old_price: float, pct: f
     return msg
 
 
+async def _download_image(client: httpx.AsyncClient, url: str) -> bytes | None:
+    """Görseli indir — Amazon CDN hotlink korumasını aşmak için Referer ekle."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://www.amazon.com.tr/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        r = await client.get(url, headers=headers, follow_redirects=True, timeout=10)
+        if r.status_code == 200 and len(r.content) > 1000:
+            return r.content
+    except Exception as e:
+        log.debug(f"[tg] Görsel indirilemedi: {e}")
+    return None
+
+
 async def _send(token: str, chat_id: str, text: str, image_url: str = None) -> bool:
     """
     Telegram mesajı gönder.
-    Resim varsa photo olarak gönderir.
+    Resim varsa: önce bytes olarak indirip upload et (Amazon CDN uyumlu),
+    başarısız olursa URL ile dene, o da olmaz ise sadece metin gönder.
     """
     if not token or not chat_id:
         return False
@@ -109,6 +126,24 @@ async def _send(token: str, chat_id: str, text: str, image_url: str = None) -> b
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             if image_url:
+                # 1) Görseli biz indirip upload et — Amazon CDN hotlink korumasını aşar
+                img_bytes = await _download_image(client, image_url)
+                if img_bytes:
+                    r = await client.post(
+                        f"{base}/sendPhoto",
+                        data={
+                            "chat_id": chat_id,
+                            "caption": text,
+                            "parse_mode": "HTML",
+                        },
+                        files={"photo": ("photo.jpg", img_bytes, "image/jpeg")},
+                    )
+                    if r.status_code == 200:
+                        log.info(f"[tg] ✔ Gönderildi (photo/upload) → {chat_id}")
+                        return True
+                    log.warning(f"[tg] sendPhoto/upload başarısız ({r.status_code}): {r.text[:200]}")
+
+                # 2) URL ile dene (yedek — Amazon dışı platformlar için çalışabilir)
                 r = await client.post(
                     f"{base}/sendPhoto",
                     json={
@@ -116,15 +151,12 @@ async def _send(token: str, chat_id: str, text: str, image_url: str = None) -> b
                         "photo": image_url,
                         "caption": text,
                         "parse_mode": "HTML",
-                        "disable_web_page_preview": False,
                     },
                 )
-
                 if r.status_code == 200:
-                    log.info(f"[tg] ✔ Gönderildi (photo) → {chat_id}")
+                    log.info(f"[tg] ✔ Gönderildi (photo/url) → {chat_id}")
                     return True
-                else:
-                    log.warning(f"[tg] sendPhoto başarısız ({r.status_code}), text fallback")
+                log.warning(f"[tg] sendPhoto/url başarısız ({r.status_code}), text fallback")
 
             r = await client.post(
                 f"{base}/sendMessage",

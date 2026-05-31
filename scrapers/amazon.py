@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Amazon.com.tr scraper — v6.
+Amazon.com.tr scraper — v8  (GitHub araştırması + TLS fingerprint optimizasyonu)
 
 Katmanlar:
-1) curl_cffi — Chrome TLS fingerprint, warm-up, circuit breaker
-2) Playwright — persistent BrowserPool, kapsamlı stealth, cookie kalıcılığı
+  0) curl_cffi iOS Safari   — safari TLS fingerprint, daha az bot tespiti (birincil)
+  1) curl_cffi Chrome       — chrome TLS fingerprint, UA-impersonate eşleşmesi, HTTP/2 tam header set
+  2) Playwright             — ASIN arama motoru, stealth, cookie kalıcılığı (son çare)
+
+Referans: amzpy (github.com/theonlyanil/amzpy), curl_cffi luminati guide,
+          ScraperAPI Amazon WAF guide, brightdata curl_cffi blog
 """
 
 import os
@@ -14,7 +18,9 @@ import logging
 import json
 import random
 import asyncio
+from datetime import datetime
 from typing import Optional
+import requests
 from bs4 import BeautifulSoup
 from scrapers.utils import (
     UA_POOL, RateLimiter,
@@ -33,29 +39,123 @@ log = logging.getLogger("amazon")
 
 import time as _time
 
-_limiter      = RateLimiter(min_delay=0.5, max_delay=1.5)
-_limiter_fast = RateLimiter(min_delay=0.3, max_delay=0.8)
+# ── Rate limiter ─────────────────────────────────────────────────
+# Amazon: CAPTCHA + 503 riski en yüksek platform
+# amzpy referans: 2-5s — biz de o bant genişliğine çektik
+# Beklenen: ~8 istek/dk → 2407 ürün → ~5 tur/gün
+_limiter        = RateLimiter(min_delay=2.0, max_delay=4.0)   # curl_cffi (eskiden 1.0-2.0)
+_limiter_fast   = RateLimiter(min_delay=1.0, max_delay=2.0)   # price_only (eskiden 0.5-1.0)
+_limiter_mobile = RateLimiter(min_delay=3.0, max_delay=6.0)   # iOS Safari birincil (eskiden 1.5-3.5)
 
-# ── Curl circuit breaker ─────────────────────────────────────────
+# ── Curl circuit breaker (Chrome layer) ─────────────────────────
 _curl_block_streak   = 0
 _curl_disabled_until = 0.0
-_CURL_BLOCK_LIMIT    = 3
-_CURL_COOLDOWN       = 120
+_curl_cooldown_mult  = 1          # exponential backoff çarpanı
+_CURL_BLOCK_LIMIT    = 5          # 5 ardışık block → askı
+_CURL_COOLDOWN_BASE  = 60         # ilk askı: 60s → 120s → 240s → max 300s
 
 def _curl_ok() -> bool:
     return CURL_AVAILABLE and _time.time() > _curl_disabled_until
 
 def _on_curl_block() -> None:
-    global _curl_block_streak, _curl_disabled_until
+    global _curl_block_streak, _curl_disabled_until, _curl_cooldown_mult
     _curl_block_streak += 1
     if _curl_block_streak >= _CURL_BLOCK_LIMIT:
-        _curl_disabled_until = _time.time() + _CURL_COOLDOWN
-        _curl_block_streak = 0
-        log.warning(f"[amazon/curl] {_CURL_BLOCK_LIMIT} ardışık block → {_CURL_COOLDOWN}s askıya alındı")
+        cooldown = min(_CURL_COOLDOWN_BASE * _curl_cooldown_mult, 300)
+        _curl_disabled_until = _time.time() + cooldown
+        _curl_cooldown_mult  = min(_curl_cooldown_mult * 2, 5)
+        _curl_block_streak   = 0
+        log.warning(f"[amazon/curl] {_CURL_BLOCK_LIMIT} ardışık block → {cooldown}s askı (çarpan={_curl_cooldown_mult})")
 
 def _on_curl_success() -> None:
-    global _curl_block_streak
-    _curl_block_streak = 0
+    global _curl_block_streak, _curl_cooldown_mult
+    _curl_block_streak  = 0
+    _curl_cooldown_mult = 1   # başarı → exponential sıfırla
+
+
+# ═══════════════════════════════════════════════════════════════
+# USER-AGENT VE HEADER TANIMI
+# ═══════════════════════════════════════════════════════════════
+
+# iOS Safari UA'ları — safari TLS fingerprint ile birebir eşleşmeli
+_IOS_UAS = [
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.7 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+]
+
+# Android Chrome UA'ları — mobil pool için iOS yanında
+_ANDROID_UAS = [
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+]
+
+_AMAZON_MOBILE_UAS = _IOS_UAS + _ANDROID_UAS
+
+# Chrome desktop UA'ları — impersonate profile ile eşleşmeli
+# KEY INSIGHT: UA-impersonate uyumsuzluğu bot tespitini tetikler
+_CHROME_UAS: dict[str, str] = {
+    "chrome120": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "chrome124": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "chrome131": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "chrome136": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "chrome142": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+    "chrome146": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+}
+
+_CHROME_SEC_CH_UA: dict[str, str] = {
+    "chrome120": '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"',
+    "chrome124": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "chrome131": '"Google Chrome";v="131", "Chromium";v="131", "Not/A)Brand";v="24"',
+    "chrome136": '"Google Chrome";v="136", "Chromium";v="136", "Not/A)Brand";v="99"',
+    "chrome142": '"Google Chrome";v="142", "Chromium";v="142", "Not/A)Brand";v="24"',
+    "chrome146": '"Google Chrome";v="146", "Chromium";v="146", "Not/A)Brand";v="24"',
+}
+
+# Chrome desktop header seti — HTTP/2 tam eşleşme
+# zstd: Chrome 120+, Priority + Te: Chrome 119+ HTTP/2
+# Sec-Fetch-Site: none — ilk (doğrudan) navigasyon için doğru değer
+_CURL_HEADERS: dict[str, str] = {
+    "Accept":                   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Encoding":          "gzip, deflate, br, zstd",
+    "Accept-Language":          "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control":            "max-age=0",
+    "Dnt":                      "1",
+    "Priority":                 "u=0, i",
+    "Sec-Ch-Ua-Mobile":         "?0",
+    "Sec-Ch-Ua-Platform":       '"Windows"',
+    "Sec-Fetch-Dest":           "document",
+    "Sec-Fetch-Mode":           "navigate",
+    "Sec-Fetch-Site":           "none",
+    "Sec-Fetch-User":           "?1",
+    "Te":                       "trailers",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# iOS Safari header seti — Sec-Ch-Ua yok (Safari bilmez), daha sade
+_MOBILE_IOS_HEADERS: dict[str, str] = {
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+    "Cache-Control":   "no-cache",
+    "Pragma":          "no-cache",
+    "Referer":         "https://www.amazon.com.tr/",
+}
+
+# Android Chrome için ek header'lar
+_MOBILE_ANDROID_EXTRA: dict[str, str] = {
+    "Sec-Ch-Ua-Mobile":  "?1",
+    "Sec-Ch-Ua-Platform": '"Android"',
+    "Sec-Fetch-Dest":    "document",
+    "Sec-Fetch-Mode":    "navigate",
+    "Sec-Fetch-Site":    "none",
+    "Sec-Fetch-User":    "?1",
+}
+
 
 # ── Amazon-specific stealth script ───────────────────────────────
 _AMAZON_STEALTH = """
@@ -166,74 +266,10 @@ _AMAZON_STEALTH = """
 """
 
 
-# ── Cookie cache ─────────────────────────────────────────────────
-_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "amazon_cookies.json")
-_cached_cookies: dict | None = None
-_cookie_file_mtime: float | None = None
+# ═══════════════════════════════════════════════════════════════
+# BLOCK / NOT-FOUND TESPİT
+# ═══════════════════════════════════════════════════════════════
 
-
-def _load_amazon_cookies() -> dict:
-    global _cached_cookies, _cookie_file_mtime
-    try:
-        path = os.path.abspath(_COOKIE_FILE)
-        mtime = os.path.getmtime(path)
-        if _cached_cookies is not None and _cookie_file_mtime == mtime:
-            return _cached_cookies
-        with open(path, "r", encoding="utf-8") as f:
-            cookies_list = json.load(f)
-        _cached_cookies = {c["name"]: c["value"] for c in cookies_list if "name" in c and "value" in c}
-        _cookie_file_mtime = mtime
-        return _cached_cookies
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        log.debug(f"[amazon] cookie yüklenemedi: {e}")
-        return {}
-
-
-# ── Session pool (3 paralel session, farklı fingerprint) ────────
-IMPERSONATE_POOL = ["chrome146", "chrome142", "chrome136", "chrome131", "chrome124", "chrome120"]
-_POOL_SIZE = 3
-
-_SESSIONS: list = []
-_SESSIONS_LOCK = asyncio.Lock()
-_session_idx = 0
-
-
-async def _get_or_create_session() -> CurlSession:
-    global _SESSIONS, _session_idx
-    async with _SESSIONS_LOCK:
-        if len(_SESSIONS) < _POOL_SIZE:
-            imp = random.choice(IMPERSONATE_POOL)
-            s = CurlSession(impersonate=imp, timeout=20)
-            cookies = _load_amazon_cookies()
-            if cookies:
-                s.cookies.update(cookies)
-            _SESSIONS.append(s)
-            log.info(f"[amazon] Yeni session #{len(_SESSIONS)}: {imp}")
-            # Warm-up: homepage ziyareti ile cookie ve TLS session kur
-            try:
-                await s.get("https://www.amazon.com.tr/", headers=_CURL_HEADERS, timeout=8)
-                log.info(f"[amazon] Session warm-up tamamlandı")
-            except Exception:
-                pass
-        _session_idx = (_session_idx + 1) % len(_SESSIONS)
-        return _SESSIONS[_session_idx]
-
-
-def _reset_session() -> None:
-    global _SESSIONS, _session_idx
-    if _SESSIONS:
-        bad = _session_idx % len(_SESSIONS)
-        try:
-            _SESSIONS[bad] = None  # type: ignore
-        except Exception:
-            pass
-        _SESSIONS = [s for s in _SESSIONS if s is not None]
-        log.info(f"[amazon] Session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
-
-
-# ── Block/not-found detection ────────────────────────────────────
 CAPTCHA_HINTS = [
     "robot check", "validatecaptcha", "type the characters",
     "enter the characters", "not a robot", "güvenlik kontrolü",
@@ -241,7 +277,8 @@ CAPTCHA_HINTS = [
 ]
 BLOCK_HINTS = [
     "üzgünüz", "isteğinizi işlemeye", "sorun üzerinde çalışıyoruz",
-    "something went wrong", "we're sorry", "api-services-support@amazon",
+    "something went wrong", "we're sorry",
+    "api-services-support@amazon",    # amzpy: bu string block sayfasında kesinlikle var
 ]
 NOT_FOUND_HINTS = [
     "sitemizde işlev gösteren bir sayfaya karşılık gelmiyor",
@@ -266,12 +303,338 @@ def _is_not_found(html: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════
+# COOKIE YÖNETİMİ  (tüm katmanlar arası paylaşım)
+# ═══════════════════════════════════════════════════════════════
+
+_COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "amazon_cookies.json")
+_cached_cookies: dict | None = None
+_cookie_file_mtime: float | None = None
+
+
+def _load_amazon_cookies() -> dict:
+    global _cached_cookies, _cookie_file_mtime
+    try:
+        path = os.path.abspath(_COOKIE_FILE)
+        mtime = os.path.getmtime(path)
+        if _cached_cookies is not None and _cookie_file_mtime == mtime:
+            return _cached_cookies
+        with open(path, "r", encoding="utf-8") as f:
+            cookies_list = json.load(f)
+        _cached_cookies = {c["name"]: c["value"] for c in cookies_list if "name" in c and "value" in c}
+        _cookie_file_mtime = mtime
+        return _cached_cookies
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log.debug(f"[amazon] cookie yüklenemedi: {e}")
+        return {}
+
+
+def _save_cookies_file(cookie_dict: dict) -> None:
+    try:
+        path = os.path.abspath(_COOKIE_FILE)
+        existing = _load_amazon_cookies()
+        existing.update(cookie_dict)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"name": k, "value": v} for k, v in existing.items()], f, ensure_ascii=False)
+        global _cached_cookies, _cookie_file_mtime
+        _cached_cookies = None   # force reload next time
+    except Exception as e:
+        log.debug(f"[amazon] cookie kaydetme hatası: {e}")
+
+
+def _push_cookies_to_sessions(cookie_dict: dict) -> None:
+    """Cookie güncellemesini tüm curl sessionlara aktar."""
+    if not cookie_dict:
+        return
+    for pool_list in (_MOBILE_SESSIONS, _SESSIONS):
+        for entry in pool_list:
+            if entry is None:
+                continue
+            session = entry[0]
+            try:
+                session.cookies.update(cookie_dict)
+            except Exception:
+                pass
+
+
+async def _save_playwright_cookies(page) -> None:
+    try:
+        cookies = await page.context.cookies()
+        if not cookies:
+            return
+        cookie_dict = {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
+        _save_cookies_file(cookie_dict)
+        _push_cookies_to_sessions(cookie_dict)
+        log.info(f"[amazon] {len(cookies)} cookie Playwright'tan kaydedildi → tüm sessionlara aktarıldı")
+    except Exception as e:
+        log.debug(f"[amazon] Playwright cookie kaydetme hatası: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# KATMAN 0: iOS Safari session pool
+# ═══════════════════════════════════════════════════════════════
+
+MOBILE_IMPERSONATE_POOL = ["chrome136", "chrome131", "chrome124", "chrome120"]  # safari Amazon'da 403 alıyor
+_MOBILE_POOL_SIZE   = 3    # 3 paralel session (birincil katman)
+_MOBILE_SESSIONS: list = []
+_MOBILE_SESSIONS_LOCK = asyncio.Lock()
+_mobile_session_idx   = 0
+
+
+async def _get_mobile_session() -> tuple:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    new_entry = None
+    async with _MOBILE_SESSIONS_LOCK:
+        if len(_MOBILE_SESSIONS) < _MOBILE_POOL_SIZE:
+            try:
+                imp = random.choice(MOBILE_IMPERSONATE_POOL)
+                s   = CurlSession(impersonate=imp, timeout=15)
+                cookies = _load_amazon_cookies()
+                if cookies:
+                    s.cookies.update(cookies)
+                _MOBILE_SESSIONS.append((s, imp))
+                new_entry = (s, imp)
+                log.info(f"[amazon/mobile] Yeni session: {imp}")
+            except Exception as e:
+                log.warning(f"[amazon/mobile] Session oluşturulamadı: {e}")
+                if not _MOBILE_SESSIONS:
+                    raise
+        if not _MOBILE_SESSIONS:
+            raise RuntimeError("Mobile session pool boş")
+        _mobile_session_idx = (_mobile_session_idx + 1) % len(_MOBILE_SESSIONS)
+        result = _MOBILE_SESSIONS[_mobile_session_idx]
+
+    if new_entry:
+        s, imp = new_entry
+        try:
+            ua = random.choice(_ANDROID_UAS)
+            v  = re.search(r"Chrome/(\d+)", ua)
+            cv = v.group(1) if v else "136"
+            warmup_hdrs = {
+                **_MOBILE_IOS_HEADERS, **_MOBILE_ANDROID_EXTRA,
+                "User-Agent": ua,
+                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
+            }
+            await s.get("https://www.amazon.com.tr/", headers=warmup_hdrs, timeout=10)
+        except Exception:
+            pass
+    return result
+
+
+def _reset_mobile_session() -> None:
+    global _MOBILE_SESSIONS, _mobile_session_idx
+    if not _MOBILE_SESSIONS:
+        return
+    bad = _mobile_session_idx % len(_MOBILE_SESSIONS)
+    _MOBILE_SESSIONS[bad] = None  # type: ignore
+    _MOBILE_SESSIONS = [s for s in _MOBILE_SESSIONS if s is not None]
+    log.info(f"[amazon/mobile] Session #{bad} sıfırlandı, kalan={len(_MOBILE_SESSIONS)}")
+
+
+async def _via_mobile(url: str) -> Optional[dict]:
+    """Layer 0: Android Chrome — birincil katman (Safari 403 alıyor, Chrome daha stabil)."""
+    if not CURL_AVAILABLE:
+        return None
+    try:
+        await _limiter_mobile.wait()
+        session, imp = await _get_mobile_session()
+        ua = random.choice(_ANDROID_UAS)
+        v  = re.search(r"Chrome/(\d+)", ua)
+        cv = v.group(1) if v else "136"
+        headers = {
+            **_MOBILE_IOS_HEADERS, **_MOBILE_ANDROID_EXTRA,
+            "User-Agent": ua,
+            "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}", "Not/A)Brand";v="8"',
+        }
+
+        r = await session.get(url, headers=headers, allow_redirects=True, timeout=15)
+        if r.status_code in (404, 410):
+            return {"not_found": True}
+        if r.status_code in (403, 429, 503):
+            _reset_mobile_session()
+            return None
+        if r.status_code != 200:
+            _reset_mobile_session()
+            return None
+
+        html = r.text
+        if not html or len(html) < 500:
+            return None
+        if _is_not_found(html):
+            return {"not_found": True}
+        if _is_blocked(html):
+            log.info(f"[amazon/mobile] Block algılandı — session sıfırlanıyor (imp={imp})")
+            _reset_mobile_session()
+            return None
+
+        # Cookie'leri dosyaya kaydet + chrome sessionlara aktar
+        if hasattr(r, "cookies") and r.cookies:
+            try:
+                cdict = dict(r.cookies)
+                _save_cookies_file(cdict)
+                _push_cookies_to_sessions(cdict)
+            except Exception:
+                pass
+
+        data = await asyncio.to_thread(_parse, html)
+        if data:
+            log.info(f"[amazon/mobile] ✔ imp={imp} ua=Android")
+        return data
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.debug(f"[amazon/mobile] Hata: {e}")
+        _reset_mobile_session()
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# KATMAN 1: Chrome curl_cffi session pool
+# ═══════════════════════════════════════════════════════════════
+
+IMPERSONATE_POOL = ["chrome136", "chrome131", "chrome124", "chrome120", "chrome142", "chrome146"]
+_POOL_SIZE    = 3
+_SESSIONS: list = []
+_SESSIONS_LOCK = asyncio.Lock()
+_session_idx   = 0
+
+
+async def _get_or_create_session() -> tuple:
+    global _SESSIONS, _session_idx
+    new_entry = None
+    async with _SESSIONS_LOCK:
+        if len(_SESSIONS) < _POOL_SIZE:
+            from scrapers.proxy_pool import get_proxy_pool
+            proxy = get_proxy_pool().get()
+            imp   = random.choice(IMPERSONATE_POOL)
+            s     = CurlSession(
+                impersonate=imp,
+                timeout=12,
+                proxies=get_proxy_pool().curl_dict(proxy) if proxy else None,
+            )
+            cookies = _load_amazon_cookies()
+            if cookies:
+                s.cookies.update(cookies)
+            _SESSIONS.append((s, imp, proxy))
+            new_entry = (s, imp, proxy)
+            log.info(f"[amazon] Yeni Chrome session #{len(_SESSIONS)}: {imp} proxy={'✔' if proxy else '✘'}")
+
+        if not _SESSIONS:
+            raise RuntimeError("Chrome session pool boş")
+        _session_idx = (_session_idx + 1) % len(_SESSIONS)
+        result = _SESSIONS[_session_idx]
+
+    if new_entry:
+        s, imp, proxy = new_entry
+        ua = _CHROME_UAS.get(imp, _CHROME_UAS["chrome131"])
+        warmup_hdrs = {
+            **_CURL_HEADERS,
+            "User-Agent": ua,
+            "Sec-Ch-Ua": _CHROME_SEC_CH_UA.get(imp, _CHROME_SEC_CH_UA["chrome131"]),
+        }
+        try:
+            await s.get("https://www.amazon.com.tr/", headers=warmup_hdrs, timeout=8)
+            log.info(f"[amazon] Chrome session warm-up tamamlandı: {imp}")
+        except Exception:
+            pass
+    return result
+
+
+def _reset_session() -> None:
+    global _SESSIONS, _session_idx
+    if not _SESSIONS:
+        return
+    bad = _session_idx % len(_SESSIONS)
+    try:
+        _SESSIONS[bad] = None  # type: ignore
+    except Exception:
+        pass
+    _SESSIONS = [s for s in _SESSIONS if s is not None]
+    log.info(f"[amazon] Chrome session #{bad} sıfırlandı, kalan={len(_SESSIONS)}")
+
+
+async def _via_curl(url: str) -> Optional[dict]:
+    """Layer 1: Chrome TLS fingerprint, tam HTTP/2 header seti."""
+    if not CURL_AVAILABLE:
+        return None
+    try:
+        session, imp, proxy = await _get_or_create_session()
+        ua = _CHROME_UAS.get(imp, _CHROME_UAS["chrome131"])
+        headers = {
+            **_CURL_HEADERS,
+            "User-Agent": ua,
+            "Sec-Ch-Ua": _CHROME_SEC_CH_UA.get(imp, _CHROME_SEC_CH_UA["chrome131"]),
+            "Referer": "https://www.amazon.com.tr/",
+        }
+        r    = await session.get(url, headers=headers, allow_redirects=True)
+        html = r.text
+
+        if r.status_code in (404, 410):
+            return {"not_found": True}
+        if r.status_code != 200:
+            _reset_session()
+            return None
+        if not html or len(html) < 500:
+            return None
+        if _is_not_found(html):
+            return {"not_found": True}
+        if _is_blocked(html):
+            log.info(f"[amazon/curl] CAPTCHA/block → session sıfırlanıyor (imp={imp})")
+            _reset_session()
+            _on_curl_block()
+            if proxy:
+                from scrapers.proxy_pool import get_proxy_pool
+                get_proxy_pool().mark_failed(proxy)
+            return {"blocked": True}
+
+        if proxy:
+            from scrapers.proxy_pool import get_proxy_pool
+            get_proxy_pool().mark_ok(proxy)
+
+        # Cookie paylaşımı
+        if hasattr(r, "cookies") and r.cookies:
+            try:
+                cdict = dict(r.cookies)
+                _save_cookies_file(cdict)
+                _push_cookies_to_sessions(cdict)
+            except Exception:
+                pass
+
+        return await asyncio.to_thread(_parse, html)
+
+    except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.debug(f"[amazon/curl] Hata: {e}")
+        _reset_session()
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
 # ANA FONKSİYON
 # ═══════════════════════════════════════════════════════════════
 
-async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Optional[dict]:
+async def scrape_amazon(url: str, pool=None, price_only: bool = False,
+                        cached_image: str = None) -> Optional[dict]:
     await (_limiter_fast if price_only else _limiter).wait()
 
+    # ── Layer 0: iOS Safari ──────────────────────────────────────────
+    if CURL_AVAILABLE:
+        data = await _via_mobile(url)
+        if data and data.get("not_found"):
+            _limiter.reset()
+            return data
+        if data and data.get("dead_url"):
+            return data
+        if data and data.get("title") and data.get("price"):
+            _on_curl_success()
+            return _price_only_filter(data, price_only, cached_image)
+
+    # ── Layer 1: Chrome curl ─────────────────────────────────────────
     if _curl_ok():
         last_data = None
         for attempt in range(2):
@@ -279,110 +642,147 @@ async def scrape_amazon(url: str, pool=None, price_only: bool = False) -> Option
             if data and data.get("not_found"):
                 _limiter.reset()
                 return data
+            if data and data.get("dead_url"):
+                return data
+            if data and data.get("blocked"):
+                break
             if data and data.get("title") and data.get("price"):
                 _on_curl_success()
-                log.info(f"[amazon/curl] ✔ title={data['title'][:50]!r} price={data['price']} image={'✔' if data.get('image_url') else '✘'}")
-                return _price_only_filter(data, price_only)
+                log.info(f"[amazon/curl] ✔ title={data['title'][:50]!r} price={data['price']}")
+                return _price_only_filter(data, price_only, cached_image)
             if data and data.get("title"):
                 last_data = data
                 if data.get("stock") == "Stok Yok":
                     break
             if attempt == 0:
-                backoff = random.uniform(0.2, 0.5)
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(random.uniform(0.3, 0.7))
 
         if last_data:
-            log.info(f"[amazon/curl] title var fiyat yok → Playwright atlanıyor (stock={last_data.get('stock')})")
-            return _price_only_filter(last_data, price_only)
+            return _price_only_filter(last_data, price_only, cached_image)
     else:
-        if not CURL_AVAILABLE:
-            log.warning("[amazon] curl_cffi yüklü değil")
-        else:
-            log.info(f"[amazon/curl] circuit breaker aktif — {max(0, _curl_disabled_until - _time.time()):.0f}s kaldı")
+        if CURL_AVAILABLE:
+            remain = max(0, _curl_disabled_until - _time.time())
+            log.info(f"[amazon/curl] circuit breaker aktif — {remain:.0f}s kaldı")
 
-    log.info("[amazon] → Playwright deneniyor...")
-    data = await _via_playwright(url, pool=pool)
+    # ── Layer 2: Playwright ──────────────────────────────────────────
+    log.info("[amazon] → Playwright katmanı deneniyor...")
+    data = await _via_playwright_search(url, pool=pool)
     if data and data.get("not_found"):
         _limiter.reset()
         return data
+    if data and data.get("dead_url"):
+        return data
     if data and data.get("title"):
-        log.info(f"[amazon/playwright] ✔ title={data['title'][:50]!r} price={data.get('price')} image={'✔' if data.get('image_url') else '✘'}")
-        return _price_only_filter(data, price_only)
+        log.info(f"[amazon/search] ✔ title={data['title'][:50]!r} price={data.get('price')}")
+        return _price_only_filter(data, price_only, cached_image)
 
     log.error(f"[amazon] ✗ Tüm yöntemler başarısız: {url}")
     return None
 
 
-def _price_only_filter(data: Optional[dict], price_only: bool) -> Optional[dict]:
+def _price_only_filter(data: Optional[dict], price_only: bool, cached_image: str = None) -> Optional[dict]:
     if not price_only or not data:
         return data
-    return {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    result = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    if cached_image:
+        result["image_url"] = cached_image
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
-# KATMAN 1: curl_cffi (global session)
+# KATMAN 2: Playwright — ASIN arama motoru
 # ═══════════════════════════════════════════════════════════════
 
-_CURL_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "max-age=0",
-    "Referer": "https://www.amazon.com.tr/",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Dnt": "1",
-}
+_search_counter   = 0
+_SEARCH_RESET_EVERY = 40
 
 
-async def _via_curl(url: str) -> Optional[dict]:
-    if not CURL_AVAILABLE:
-        return None
+async def _via_playwright_search(url: str, pool=None) -> Optional[dict]:
+    global _search_counter
+
+    asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
+    if not asin_m:
+        return await _via_playwright(url, pool=pool)
+
+    asin = asin_m.group(1)
+    _search_counter += 1
+
+    if pool is None:
+        return await _launch_playwright(url)
+
+    page = await pool.acquire()
     try:
-        session = await _get_or_create_session()
-        r = await session.get(url, headers=_CURL_HEADERS)
-        html = r.text
+        from scrapers.cdp_base import setup_resource_blocking_amazon
+        await setup_resource_blocking_amazon(page)
+        await page.add_init_script(_AMAZON_STEALTH)
 
-        if r.status_code in (404, 410):
-            log.info(f"[amazon/curl] HTTP {r.status_code} — ürün yok")
-            return {"not_found": True}
-        if r.status_code != 200:
-            log.info(f"[amazon/curl] HTTP {r.status_code}")
-            _reset_session()
+        search_url = f"https://www.amazon.com.tr/s?k={asin}"
+        log.info(f"[amazon/search] #{_search_counter} ASIN={asin}")
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+        if page.is_closed():
             return None
-        if not html or len(html) < 500:
-            log.info(f"[amazon/curl] Kısa yanıt ({len(html or '')}B)")
-            return None
-        if _is_not_found(html):
-            log.info("[amazon/curl] Ürün bulunamadı (404)")
-            return {"not_found": True}
-        if _is_blocked(html):
-            log.info("[amazon/curl] CAPTCHA/block → session sıfırlanıyor")
-            _reset_session()
-            _on_curl_block()
+        await asyncio.sleep(random.uniform(0.3, 0.7))
+
+        product_href = None
+        for sel in [
+            f"[data-asin='{asin}'] h2 a",
+            f"[data-asin='{asin}'] a.a-link-normal",
+            ".s-result-item[data-asin] h2 a",
+            "h2.a-size-mini a",
+            "h2 a.a-link-normal",
+        ]:
+            el = await page.query_selector(sel)
+            if el:
+                product_href = await el.get_attribute("href")
+                if product_href:
+                    break
+
+        if product_href:
+            target = product_href if product_href.startswith("http") else f"https://www.amazon.com.tr{product_href}"
+            await page.goto(target, wait_until="domcontentloaded", timeout=25000)
+        else:
+            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+
+        if page.is_closed():
             return None
 
-        return await asyncio.to_thread(_parse, html)
+        try:
+            await page.wait_for_selector(
+                "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_offerDisplay_desktop",
+                timeout=5000,
+            )
+        except Exception:
+            pass
+
+        await asyncio.sleep(random.uniform(0.3, 0.8))
+        if not page.is_closed():
+            await page.mouse.wheel(0, random.randint(300, 600))
+            await asyncio.sleep(random.uniform(0.2, 0.4))
+
+        html = await page.content() if not page.is_closed() else None
+        if html and len(html) > 5000:
+            if _is_not_found(html):
+                return {"not_found": True}
+            if _is_blocked(html):
+                return None
+            data = await asyncio.to_thread(_parse, html)
+            if data and data.get("price") and random.random() < 0.3:
+                await _save_playwright_cookies(page)
+            return data
+        return None
 
     except Exception as e:
-        log.info(f"[amazon/curl] Hata: {e}")
-        _reset_session()
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
+        log.error(f"[amazon/search] Hata: {e}")
         return None
+    finally:
+        await pool.release(page)
 
-
-# ═══════════════════════════════════════════════════════════════
-# KATMAN 2: Playwright
-# ═══════════════════════════════════════════════════════════════
 
 async def _via_playwright(url: str, pool=None) -> Optional[dict]:
     if pool is None:
-        log.warning("[amazon/playwright] pool verilmedi — _launch_playwright fallback")
         return await _launch_playwright(url)
     page = await pool.acquire()
     try:
@@ -398,6 +798,8 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
                 pass
 
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        if page.is_closed():
+            return None
         try:
             await page.wait_for_selector(
                 "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_offerDisplay_desktop",
@@ -405,24 +807,28 @@ async def _via_playwright(url: str, pool=None) -> Optional[dict]:
             )
         except Exception:
             pass
+        if page.is_closed():
+            return None
         await asyncio.sleep(random.uniform(0.3, 0.8))
-        await page.mouse.wheel(0, random.randint(300, 700))
-        await asyncio.sleep(random.uniform(0.2, 0.5))
-        if random.random() > 0.5:
-            await page.mouse.wheel(0, random.randint(100, 300))
-            await asyncio.sleep(random.uniform(0.1, 0.3))
+        if not page.is_closed():
+            await page.mouse.wheel(0, random.randint(300, 600))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
 
-        html = await page.content()
+        html = await page.content() if not page.is_closed() else None
         if html and len(html) > 5000:
             if _is_not_found(html):
-                log.info("[amazon/playwright] Ürün bulunamadı (404)")
                 return {"not_found": True}
             if _is_blocked(html):
-                log.info("[amazon/playwright] CAPTCHA/block algılandı")
                 return None
-            return await asyncio.to_thread(_parse, html)
+            data = await asyncio.to_thread(_parse, html)
+            if data and data.get("price") and random.random() < 0.3:
+                await _save_playwright_cookies(page)
+            return data
         return None
     except Exception as e:
+        err = str(e)
+        if "ERR_NAME_NOT_RESOLVED" in err or "ERR_NAME_RESOLUTION_FAILED" in err:
+            return {"dead_url": True}
         log.error(f"[amazon/playwright] Hata: {e}")
         return None
     finally:
@@ -464,7 +870,6 @@ async def _launch_playwright(url: str) -> Optional[dict]:
                     await page.wait_for_selector("#productTitle", timeout=8000)
                 except Exception:
                     pass
-                # Varyant ürünlerde fiyat JS ile render olur; fiyat div'ini bekle
                 try:
                     await page.wait_for_selector(
                         "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, #apex_offerDisplay_desktop",
@@ -472,24 +877,20 @@ async def _launch_playwright(url: str) -> Optional[dict]:
                     )
                 except Exception:
                     pass
-
                 await page.mouse.wheel(0, random.randint(250, 600))
                 await asyncio.sleep(random.uniform(0.3, 0.7))
-
                 html = await page.content()
             finally:
                 await browser.close()
 
         if _is_not_found(html):
-            log.info("[amazon/playwright] Ürün bulunamadı (404)")
             return {"not_found": True}
         if _is_blocked(html):
-            log.info("[amazon/playwright] CAPTCHA/block algılandı")
             return None
         return await asyncio.to_thread(_parse, html)
 
     except NotImplementedError:
-        log.info("[amazon/playwright] Python sürümü desteklenmiyor (3.14+)")
+        log.info("[amazon/playwright] Python sürümü desteklenmiyor")
         return None
     except Exception as e:
         log.error(f"[amazon/playwright] Hata: {e}")
@@ -497,7 +898,7 @@ async def _launch_playwright(url: str) -> Optional[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# PARSE
+# PARSE  — HTML → dict
 # ═══════════════════════════════════════════════════════════════
 
 def _parse_price_tr(price_text: str) -> Optional[float]:
@@ -505,15 +906,9 @@ def _parse_price_tr(price_text: str) -> Optional[float]:
 
 
 def _parse_coupon(soup: BeautifulSoup, html: str) -> Optional[str]:
-    """Kupon rozeti metnini döner (varsa), yoksa None."""
     for sel in [
-        "#couponDeals",
-        "#couponBadge_feature_div",
-        ".couponBadge",
-        "#prime_free_tie_feature_div",
-        "#socialProofingAsinFaceout_feature_div",
-        "[id*='coupon']",
-        "[class*='coupon-badge']",
+        "#couponDeals", "#couponBadge_feature_div", ".couponBadge",
+        "#prime_free_tie_feature_div", "[id*='coupon']", "[class*='coupon-badge']",
     ]:
         try:
             el = soup.select_one(sel)
@@ -523,8 +918,6 @@ def _parse_coupon(soup: BeautifulSoup, html: str) -> Optional[str]:
             t = re.sub(r"\s+", " ", el.get_text(" ", strip=True))
             if t and len(t) > 2:
                 return t[:200]
-
-    # Regex fallback — "X% kupon" veya "kupon: X TL" gibi kalıplar
     for pat in [
         r'(%\s*\d+)\s*(?:ekstra\s+)?(?:indirim\s+)?kupon',
         r'kupon\s*uygula[^<"]{0,80}',
@@ -533,16 +926,13 @@ def _parse_coupon(soup: BeautifulSoup, html: str) -> Optional[str]:
         m = re.search(pat, html, re.IGNORECASE)
         if m:
             return m.group(0)[:200].strip()
-
     return None
 
 
 def _parse_variants(soup: BeautifulSoup, html: str) -> list:
-    """Ürün varyantlarını çıkar. Her öğe: {"asin": str, "name": str, "price": float|None}."""
     variants: list = []
     seen: set = set()
 
-    # Yöntem 1: #twister_feature_div içindeki li öğeleri
     for li in soup.select(
         "#twister_feature_div li[data-dp-url], "
         "#twister_feature_div li[data-defaultasin], "
@@ -552,16 +942,13 @@ def _parse_variants(soup: BeautifulSoup, html: str) -> list:
         dp_url = li.get("data-dp-url", "") or ""
         m = re.search(r"/dp/([A-Z0-9]{10})", dp_url)
         asin = m.group(1) if m else None
-
         if not asin:
             da = (li.get("data-defaultasin") or "").strip()
             if re.match(r"^[A-Z0-9]{10}$", da):
                 asin = da
-
         if not asin or asin in seen:
             continue
         seen.add(asin)
-
         name = (li.get("title") or "").strip()
         if not name:
             img = li.select_one("img")
@@ -573,24 +960,19 @@ def _parse_variants(soup: BeautifulSoup, html: str) -> list:
                 name = span.get_text(strip=True)
         if not name:
             name = asin
-
         variants.append({"asin": asin, "name": name[:100], "price": None})
 
-    # Yöntem 2: Gömülü JSON'dan asinToDpUrl / dimensionToAsinMap
     if not variants:
         m = re.search(r'"asinToDpUrl"\s*:\s*(\{[^}]{10,5000}\})', html)
         if m:
             try:
-                asin_map = json.loads(m.group(1))
-                for asin_key in asin_map:
+                for asin_key in json.loads(m.group(1)):
                     if re.match(r"^[A-Z0-9]{10}$", asin_key) and asin_key not in seen:
                         seen.add(asin_key)
                         variants.append({"asin": asin_key, "name": asin_key, "price": None})
             except Exception:
                 pass
 
-    # Yöntem 3: Gömülü JSON'dan varyant fiyatları — varsa doldur
-    # Amazon bazı ürünlerde "priceMap" veya "variationDisplayLabels" ile fiyat gömer
     price_map: dict = {}
     for pat in [
         r'"priceMap"\s*:\s*(\{[^}]{10,10000}\})',
@@ -610,7 +992,6 @@ def _parse_variants(soup: BeautifulSoup, html: str) -> list:
         if price_map:
             break
 
-    # "displayPrice":"1.299,00 TL" kalıplarını asin yakınında ara
     if not price_map:
         for dm in re.finditer(r'"([A-Z0-9]{10})"[^}]{0,300}"displayPrice"\s*:\s*"([^"]+)"', html):
             p = parse_price_tr_clean(dm.group(2))
@@ -625,7 +1006,6 @@ def _parse_variants(soup: BeautifulSoup, html: str) -> list:
 
 
 _NOISE_SELECTORS = [
-    # Benzer ürünler / carousel / öneri bölümleri
     "#similarities_feature_div",
     "#sims-consolidated-1_feature_div",
     "#sims-consolidated-2_feature_div",
@@ -640,7 +1020,6 @@ _NOISE_SELECTORS = [
     "#discovery-and-inspiration",
     "#rhf",
     "[id*='rhf_']",
-    # "Benzer ürünler" fiyat widget'ı (_vc-pfo prefix)
     "[class*='_vc-pfo']",
     "[class*='vc-pfo']",
     "#buyers-also-bought-recommendation-carousel",
@@ -654,7 +1033,6 @@ def _parse(html: str) -> Optional[dict]:
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
 
-    # Benzer ürünler / öneri / carousel bölümlerini fiyat aramadan önce kaldır
     for sel in _NOISE_SELECTORS:
         try:
             for el in soup.select(sel):
@@ -697,11 +1075,13 @@ def _parse(html: str) -> Optional[dict]:
     price = None
     price_text = None
 
-    # 1. Buy box a-offscreen seçicileri (en spesifikten genele)
     for sel in [
         "#corePriceDisplay_desktop_feature_div span.a-offscreen",
+        "#corePriceDisplay_mobile_feature_div span.a-offscreen",
         "#corePrice_feature_div span.a-offscreen",
         "#apex_offerDisplay_desktop span.a-offscreen",
+        "#apex_offerDisplay_mobile span.a-offscreen",
+        "#mobile-buybox span.a-offscreen",
     ]:
         el = soup.select_one(sel)
         if el:
@@ -709,11 +1089,11 @@ def _parse(html: str) -> Optional[dict]:
             if price_text:
                 break
 
-    # 2. span.a-price-whole + span.a-price-fraction — SADECE buy box container içinde
     if not price_text:
         container = soup.select_one(
-            "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
-            "#apex_offerDisplay_desktop, #buybox, #ppd"
+            "#corePriceDisplay_desktop_feature_div, #corePriceDisplay_mobile_feature_div, "
+            "#corePrice_feature_div, #apex_offerDisplay_desktop, #apex_offerDisplay_mobile, "
+            "#mobile-buybox, #buybox, #ppd"
         )
         if container:
             whole = container.select_one("span.a-price-whole")
@@ -754,7 +1134,6 @@ def _parse(html: str) -> Optional[dict]:
 
     # ── Resim ──────────────────────────────────────────────
     image_url = None
-
     for sel in ["#landingImage", "#imgBlkFront", "#main-image", "img.a-dynamic-image"]:
         img = soup.select_one(sel)
         if img:
@@ -807,9 +1186,9 @@ def _parse(html: str) -> Optional[dict]:
     if rating_el:
         m = re.search(r"([\d,]+)", rating_el.text)
         if m:
-            r = float(m.group(1).replace(",", "."))
-            if 0 < r <= 5:
-                rating = r
+            r_val = float(m.group(1).replace(",", "."))
+            if 0 < r_val <= 5:
+                rating = r_val
 
     # ── Yorum sayısı ────────────────────────────────────────
     reviews = None
@@ -821,7 +1200,6 @@ def _parse(html: str) -> Optional[dict]:
 
     # ── Stok ────────────────────────────────────────────────
     stock = None
-
     for sel in [
         "#availability span.primary-availability-message",
         ".primary-availability-message",
@@ -837,85 +1215,52 @@ def _parse(html: str) -> Optional[dict]:
             t = el.get_text(" ", strip=True)
             if t:
                 tl = t.lower()
-
                 if any(k in tl for k in (
-                        "stokta",
-                        "kargo",
-                        "teslim",
-                        "kaldı",
-                        "sepete ekle",
-                        "satışta",
-                        "sipariş ver",
-                        "in stock",
-                        "available"
+                    "stokta", "kargo", "teslim", "kaldı", "sepete ekle",
+                    "satışta", "sipariş ver", "in stock", "available"
                 )):
                     stock = "Stokta Var"
-
                 elif any(k in tl for k in (
-                        "mevcut değil",
-                        "tükendi",
-                        "stokta yok",
-                        "out of stock",
-                        "currently unavailable",
-                        "temporarily out of stock",
-                        "unavailable",
-                        "geçici olarak stokta yok",
-                        "şu an için stokta yok"
+                    "mevcut değil", "tükendi", "stokta yok", "out of stock",
+                    "currently unavailable", "temporarily out of stock",
+                    "unavailable", "geçici olarak stokta yok", "şu an için stokta yok"
                 )):
                     stock = "Stok Yok"
-
                 elif "stok" not in tl and "yok" in tl:
                     stock = "Stok Yok"
-
                 else:
                     stock = t
                 break
 
     has_atc = bool(soup.select_one(
-        "#add-to-cart-button, "
-        "input[name='submit.add-to-cart'], "
-        "#add-to-cart-announce, "
-        "#attachSiNAButton, "
-        "#submit.add-to-cart"
+        "#add-to-cart-button, input[name='submit.add-to-cart'], "
+        "#add-to-cart-announce, #attachSiNAButton"
     ))
-
-    has_buy_now = bool(soup.select_one(
-        "#buy-now-button, "
-        "#buy-now-button-announce"
-    ))
-
-    has_oos = bool(soup.select_one(
-        "#outOfStock, "
-        ".outOfStock"
-    ))
-
-    html_low = html.lower()
+    has_buy_now = bool(soup.select_one("#buy-now-button, #buy-now-button-announce"))
+    has_oos     = bool(soup.select_one("#outOfStock, .outOfStock"))
+    html_low    = html.lower()
 
     if has_atc or has_buy_now:
         stock = "Stokta Var"
-
     elif has_oos:
         stock = "Stok Yok"
-
-    elif "currently unavailable" in html_low:
+    elif "currently unavailable" in html_low or "temporarily out of stock" in html_low:
         stock = "Stok Yok"
-
-    elif "temporarily out of stock" in html_low:
-        stock = "Stok Yok"
-
     elif stock == "Stokta Var":
         stock = "Stokta Var"
-
     else:
         stock = "Stok Yok"
 
-    # stok yoksa fiyatı iptal et
     if stock == "Stok Yok":
         price = None
 
-    # ── Barkod (EAN/GTIN) ───────────────────────────────────
+    # ── Barkod ──────────────────────────────────────────────
     barcode = None
-    for row in soup.select("#productDetails_techSpec_section_1 tr, #productDetails_detailBullets_sections1 tr, .a-normal tr"):
+    for row in soup.select(
+        "#productDetails_techSpec_section_1 tr, "
+        "#productDetails_detailBullets_sections1 tr, "
+        ".a-normal tr"
+    ):
         label = row.select_one("th, td:first-child")
         value = row.select_one("td:last-child")
         if label and value:
@@ -933,7 +1278,7 @@ def _parse(html: str) -> Optional[dict]:
                 barcode = m.group(1)
                 break
 
-    # ── Sepette indirim ──────────────────────────────────────
+    # ── Sepette indirim ─────────────────────────────────────
     cart_discount = detect_cart_discount(html)
     if not cart_discount:
         for sel in ["#priceBadging_feature_div", "#promoPriceBlockMessage_feature_div"]:
@@ -942,26 +1287,386 @@ def _parse(html: str) -> Optional[dict]:
                 cart_discount = True
                 break
 
-    # ── Kupon ─────────────────────────────────────────────────
-    coupon = _parse_coupon(soup, html)
-
-    # ── Varyantlar ────────────────────────────────────────────
+    coupon   = _parse_coupon(soup, html)
     variants = _parse_variants(soup, html)
 
     log.info(
         f"[amazon] parse: title={'✔' if title else '✘'} price={price} barcode={barcode} "
-        f"image={'✔' if image_url else '✘'} stock={stock} cart_discount={cart_discount} "
-        f"coupon={'✔' if coupon else '✘'} variants={len(variants)}"
+        f"image={'✔' if image_url else '✘'} stock={stock} "
+        f"cart_discount={cart_discount} coupon={'✔' if coupon else '✘'} variants={len(variants)}"
     )
     return {
-        "title": title,
-        "price": price,
-        "image_url": image_url,
-        "rating": rating,
+        "title":        title,
+        "price":        price,
+        "image_url":    image_url,
+        "rating":       rating,
         "review_count": reviews,
-        "stock": stock,
-        "barcode": barcode,
+        "stock":        stock,
+        "barcode":      barcode,
         "cart_discount": cart_discount,
-        "coupon": coupon,
-        "variants": variants if variants else None,
+        "coupon":       coupon,
+        "variants":     variants if variants else None,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCRAPE.DO TABANLI CLI ARAÇLARI  (token ile doğrudan erişim)
+# ═══════════════════════════════════════════════════════════════
+
+API_BASE = "https://api.scrape.do"
+_VARIATION_PRIORITY = ["color", "size", "style", "pattern", "material", "fit"]
+
+
+def _cli_get_token(token_arg: str = None) -> str:
+    token = token_arg or os.environ.get("SCRAPEDO_TOKEN", "")
+    if not token:
+        raise ValueError("Scrape.do token gerekli. --token parametresi veya SCRAPEDO_TOKEN env var kullanın.")
+    return token
+
+
+def _cli_asin_from_url(url: str) -> str:
+    m = re.search(r"/dp/([A-Z0-9]{10})", url)
+    return m.group(1) if m else url.strip("/").split("/")[-1]
+
+
+def _cli_fetch_html(target_url: str, token: str) -> str:
+    r = requests.get(
+        f"{API_BASE}/",
+        params={"token": token, "url": target_url, "render": "true"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.text
+
+
+def _cli_fetch_raw(target_url: str, token: str) -> str:
+    r = requests.get(
+        f"{API_BASE}/",
+        params={"token": token, "url": target_url},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.text
+
+
+def _cli_extract_price(soup: BeautifulSoup) -> str:
+    whole = soup.find("span", class_="a-price-whole")
+    frac  = soup.find("span", class_="a-price-fraction")
+    if whole:
+        return f"${whole.text.strip('.')}.{frac.text.strip() if frac else '00'}"
+    off = soup.select_one("span.a-offscreen")
+    return off.text.strip() if off else "N/A"
+
+
+def _cli_parse_usd(price_str: str) -> Optional[float]:
+    m = re.search(r"[\d]+\.?\d*", price_str.replace(",", ""))
+    try:
+        return float(m.group()) if m else None
+    except Exception:
+        return None
+
+
+def _cli_soup_text(el, default: str = "N/A") -> str:
+    return el.get_text(strip=True) if el else default
+
+
+def _cli_find_match(pattern: str, text: str) -> str:
+    m = re.search(pattern, text)
+    return m.group(1) if m else "N/A"
+
+
+def _cli_upsert_product(db, asin: str, source_url: str, title: str,
+                        image: str, rating_str: str, price_str: str, now: str) -> int:
+    """products + price_history upsert eder, product_id döner."""
+    try:
+        rating_val = float(rating_str) if rating_str and rating_str not in ("N/A", "") else None
+    except ValueError:
+        rating_val = None
+
+    cur = db.execute(
+        "INSERT OR IGNORE INTO products"
+        "(platform,asin_or_id,source_url,title,image_url,rating,first_seen_at,last_seen_at)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        ("amazon", asin, source_url, title, image, rating_val, now, now),
+    )
+    db.commit()
+
+    if cur.rowcount > 0:
+        product_id = cur.lastrowid
+    else:
+        db.execute("UPDATE products SET last_seen_at=? WHERE source_url=?", (now, source_url))
+        row = db.execute("SELECT id FROM products WHERE source_url=?", (source_url,)).fetchone()
+        db.commit()
+        product_id = row["id"]
+
+    price_val = _cli_parse_usd(price_str)
+    if price_val:
+        db.execute(
+            "INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,?,?)",
+            (product_id, price_val, "USD", now),
+        )
+        db.commit()
+
+    return product_id
+
+
+# ----------------------------------------------------------------------------- #
+#  1) TEMEL ÜRÜN VERİSİ
+# ----------------------------------------------------------------------------- #
+
+def scrape_product_html(target_url: str, token: str) -> dict:
+    """Tek ürün sayfasını parse eder: isim, ASIN, fiyat, görsel, rating."""
+    soup    = BeautifulSoup(_cli_fetch_html(target_url, token), "lxml")
+    name_el = soup.find(id="productTitle")
+    name    = name_el.text.strip() if name_el else "N/A"
+    asin    = _cli_asin_from_url(target_url)
+    price   = _cli_extract_price(soup)
+    img_el  = soup.find("img", {"id": "landingImage"})
+    image   = img_el["src"] if img_el and img_el.has_attr("src") else "N/A"
+    rat_el  = soup.find(class_="AverageCustomerReviews")
+    rating  = rat_el.text.strip().split(" out of")[0] if rat_el else "N/A"
+    return {"ASIN": asin, "Product Name": name, "Price": price, "Image": image, "Rating": rating}
+
+
+def scrape_product_api(asin: str, token: str, geocode: str = "us", zipcode: str = "10001") -> dict:
+    """Scrape.do PDP endpoint'i ile yapılandırılmış JSON döndürür."""
+    return requests.get(
+        f"{API_BASE}/plugin/amazon/pdp",
+        params={"token": token, "asin": asin, "geocode": geocode, "zipcode": zipcode},
+        timeout=30,
+    ).json()
+
+
+def run_product(args) -> None:
+    from db import get_db
+    token = _cli_get_token(getattr(args, "token", None))
+    urls  = args.url if isinstance(args.url, list) else [args.url]
+    now   = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    if getattr(args, "api", False):
+        for url in urls:
+            asin = _cli_asin_from_url(url) if "/dp/" in url else url
+            print(scrape_product_api(asin, token))
+        return
+
+    db = get_db()
+    for url in urls:
+        data = scrape_product_html(url, token)
+        pid  = _cli_upsert_product(
+            db, data["ASIN"], url, data["Product Name"],
+            data["Image"], data["Rating"], data["Price"], now,
+        )
+        print(f"✓ DB #{pid} | {data['ASIN']}: {data['Product Name'][:55]}... | {data['Price']} | {data['Rating']}")
+
+
+# ----------------------------------------------------------------------------- #
+#  2) TÜM VARYASYONLAR  (renk / boyut / model)
+# ----------------------------------------------------------------------------- #
+
+def _parse_variation_dimensions(soup: BeautifulSoup) -> dict:
+    """Sayfadaki tüm varyasyon boyutlarını ve seçeneklerini çıkarır."""
+    dimensions = {}
+    for row in soup.find_all("div", {"id": re.compile(r"inline-twister-row-.*")}):
+        dim_name = row.get("id", "").replace("inline-twister-row-", "").replace("_name", "")
+        options  = []
+        for option in row.find_all("li", {"data-asin": True}):
+            asin = option.get("data-asin")
+            if asin and option.get("data-initiallyUnavailable") != "true":
+                swatch = option.find("span", {"class": "swatch-title-text-display"})
+                img    = option.find("img")
+                button = option.find("span", {"class": "a-button-text"})
+                option_name = (
+                    swatch.text.strip() if swatch
+                    else img.get("alt", "").strip() if img and img.get("alt")
+                    else button.get_text(strip=True) if button and button.get_text(strip=True) != "Select"
+                    else "Unknown"
+                )
+                options.append({"name": option_name, "asin": asin})
+        if options:
+            dimensions[dim_name] = options
+    return dimensions
+
+
+class VariationScraper:
+    """Çok boyutlu ürünlerin (iPhone gibi) tüm varyasyonlarını derinlik-öncelikli gezer ve DB'ye yazar."""
+
+    def __init__(self, product_url: str, token: str):
+        self.product_url = product_url
+        self.token       = token
+        self.scraped: set  = set()
+        self.dim_names: list = []
+        self._db    = None
+        self._now   = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        self._count = 0
+
+    def run(self) -> None:
+        from db import get_db
+        self._db   = get_db()
+        soup       = BeautifulSoup(_cli_fetch_html(self.product_url, self.token), "lxml")
+        dimensions = _parse_variation_dimensions(soup)
+
+        self.dim_names = sorted(
+            dimensions.keys(),
+            key=lambda x: _VARIATION_PRIORITY.index(x.lower()) if x.lower() in _VARIATION_PRIORITY else len(_VARIATION_PRIORITY),
+        )
+        print(f"Bulunan boyutlar: {list(dimensions.keys())}")
+        for dn, opts in dimensions.items():
+            print(f"  {dn}: {len(opts)} seçenek")
+        print(f"\nGezme sırası: {self.dim_names}\nVaryasyon taraması başlıyor...\n")
+
+        self._scrape(_cli_asin_from_url(self.product_url))
+        print(f"\nToplam {self._count} benzersiz varyasyon DB'ye kaydedildi.")
+
+    def _scrape(self, asin: str, dim_index: int = 0, prefix: str = "") -> None:
+        if asin in self.scraped:
+            return
+
+        url       = f"{self.product_url.split('/dp/')[0]}/dp/{asin}/?th=1&psc=1"
+        soup      = BeautifulSoup(_cli_fetch_html(url, self.token), "lxml")
+        name_el   = soup.find(id="productTitle")
+        name      = name_el.text.strip() if name_el else "N/A"
+        price     = _cli_extract_price(soup)
+        page_dims = _parse_variation_dimensions(soup)
+
+        if dim_index >= len(self.dim_names) or not page_dims:
+            self.scraped.add(asin)
+            selections = self._read_selections(soup, asin)
+            img_el = soup.find("img", {"id": "landingImage"})
+            image  = img_el["src"] if img_el and img_el.has_attr("src") else "N/A"
+            pid    = _cli_upsert_product(self._db, asin, url, name, image, "N/A", price, self._now)
+            self._count += 1
+            sel_str = ", ".join(f"{k}:{v}" for k, v in selections.items())
+            print(f"{prefix}✓ DB #{pid} | {asin}: {price} | {sel_str}")
+            return
+
+        current_dim = self.dim_names[dim_index]
+        if current_dim in page_dims:
+            options = page_dims[current_dim]
+            if dim_index == 0:
+                print(f"{prefix}{len(options)} adet {current_dim} seçeneği bulundu")
+            for i, option in enumerate(options):
+                if dim_index == 0:
+                    print(f"{prefix}{current_dim} {i+1}/{len(options)}: {option['name']}")
+                self._scrape(option["asin"], dim_index + 1, prefix + "  ")
+        else:
+            self._scrape(asin, dim_index + 1, prefix)
+
+    def _read_selections(self, soup: BeautifulSoup, asin: str) -> dict:
+        selections = {}
+        for dim_name in self.dim_names:
+            for row_id in [f"inline-twister-row-{dim_name}_name", f"inline-twister-row-{dim_name}"]:
+                row = soup.find("div", {"id": row_id})
+                if not row:
+                    continue
+                selected = row.find("span", {"class": re.compile(r".*a-button-selected.*")})
+                if selected:
+                    swatch = selected.find("span", {"class": "swatch-title-text-display"})
+                    img    = selected.find("img")
+                    selections[dim_name] = (
+                        swatch.text.strip() if swatch
+                        else img.get("alt", "").strip() if img and img.get("alt")
+                        else selected.get_text(strip=True) if "Select" not in selected.get_text(strip=True)
+                        else "N/A"
+                    )
+                else:
+                    for option in row.find_all("li", {"data-asin": asin}):
+                        swatch = option.find("span", {"class": "swatch-title-text-display"})
+                        button = option.find("span", {"class": "a-button-text"})
+                        selections[dim_name] = (
+                            swatch.text.strip() if swatch
+                            else button.get_text(strip=True) if button and "Select" not in button.get_text(strip=True)
+                            else "N/A"
+                        )
+                        break
+                break
+        return selections
+
+
+def run_variations(args) -> None:
+    token = _cli_get_token(getattr(args, "token", None))
+    VariationScraper(args.url, token).run()
+
+
+# ----------------------------------------------------------------------------- #
+#  3) SATICI TEKLİFLERİ
+# ----------------------------------------------------------------------------- #
+
+def scrape_sellers_html(asin: str, token: str) -> list:
+    """Amazon aodAjaxMain endpoint'inden tüm satıcı tekliflerini parse eder."""
+    target_url = f"https://www.amazon.com/gp/product/ajax/aodAjaxMain/?asin={asin}"
+    soup = BeautifulSoup(_cli_fetch_raw(target_url, token), "lxml")
+    offers = []
+
+    for sold_by in soup.find_all("div", id="aod-offer-soldBy"):
+        container = sold_by.parent
+        while container and not container.find("span", class_="a-price-whole"):
+            container = container.parent
+        if not container:
+            continue
+
+        whole = container.find("span", class_="a-price-whole")
+        frac  = container.find("span", class_="a-price-fraction")
+        price = f"${whole.text.strip('.')}.{frac.text.strip()}" if whole else "N/A"
+
+        seller_link = sold_by.find("a", href=lambda x: x and "/gp/aag/main" in x)
+        seller      = seller_link.text.strip() if seller_link else "Amazon.com"
+
+        rating_div  = sold_by.find("div", id="aod-offer-seller-rating")
+        rating_text = _cli_soup_text(rating_div.find("span", class_="a-icon-alt")) if rating_div else ""
+        count_text  = _cli_soup_text(
+            rating_div.find("span", id=lambda x: x and "seller-rating-count" in str(x))
+        ) if rating_div else ""
+
+        seller_rating = _cli_find_match(r"(\d+\.?\d*) out of 5", rating_text)
+        rating_count  = _cli_find_match(r"\((\d[\d,]*)\s*ratings\)", count_text)
+        positive_pct  = _cli_find_match(r"(\d+)%\s*positive", count_text)
+        if positive_pct != "N/A":
+            positive_pct += "%"
+
+        ships_div  = container.find("div", id="aod-offer-shipsFrom")
+        ships_from = _cli_soup_text(ships_div.find("span", class_="a-color-base")) if ships_div else "N/A"
+        condition  = _cli_soup_text(container.find("div", id="aod-offer-heading"), "New")
+
+        offers.append({
+            "asin": asin, "price": price, "condition": condition, "seller": seller,
+            "seller_rating": seller_rating, "rating_count": rating_count,
+            "positive_pct": positive_pct, "ships_from": ships_from,
+        })
+    return offers
+
+
+def scrape_sellers_api(asin: str, token: str, geocode: str = "us", zipcode: str = "10001") -> dict:
+    """Scrape.do offer-listing endpoint'i ile yapılandırılmış JSON döndürür."""
+    return requests.get(
+        f"{API_BASE}/plugin/amazon/offer-listing",
+        params={"token": token, "asin": asin, "geocode": geocode, "zipcode": zipcode},
+        timeout=30,
+    ).json()
+
+
+def run_sellers(args) -> None:
+    from db import get_db
+    token = _cli_get_token(getattr(args, "token", None))
+    now   = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    if getattr(args, "api", False):
+        print(scrape_sellers_api(args.asin, token))
+        return
+
+    offers = scrape_sellers_html(args.asin, token)
+    print(f"{args.asin} için {len(offers)} satıcı teklifi bulundu")
+    if not offers:
+        return
+
+    db = get_db()
+    for offer in offers:
+        db.execute(
+            "INSERT INTO seller_offers"
+            "(asin,price,condition,seller,seller_rating,rating_count,positive_pct,ships_from,scraped_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (offer["asin"], offer["price"], offer["condition"], offer["seller"],
+             offer["seller_rating"], offer["rating_count"], offer["positive_pct"],
+             offer["ships_from"], now),
+        )
+    db.commit()
+    print(f"✓ {len(offers)} teklif seller_offers tablosuna kaydedildi (ASIN={args.asin})")

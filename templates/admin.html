@@ -37,7 +37,7 @@
       (stats.errors_24h, 'Hata (24s)', '#dc2626')
     ] %}
     <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:14px;padding:16px 20px;text-align:center;">
-      <div {% if label == 'Kuyrukta' %}id="queue-count-val"{% endif %} style="font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:{{ color }};">{{ val }}</div>
+      <div {% if label == 'Kuyrukta' %}id="queue-count-val"{% elif label == 'Deal Bekliyor' %}data-stat-key="pending_deals"{% elif label == 'Aktif Fırsat' %}data-stat-key="active_deals"{% elif label == 'Ürün' %}data-stat-key="products"{% endif %} style="font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:{{ color }};">{{ val }}</div>
       <div style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-top:4px;">{{ label }}</div>
     </div>
     {% endfor %}
@@ -49,8 +49,31 @@
       <h3 style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:.5px;color:var(--text);margin:0;">🔍 Scraper Durumu</h3>
       <span id="monitor-updated" style="font-size:11px;color:var(--muted);">yükleniyor…</span>
     </div>
-    <div id="monitor-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+    <!-- Platform kartları -->
+    <div id="monitor-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:16px;">
       <div style="color:var(--muted);font-size:13px;">Veri yükleniyor…</div>
+    </div>
+    <!-- Silme eşiğine yakın ürünler uyarısı -->
+    <div id="near-limit-box" style="display:none;background:#fef3c7;border:1.5px solid #f59e0b;border-radius:10px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:#92400e;">
+      <b>⚠ Otomatik silinmeye yakın ürünler (80+ hata):</b>
+      <div id="near-limit-list" style="margin-top:6px;line-height:1.9;"></div>
+    </div>
+    <!-- Canlı aktivite akışı -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <!-- Başarılı taramalar -->
+      <div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;">
+        <div style="font-weight:700;font-size:12px;color:#10b981;margin-bottom:8px;">✔ Son Başarılı Taramalar</div>
+        <div id="feed-ok" style="font-size:11px;color:var(--text);line-height:2;max-height:280px;overflow-y:auto;">
+          <span style="color:var(--muted);">Yükleniyor…</span>
+        </div>
+      </div>
+      <!-- Hatalar -->
+      <div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;">
+        <div style="font-weight:700;font-size:12px;color:#dc2626;margin-bottom:8px;">✘ Son Hatalar</div>
+        <div id="feed-err" style="font-size:11px;color:var(--text);line-height:2;max-height:280px;overflow-y:auto;">
+          <span style="color:var(--muted);">Yükleniyor…</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -73,11 +96,15 @@
       return Math.floor(diff/86400) + 'g önce';
     }
 
+    function platformColor(p) {
+      return (PLATFORMS[p] || {color:'#6b7280'}).color;
+    }
+
     function statusBadge(d) {
       var b30 = d.block_errors_30m || 0;
       var e30 = d.errors_30m || 0;
       var last = d.last_success;
-      var stale = !last || (Date.now() - new Date(last.replace(' ','T')+'Z').getTime()) > 15 * 60 * 1000;
+      var stale = !last || (Date.now() - new Date(last.replace(' ','T')+'Z').getTime()) > 60 * 60 * 1000;
 
       if (b30 >= 5) return ['IP BLOK', '#dc2626'];
       if (b30 >= 2) return ['BLOK RİSKİ', '#f97316'];
@@ -92,7 +119,7 @@
       var meta = data._meta || {};
       var html = '';
 
-      // Genel durum
+      // Genel durum kartı
       var aliveColor = meta.alive ? '#10b981' : '#dc2626';
       var aliveText  = meta.alive ? '● Aktif' : '● Durdu';
       html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;display:flex;align-items:center;gap:10px;">'
@@ -108,6 +135,7 @@
         if (!d) return;
         var pInfo = PLATFORMS[p];
         var badge = statusBadge(d);
+        var e1h = d.errors_1h || 0;
         html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;">'
           + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
             + '<span style="font-weight:700;font-size:13px;color:' + pInfo.color + ';">' + pInfo.label + '</span>'
@@ -115,15 +143,72 @@
           + '</div>'
           + '<div style="font-size:11px;color:var(--muted);line-height:1.8;">'
             + '⏱ Son başarı: <b style="color:var(--text);">' + timeAgo(d.last_success) + '</b><br>'
-            + '⚠ Hata (30dk): <b style="color:' + (d.errors_30m > 0 ? '#f59e0b' : 'var(--text)') + ';">' + d.errors_30m + '</b>'
+            + '⚡ Hız: <b style="color:#10b981;">' + (d.scan_rate_10m || 0) + '/dk</b>'
+            + ' &nbsp;|&nbsp; ⚠ Hata (30dk): <b style="color:' + (d.errors_30m > 0 ? '#f59e0b' : 'var(--text)') + ';">' + d.errors_30m + '</b>'
             + (d.block_errors_30m > 0 ? ' <span style="color:#dc2626;font-weight:700;">(🚫 ' + d.block_errors_30m + ' blok)</span>' : '')
-            + '<br>📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
+            + '<br>1sa hata: <b style="color:' + (e1h > 10 ? '#dc2626' : 'var(--text)') + ';">' + e1h + '</b>'
+            + ' &nbsp;|&nbsp; 📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
           + '</div>'
         + '</div>';
       });
 
       grid.innerHTML = html;
-      upd.textContent = 'güncellendi: ' + new Date().toLocaleTimeString('tr-TR');
+      upd.textContent = '⟳ ' + new Date().toLocaleTimeString('tr-TR');
+
+      // Near-limit uyarısı
+      var nl = meta.near_limit || [];
+      var nlBox = document.getElementById('near-limit-box');
+      var nlList = document.getElementById('near-limit-list');
+      if (nl.length > 0) {
+        nlBox.style.display = 'block';
+        nlList.innerHTML = nl.map(function(r) {
+          return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;">[' + r.platform.toUpperCase() + ']</span>'
+            + '<b>#' + r.product_id + '</b> ' + (r.title || '—')
+            + ' — <span style="color:#dc2626;font-weight:700;">' + r.count + '/100 hata</span>'
+            + '<form method="post" action="/admin/product/' + r.product_id + '/clear-errors" style="display:inline;margin:0;">'
+            + '<button type="submit" style="background:#f59e0b;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Hataları Sıfırla</button>'
+            + '</form>'
+            + '<form method="post" action="/admin/product/' + r.product_id + '/delete" onsubmit="return confirm(\'#' + r.product_id + ' silinsin mi?\')" style="display:inline;margin:0;">'
+            + '<button type="submit" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Ürünü Sil</button>'
+            + '</form>'
+            + '</div>';
+        }).join('');
+      } else {
+        nlBox.style.display = 'none';
+      }
+
+      // Başarılı tarama akışı
+      var okFeed = document.getElementById('feed-ok');
+      var okItems = meta.recent_ok || [];
+      if (okItems.length === 0) {
+        okFeed.innerHTML = '<span style="color:var(--muted);">Henüz veri yok</span>';
+      } else {
+        okFeed.innerHTML = okItems.map(function(r) {
+          return '<div style="border-bottom:1px solid var(--border);padding:2px 0;">'
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + (r.platform||'').toUpperCase() + '</span> '
+            + '<span style="color:var(--text);">' + (r.title || '#' + r.product_id) + '</span> '
+            + '<span style="color:#10b981;font-weight:700;">' + (r.price ? r.price.toFixed(2) + ' ₺' : '') + '</span> '
+            + '<span style="color:var(--muted);font-size:10px;float:right;">' + timeAgo(r.time) + '</span>'
+          + '</div>';
+        }).join('');
+      }
+
+      // Hata akışı
+      var errFeed = document.getElementById('feed-err');
+      var errItems = meta.recent_err || [];
+      if (errItems.length === 0) {
+        errFeed.innerHTML = '<span style="color:var(--muted);">Hata yok</span>';
+      } else {
+        errFeed.innerHTML = errItems.map(function(r) {
+          return '<div style="border-bottom:1px solid var(--border);padding:2px 0;">'
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + (r.platform||'').toUpperCase() + '</span> '
+            + (r.title ? '<span style="color:var(--muted);">' + r.title + '</span> ' : '')
+            + '<span style="color:#dc2626;" title="' + r.msg + '">' + r.msg.substring(0, 40) + (r.msg.length > 40 ? '…' : '') + '</span> '
+            + '<span style="color:var(--muted);font-size:10px;float:right;">' + timeAgo(r.time) + '</span>'
+          + '</div>';
+        }).join('');
+      }
     }
 
     function fetchMonitor() {
@@ -134,7 +219,7 @@
     }
 
     fetchMonitor();
-    setInterval(fetchMonitor, 30000);
+    setInterval(fetchMonitor, 10000);
   })();
   </script>
 
@@ -307,7 +392,7 @@
         <span style="font-size:24px;">⏳</span>
         <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:.5px;color:var(--text);margin:0;">ONAY BEKLEYEN FIRSATLAR</h2>
       </div>
-      <span style="background:#fef3c7;color:#92400e;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_deals|length }} bekliyor</span>
+      <span id="pending-deals-badge" style="background:#fef3c7;color:#92400e;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">{{ pending_deals|length }} bekliyor</span>
     </div>
 
     {% for d in pending_deals %}
@@ -559,6 +644,7 @@
             <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Hatalı URL</th>
             <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Hata</th>
             <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">Zaman</th>
+            <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">İşlem</th>
           </tr>
         </thead>
         <tbody>
@@ -583,6 +669,16 @@
             </td>
             <td style="padding:8px 14px;color:#dc2626;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{ e.error_msg }}">{{ e.error_msg }}</td>
             <td style="padding:8px 14px;color:var(--muted);white-space:nowrap;">{{ e.occurred_at[:16] }}</td>
+            <td style="padding:8px 14px;white-space:nowrap;">
+              {% if e.product_id %}
+              <form method="post" action="/admin/product/{{ e.product_id }}/clear-errors" style="display:inline;margin:0;">
+                <button type="submit" title="Bu ürünün tüm hatalarını sil" style="background:#f59e0b;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Sıfırla</button>
+              </form>
+              <form method="post" action="/admin/product/{{ e.product_id }}/delete" onsubmit="return confirm('Ürün #{{ e.product_id }} kalıcı silinsin mi?')" style="display:inline;margin:0;margin-left:4px;">
+                <button type="submit" title="Ürünü kalıcı sil" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Sil</button>
+              </form>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -641,6 +737,26 @@ function pollQueue() {
 }
 pollQueue();
 setInterval(pollQueue, 3000);
+
+// Canlı istatistikler: 30 saniyede bir güncelle (pending deals, aktif fırsatlar, ürün sayısı)
+function pollLiveStats() {
+  fetch('/api/admin-live').then(function(r){ return r.ok ? r.json() : null; }).then(function(s) {
+    if (!s) return;
+    // "Deal Bekliyor" stat kartını güncelle
+    var cards = document.querySelectorAll('[data-stat-key]');
+    cards.forEach(function(el) {
+      var key = el.getAttribute('data-stat-key');
+      if (key === 'pending_deals' && s.pending_deals !== undefined) el.textContent = s.pending_deals;
+      if (key === 'active_deals'  && s.active_deals  !== undefined) el.textContent = s.active_deals;
+      if (key === 'products'      && s.products       !== undefined) el.textContent = s.products;
+    });
+    // Bekleyen deal badge'ini de güncelle
+    var badge = document.getElementById('pending-deals-badge');
+    if (badge && s.pending_deals !== undefined) badge.textContent = s.pending_deals + ' bekliyor';
+  }).catch(function(){});
+}
+pollLiveStats();
+setInterval(pollLiveStats, 30000);
 
 // ── Admin AJAX helpers ────────────────────────────────────────
 function _ajaxPost(form, followRedirect) {
