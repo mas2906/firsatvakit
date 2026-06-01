@@ -1,10 +1,15 @@
 """Admin paneli ve yönetim işlemleri."""
+import logging
 import os
 import re as _re
 from datetime import date, timedelta
 
+log = logging.getLogger("admin")
+
 from fastapi import APIRouter, BackgroundTasks, Form, Request
 from fastapi.responses import RedirectResponse
+
+from fastapi import Depends
 
 from affiliate import make_short_slug
 from db import get_db
@@ -13,9 +18,10 @@ from scraper_router import (clean_tracking_params, detect_platform, enqueue_url,
 from telegram_pub import publish_deal
 
 from .api import _dispatch_scrape, _run_cross_search
-from .deps import _verify_csrf, cache_invalidate_index, current_user, now_str, require_admin, templates
+from .deps import (_verify_csrf, cache_invalidate_index, current_user,
+                   now_str, require_admin, require_csrf, templates)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_csrf)])
 
 BULK_ADD_LIMIT = 200
 
@@ -168,7 +174,7 @@ async def admin_approve_deal(deal_id: int, request: Request, affiliate_url: str 
     wa_text = f"🔥 %{int(pct)} İNDİRİM!\n\n🛍 {title}\n\n💰 {old_p:,} TL → {new_p:,} TL\n\n👉 {link}\n\n🌐 firsatvakti.com".replace(",", ".")
     cache_invalidate_index()
     from urllib.parse import quote
-    print(f"[admin] ✔ Deal #{deal_id} onaylandı ve yayınlandı")
+    log.info(f"Deal #{deal_id} onaylandı ve yayınlandı")
     return RedirectResponse(f"/admin?wa_text={quote(wa_text)}", status_code=302)
 
 
@@ -179,7 +185,7 @@ async def admin_reject_deal(deal_id: int, request: Request):
     db.execute("UPDATE deals SET active=0, status='rejected' WHERE id=?", (deal_id,))
     db.commit()
     cache_invalidate_index()
-    print(f"[admin] ✘ Deal #{deal_id} reddedildi")
+    log.info(f"Deal #{deal_id} reddedildi")
     return RedirectResponse("/admin", status_code=302)
 
 
@@ -227,7 +233,7 @@ async def admin_approve_link(link_id: int, request: Request, background_tasks: B
     product_id = enqueue_url(db, lq["url"], lq["platform"])
     await _dispatch_scrape(product_id, lq["url"], lq["platform"], background_tasks)
     background_tasks.add_task(_run_cross_search, product_id)
-    print(f"[admin] ✔ Link #{link_id} onaylandı, ürün #{product_id} taranıyor")
+    log.info(f"Link #{link_id} onaylandı, ürün #{product_id} taranıyor")
     return RedirectResponse("/admin", status_code=302)
 
 
@@ -237,7 +243,7 @@ async def admin_reject_link(link_id: int, request: Request):
     db = get_db()
     db.execute("UPDATE link_queue SET status='rejected', reviewed_at=? WHERE id=?", (now_str(), link_id))
     db.commit()
-    print(f"[admin] ✘ Link #{link_id} reddedildi")
+    log.info(f"Link #{link_id} reddedildi")
     return RedirectResponse("/admin", status_code=302)
 
 

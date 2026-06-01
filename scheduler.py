@@ -18,7 +18,8 @@ log = logging.getLogger("scheduler")
 
 
 def now_str():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    from datetime import timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 async def auto_expire_stale_deals():
@@ -72,55 +73,6 @@ async def _cleanup_worker():
             log.error(f"[cleanup] Hata: {e}", exc_info=True)
         await asyncio.sleep(21600)  # 6 saatte bir
 
-
-async def _catchup_worker():
-    """
-    Her 5 saniyede platform kuyruğunu kontrol eder.
-    Herhangi bir platform için kuyruk tamamen boşaldıysa, o platformun
-    ürünlerini ANINDA kuyruğa ekler — 30 saniyelik _requeue döngüsünü beklemez.
-    Sıralama: en eski last_seen_at önce (round-robin tarih bazlı).
-    """
-    log.info("[catchup] başladı")
-    while True:
-        try:
-            db = get_db()
-            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            for plat in ["amazon", "trendyol", "n11", "hepsiburada"]:
-                plat_active = db.execute(
-                    "SELECT COUNT(*) FROM scan_queue WHERE platform=? AND status IN ('pending','processing')",
-                    (plat,)
-                ).fetchone()[0]
-                if plat_active > 0:
-                    continue
-
-                # Kuyruk boş — en eski taranmış ürünleri hemen ekle
-                rows = db.execute("""
-                    SELECT p.id, p.source_url FROM products p
-                    WHERE p.platform = ?
-                      AND p.source_url IS NOT NULL
-                      AND NOT EXISTS (
-                          SELECT 1 FROM scan_queue sq
-                          WHERE sq.product_id = p.id
-                            AND sq.status IN ('pending', 'processing')
-                      )
-                    ORDER BY COALESCE(p.last_seen_at, '2000-01-01') ASC
-                    LIMIT 500
-                """, (plat,)).fetchall()
-
-                if not rows:
-                    continue
-
-                for r in rows:
-                    db.execute(
-                        "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) "
-                        "VALUES(?,?,?,'pending',2,?)",
-                        (r["id"], r["source_url"], plat, now)
-                    )
-                db.commit()
-                log.info(f"[catchup] ✅ {plat} kuyruğu boşaldı — {len(rows)} ürün anında eklendi")
-        except Exception as e:
-            log.error(f"[catchup] Hata: {e}", exc_info=True)
-        await asyncio.sleep(5)
 
 
 async def _requeue_worker():
@@ -335,7 +287,6 @@ async def main_loop():
             _expire_worker(),
             _cleanup_worker(),
             _requeue_worker(),
-            _catchup_worker(),
         )
     except Exception as e:
         log.critical(f"Scheduler beklenmedik hatayla durdu: {e}", exc_info=True)

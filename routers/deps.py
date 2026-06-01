@@ -91,6 +91,30 @@ def _verify_csrf(request: Request, csrf_token: str) -> bool:
     return secrets.compare_digest(cookie, csrf_token)
 
 
+async def require_csrf(request: Request) -> None:
+    """
+    Admin router'ındaki tüm POST/PUT/PATCH/DELETE isteklerine uygulanan CSRF guard.
+    İki yol kabul edilir (öncelik sırasıyla):
+      1. X-CSRFToken başlığı — JavaScript/fetch tabanlı istekler için
+      2. Origin/Referer başlığı — token yoksa güvenilir kaynak kontrolü
+    """
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return
+    header_token = request.headers.get("X-CSRFToken", "")
+    if header_token:
+        if not _verify_csrf(request, header_token):
+            raise HTTPException(403, "Geçersiz CSRF token")
+        return
+    # Header yoksa Origin/Referer ile kaynak doğrula
+    site = os.getenv("SITE_URL", "https://firsatvakti.com")
+    origin  = request.headers.get("Origin", "")
+    referer = request.headers.get("Referer", "")
+    if origin and not origin.startswith(site):
+        raise HTTPException(403, "Geçersiz istek kaynağı (CSRF)")
+    if not origin and not referer.startswith(site):
+        raise HTTPException(403, "Geçersiz istek kaynağı (CSRF)")
+
+
 # ── Ana sayfa cache (TTL bazlı) ───────────────────────────────
 _index_cache: dict = {}
 
@@ -134,14 +158,17 @@ def get_ticker_items(db):
 
 
 def now_str() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    from datetime import timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def current_user(request: Request) -> Optional[dict]:
     uid = request.session.get("user_id") if hasattr(request, "session") else None
     if not uid:
         return None
-    return get_db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return get_db().execute(
+        "SELECT id, username, email, role FROM users WHERE id=?", (uid,)
+    ).fetchone()
 
 
 def require_admin(request: Request):

@@ -318,7 +318,8 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
             ).fetchall()
             for w in watchers:
                 try:
-                    send_price_alert(
+                    await asyncio.to_thread(
+                        send_price_alert,
                         to=w["email"], username=w["username"],
                         product_title=title_str, old_price=old_price,
                         new_price=price, pct=pct,
@@ -568,8 +569,11 @@ async def reset_stale_jobs(request: Request):
 
 
 @router.post("/api/scraper-webhook")
-async def scraper_webhook(payload: WebhookPayload, background_tasks: BackgroundTasks):
+async def scraper_webhook(payload: WebhookPayload, request: Request, background_tasks: BackgroundTasks):
     """Scraper servisi webhook (timeout 5s, log metrics)."""
+    key = request.headers.get("X-Webhook-Key", "")
+    if WEBHOOK_KEY and key != WEBHOOK_KEY:
+        raise HTTPException(401, "Geçersiz webhook anahtarı")
     start = time.time()
     log.info(f"[webhook] {payload.product_id} {payload.platform} started ({time.time()-start:.1f}s)")
     background_tasks.add_task(_save_scraped_data_async, payload.product_id, payload.data, payload.url, payload.platform)

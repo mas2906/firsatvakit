@@ -43,11 +43,43 @@ def migrate_password_on_login(db, user_id: int, plain: str):
     db.commit()
 
 
-_attempts: dict = {}
 MAX_ATTEMPTS, LOCKOUT_MIN = 5, 15
 
 
-def check_login_allowed(email: str) -> tuple:
+def check_login_allowed(email: str, db=None) -> tuple:
+    """
+    Brute-force koruması — önce DB tablosunu kontrol eder (restart'a dayanıklı).
+    db parametresi verilmezse in-memory fallback kullanılır.
+    """
+    if db is not None:
+        try:
+            row = db.execute(
+                "SELECT COUNT(*) FROM login_attempts "
+                "WHERE email=? AND success=0 "
+                "AND attempted_at::timestamp > NOW() - INTERVAL '15 minutes'",
+                (email.lower().strip(),)
+            ).fetchone()
+            failed = row[0] if row else 0
+            if failed >= MAX_ATTEMPTS:
+                last_row = db.execute(
+                    "SELECT MAX(attempted_at) FROM login_attempts "
+                    "WHERE email=? AND success=0 "
+                    "AND attempted_at::timestamp > NOW() - INTERVAL '15 minutes'",
+                    (email.lower().strip(),)
+                ).fetchone()
+                if last_row and last_row[0]:
+                    from datetime import datetime
+                    last_dt = datetime.strptime(str(last_row[0])[:19], "%Y-%m-%d %H:%M:%S")
+                    rem = int((last_dt.timestamp() + LOCKOUT_MIN * 60) - time.time())
+                    if rem > 0:
+                        return False, rem
+            return True, 0
+        except Exception:
+            pass  # DB hatasında in-memory fallback'e düş
+
+    # In-memory fallback (DB yoksa)
+    _attempts: dict = getattr(check_login_allowed, "_mem", {})
+    check_login_allowed._mem = _attempts
     key = email.lower().strip()
     now = time.time()
     cutoff = now - LOCKOUT_MIN * 60
@@ -63,6 +95,8 @@ def check_login_allowed(email: str) -> tuple:
 
 
 def record_login_attempt(email: str, success: bool):
+    _attempts: dict = getattr(check_login_allowed, "_mem", {})
+    check_login_allowed._mem = _attempts
     key = email.lower().strip()
     _attempts.setdefault(key, [])
     _attempts[key].append((time.time(), success))

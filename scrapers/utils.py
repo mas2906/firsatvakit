@@ -365,7 +365,7 @@ async def stream_fetch(
     url: str,
     json_markers: list = None,
     html_markers: list = None,
-    max_kb: int = 600,
+    max_kb: int = 300,
     timeout: int = 15,
     headers: dict = None,
     validate_fn=None,
@@ -403,6 +403,14 @@ async def stream_fetch(
             # 404/410 kalıcı olarak yok — çağırana sinyal ver
             if r.status_code in (404, 410):
                 return "__NOT_FOUND__"
+            return None
+        cl = int(r.headers.get("content-length", 0))
+        if cl and cl > max_bytes:
+            log.info(f"[stream_fetch] Content-Length={cl//1024}KB > {max_kb}KB — atlandı")
+            try:
+                await r.aclose()
+            except Exception:
+                pass
             return None
         try:
             async for chunk in r.aiter_content():
@@ -445,12 +453,16 @@ async def stream_fetch(
     except Exception as _ex:
         log.info(f"[stream_fetch] streaming hatası: {_ex} — {url[:60]}")
 
-    # Fallback: non-streaming full download
+    # Fallback: non-streaming — boyut sınırlı
     try:
         r = await session.get(url, **req_kwargs)
-        sz = len(r.text) if r.text else 0
+        text = r.text if r.text else ""
+        sz = len(text)
         if r.status_code == 200 and sz > 5000:
-            return r.text
+            if sz > max_bytes:
+                log.info(f"[stream_fetch] fallback kırpıldı {sz//1024}KB→{max_kb}KB")
+                text = text[:max_bytes]
+            return text
         log.info(f"[stream_fetch] fallback HTTP {r.status_code} {sz}B — {url[:60]}")
     except asyncio.CancelledError:
         raise

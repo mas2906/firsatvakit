@@ -49,6 +49,13 @@ PLATFORM_CONCURRENT = {
     "n11":         6,   # GQL API
 }
 
+PLATFORM_MAX = {
+    "amazon":      8,
+    "trendyol":    8,
+    "n11":         8,
+    "hepsiburada": 6,
+}
+
 BASE_WEIGHTS = {
     "amazon":      1,
     "trendyol":    1,
@@ -114,9 +121,9 @@ async def process_job(job, client, sem, pool):
         # Trendyol 45s → 35s (mobile layer genellikle 3-8s'de biter)
         # N11 45s → 25s (GQL birincil → çok hızlı)
         _timeout = (90  if platform == "hepsiburada" else
-                    50  if platform == "amazon"       else
-                    25  if platform == "n11"          else
-                    35)
+                    60  if platform == "amazon"       else
+                    60  if platform == "n11"          else
+                    40)
         try:
             data = await asyncio.wait_for(
                 scrape_product(url, platform, pool=pool, price_only=price_only, cached_image=cached_image),
@@ -337,24 +344,15 @@ async def express_lane(platform: str, client: httpx.AsyncClient, pool):
             await asyncio.sleep(2)
 
 
-PLATFORM_MAX = {
-    "amazon":      8,
-    "trendyol":    8,
-    "n11":         8,
-    "hepsiburada": 6,
-}
-
-
 async def _run_platform(platform: str, client, pool, fn):
     """Tek platform loop'unu süresiz çalıştır — crash sonrası 10s bekleyip yeniden başlat."""
     while True:
         try:
             await fn(platform, client, pool)
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
             log.error(f"[{platform}/{fn.__name__}] Beklenmeyen çıkış: {e} — 10s sonra yeniden başlıyor")
-            await asyncio.sleep(10)
-        except BaseException as e:
-            log.error(f"[{platform}/{fn.__name__}] Kritik çıkış: {e} — 10s sonra yeniden başlıyor")
             await asyncio.sleep(10)
 
 

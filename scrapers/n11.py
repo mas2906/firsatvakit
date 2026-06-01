@@ -93,7 +93,7 @@ _N11_MOBILE_UAS = [
 
 # ── Arama oturumu sayacı ─────────────────────────────────────────
 _search_counter = 0
-_SEARCH_RESET_EVERY = 40
+_SEARCH_RESET_EVERY = 80
 
 # ── Circuit breaker ──────────────────────────────────────────────
 _curl_block_streak   = 0
@@ -150,7 +150,7 @@ async def _get_or_create_session() -> tuple:
             imp = random.choice(IMPERSONATE_POOL)
             from scrapers.proxy_pool import get_proxy_pool
             _pp = get_proxy_pool()
-            proxy = _pp.get() if _pp.has_proxies else None
+            proxy = await _pp.get() if _pp.has_proxies else None
             s = CurlSession(impersonate=imp, timeout=12,
                             proxies=_pp.curl_dict(proxy) if proxy else None)
             _SESSIONS.append((s, imp, proxy))
@@ -161,7 +161,8 @@ async def _get_or_create_session() -> tuple:
     if new_entry:
         s, imp, proxy = new_entry
         try:
-            await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(UA_POOL)}, timeout=8)
+            r = await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(UA_POOL)}, timeout=8, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result
@@ -183,7 +184,7 @@ async def _get_mobile_session() -> tuple:
             imp = random.choice(MOBILE_IMPERSONATE_POOL)
             from scrapers.proxy_pool import get_proxy_pool
             _pp = get_proxy_pool()
-            proxy = _pp.get() if _pp.has_proxies else None
+            proxy = await _pp.get() if _pp.has_proxies else None
             s = CurlSession(impersonate=imp, timeout=12,
                             proxies=_pp.curl_dict(proxy) if proxy else None)
             _MOBILE_SESSIONS.append((s, imp, proxy))
@@ -194,7 +195,8 @@ async def _get_mobile_session() -> tuple:
     if new_entry:
         s, imp, proxy = new_entry
         try:
-            await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(_N11_MOBILE_UAS)}, timeout=8)
+            r = await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(_N11_MOBILE_UAS)}, timeout=8, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result
@@ -317,7 +319,7 @@ async def _via_graphql(url: str) -> Optional[dict]:
         log.debug("[n11/graphql] contentId çıkarılamadı: %s", url)
         return None
 
-    await _limiter_gql.wait()
+    # Rate limit dış scrape_n11() içinde bekleniyor — burada ikinci kez bekleme
 
     ua = random.choice(UA_POOL)
     headers = {
@@ -695,7 +697,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
             log.info(f"[n11/mobile] ✔ ua={'iOS' if is_ios else 'Android'} {result.get('title','')[:50]} | {result.get('price')}")
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
-                get_proxy_pool().mark_ok(proxy)
+                await get_proxy_pool().mark_ok(proxy)
         return result
     except Exception as e:
         err = str(e)
@@ -704,7 +706,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
         log.debug(f"[n11/mobile] Hata: {e}")
         if proxy:
             from scrapers.proxy_pool import get_proxy_pool
-            get_proxy_pool().mark_failed(proxy)
+            await get_proxy_pool().mark_failed(proxy)
         _reset_mobile_session()
         return None
 
@@ -714,7 +716,7 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
     try:
         s, imp, proxy = await _get_or_create_session()
         html_text = await stream_fetch(
-            s, url, json_markers=["window.model"], max_kb=1000, timeout=12,
+            s, url, json_markers=["window.model"], max_kb=300, timeout=12,
             headers={"Referer": "https://www.n11.com/", "User-Agent": random.choice(UA_POOL)}
         )
         if not html_text or len(html_text) < 5000:
@@ -730,7 +732,7 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
             _on_curl_success()
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
-                get_proxy_pool().mark_ok(proxy)
+                await get_proxy_pool().mark_ok(proxy)
         return result
     except Exception as e:
         err = str(e)
@@ -739,7 +741,7 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
         log.error(f"[n11/curl_cffi] Hata: {e}")
         if proxy:
             from scrapers.proxy_pool import get_proxy_pool
-            get_proxy_pool().mark_failed(proxy)
+            await get_proxy_pool().mark_failed(proxy)
         _reset_curl_session()
         return None
 

@@ -56,7 +56,7 @@ _session_idx = 0
 
 # ── Arama oturumu sayacı ─────────────────────────────────────────
 _search_counter = 0
-_SEARCH_RESET_EVERY = 40
+_SEARCH_RESET_EVERY = 80
 
 # Mobil session pool (iOS Safari / Android Chrome TLS fingerprint)
 _TY_MOBILE_POOL_SIZE = 2
@@ -76,7 +76,7 @@ async def _get_curl_session() -> tuple:
             imp = random.choice(IMPERSONATE_POOL)
             from scrapers.proxy_pool import get_proxy_pool
             _pp = get_proxy_pool()
-            proxy = _pp.get() if _pp.has_proxies else None
+            proxy = await _pp.get() if _pp.has_proxies else None
             s = CurlSession(impersonate=imp, timeout=20,
                             proxies=_pp.curl_dict(proxy) if proxy else None)
             _SESSIONS.append((s, imp, proxy))
@@ -87,7 +87,8 @@ async def _get_curl_session() -> tuple:
     if new_entry:
         s, imp, proxy = new_entry
         try:
-            await s.get("https://www.trendyol.com/", timeout=8)
+            r = await s.get("https://www.trendyol.com/", timeout=8, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result
@@ -111,7 +112,7 @@ async def _get_mobile_session() -> tuple:
                 imp = random.choice(MOBILE_IMPERSONATE_POOL)
                 from scrapers.proxy_pool import get_proxy_pool
                 _pp = get_proxy_pool()
-                proxy = _pp.get() if _pp.has_proxies else None
+                proxy = await _pp.get() if _pp.has_proxies else None
                 s = CurlSession(impersonate=imp, timeout=15,
                                 proxies=_pp.curl_dict(proxy) if proxy else None)
                 _MOBILE_SESSIONS.append((s, imp, proxy))
@@ -126,8 +127,9 @@ async def _get_mobile_session() -> tuple:
     if new_entry:
         s, imp, proxy = new_entry
         try:
-            await s.get("https://www.trendyol.com/", timeout=8,
-                        headers={"User-Agent": random.choice(_TY_MOBILE_UAS)})
+            r = await s.get("https://www.trendyol.com/", timeout=8,
+                            headers={"User-Agent": random.choice(_TY_MOBILE_UAS)}, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result
@@ -305,7 +307,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
     if not CURL_AVAILABLE:
         return None
     try:
-        await _limiter_mobile.wait()
+        # Rate limit dış scrape_trendyol() içinde bekleniyor — burada ikinci kez bekleme
         session, imp_mob, proxy = await _get_mobile_session()
         ua = random.choice(_TY_MOBILE_UAS)
         is_ios = "iPhone" in ua or "iPad" in ua
@@ -340,7 +342,7 @@ async def _via_mobile(url: str) -> Optional[dict]:
             log.info(f"[trendyol/mobile] ✔ ua={'iOS' if is_ios else 'Android'} title={data['title'][:40]!r}")
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
-                get_proxy_pool().mark_ok(proxy)
+                await get_proxy_pool().mark_ok(proxy)
         return data
     except Exception as e:
         err = str(e)
@@ -365,7 +367,7 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
         html = await stream_fetch(
             session, url,
             json_markers=["__envoy__PROPS"],
-            max_kb=700,
+            max_kb=300,
             timeout=15,
             headers={
                 "Accept-Language": "tr-TR,tr;q=0.9",
@@ -382,7 +384,7 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
             log.info("[trendyol/curl_cffi] Block algılandı — session sıfırlanıyor")
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
-                get_proxy_pool().mark_failed(proxy)
+                await get_proxy_pool().mark_failed(proxy)
             _reset_curl_session()
             return None
 

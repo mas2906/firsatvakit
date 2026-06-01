@@ -22,7 +22,8 @@ from routers import admin, api, auth, misc, products
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    import asyncio
+    await asyncio.to_thread(init_db)
     yield
 
 

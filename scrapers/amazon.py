@@ -453,7 +453,8 @@ async def _get_mobile_session() -> tuple:
         try:
             ua = random.choice(_IOS_UAS)
             warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
-            await s.get("https://www.amazon.com.tr/", headers=warmup_hdrs, timeout=10)
+            r = await s.get("https://www.amazon.com.tr/", headers=warmup_hdrs, timeout=10, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result

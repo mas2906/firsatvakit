@@ -945,5 +945,37 @@ function copyWaText() {
     document.getElementById('wa-modal').style.display = 'flex';
   }
 })();
+
+// ── CSRF: tüm admin fetch/form isteklerine X-CSRFToken başlığı ekle ──
+(function() {
+  function getCsrf() {
+    return document.cookie.split(';').reduce(function(v, c) {
+      var p = c.trim().split('=');
+      return p[0] === 'csrftoken' ? decodeURIComponent(p[1]) : v;
+    }, '');
+  }
+  // fetch monkey-patch
+  var _fetch = window.fetch;
+  window.fetch = function(url, opts) {
+    opts = opts || {};
+    if (!opts.method || opts.method.toUpperCase() === 'GET') return _fetch(url, opts);
+    opts.headers = opts.headers || {};
+    opts.headers['X-CSRFToken'] = getCsrf();
+    return _fetch(url, opts);
+  };
+  // Form submit patch — FormData ile gönderilen form'lar için
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (form.method && form.method.toUpperCase() !== 'POST') return;
+    var inp = form.querySelector('input[name="csrf_token"]');
+    if (!inp) {
+      inp = document.createElement('input');
+      inp.type = 'hidden';
+      inp.name = 'csrf_token';
+      form.appendChild(inp);
+    }
+    inp.value = getCsrf();
+  }, true);
+})();
 </script>
 {% endblock %}

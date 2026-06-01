@@ -128,7 +128,7 @@ async def _get_session() -> tuple:
                 imp = random.choice(_IOS_IMPERS)
                 from scrapers.proxy_pool import get_proxy_pool
                 _pp = get_proxy_pool()
-                proxy = _pp.get() if _pp.has_proxies else None
+                proxy = await _pp.get() if _pp.has_proxies else None
                 proxies_dict = _pp.curl_dict(proxy) if proxy else None
                 s = CurlSession(impersonate=imp, timeout=20,
                                 proxies=proxies_dict if proxies_dict else None)
@@ -150,7 +150,8 @@ async def _get_session() -> tuple:
         try:
             ua = random.choice(_IOS_UAS)
             warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
-            await s.get("https://www.hepsiburada.com/", headers=warmup_hdrs, timeout=10)
+            r = await s.get("https://www.hepsiburada.com/", headers=warmup_hdrs, timeout=10, stream=True)
+            await r.aclose()
         except Exception:
             pass
     return result
@@ -294,7 +295,7 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
                      f"{(result.get('title') or '')[:50]} | {result.get('price')} ₺")
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
-                get_proxy_pool().mark_ok(proxy)
+                await get_proxy_pool().mark_ok(proxy)
         return result
 
     except Exception as e:
@@ -304,7 +305,7 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
         log.debug(f"[HB/curl] Hata: {e}")
         if proxy:
             from scrapers.proxy_pool import get_proxy_pool
-            get_proxy_pool().mark_failed(proxy)
+            await get_proxy_pool().mark_failed(proxy)
         _reset_session()
         return None
 

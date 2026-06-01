@@ -32,7 +32,7 @@ async def _check_one(proxy: str) -> tuple[bool, float]:
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=_REQUEST_TIMEOUT) as c:
-            r = await c.get(_HEALTH_URL)
+            r = await c.head(_HEALTH_URL)
         elapsed_ms = (time.monotonic() - t0) * 1000
         return r.status_code == 200, elapsed_ms
     except Exception:

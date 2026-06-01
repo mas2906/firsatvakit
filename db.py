@@ -358,6 +358,8 @@ def _create_schema(db: _Connection):
             brand TEXT, category TEXT, barcode TEXT,
             stock TEXT DEFAULT 'unknown',
             ai_review_summary TEXT,
+            oos_count INTEGER DEFAULT 0,
+            variants TEXT,
             first_seen_at TEXT, last_seen_at TEXT
         )""",
         """CREATE TABLE IF NOT EXISTS price_history (
@@ -570,15 +572,18 @@ def _create_schema(db: _Connection):
 
 
 def _ensure_admin(db: _Connection):
+    import secrets as _secrets
     from security import hash_password
     from datetime import datetime
     exists = db.execute(
         "SELECT id FROM users WHERE email='admin@firsatvakti.com'"
     ).fetchone()
     if not exists:
+        first_pw = _secrets.token_urlsafe(14)
         db.execute(
             "INSERT INTO users(username,email,password_hash,role,created_at) VALUES(?,?,?,?,?)",
-            ("admin", "admin@firsatvakti.com", hash_password("admin123"), "admin",
+            ("admin", "admin@firsatvakti.com", hash_password(first_pw), "admin",
              datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
         )
-        
+        print(f"[db] ✅ Admin kullanıcısı oluşturuldu.")
+        print(f"[db] 🔑 İlk şifre: {first_pw}  ← admin panelinden hemen değiştirin!")
