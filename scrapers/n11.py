@@ -160,6 +160,16 @@ async def _get_or_create_session() -> tuple:
         result = _SESSIONS[_session_idx]
     if new_entry:
         s, imp, proxy = new_entry
+        # Browser'dan Cloudflare cookie'lerini al (cf_clearance, __cf_bm)
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("n11")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[n11] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[n11] browser cookie enjeksiyonu atlandı: {e}")
+        # Warmup
         try:
             r = await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(UA_POOL)}, timeout=8, stream=True)
             await r.aclose()
@@ -194,6 +204,14 @@ async def _get_mobile_session() -> tuple:
         result = _MOBILE_SESSIONS[_mobile_session_idx]
     if new_entry:
         s, imp, proxy = new_entry
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("n11")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[n11/mobile] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[n11/mobile] browser cookie enjeksiyonu atlandı: {e}")
         try:
             r = await s.get("https://www.n11.com/", headers={"User-Agent": random.choice(_N11_MOBILE_UAS)}, timeout=8, stream=True)
             await r.aclose()
@@ -684,12 +702,22 @@ async def _via_mobile(url: str) -> Optional[dict]:
         if r.status_code == 404:
             return {"dead_url": True}
         if r.status_code in (403, 429) or r.status_code != 200:
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("n11")
+            except Exception:
+                pass
             _reset_mobile_session()
             return None
         html = r.text
         if not html or len(html) < 3000:
             return None
         if any(t.lower() in html[:3000].lower() for t in CLOUDFLARE_TITLES):
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("n11")
+            except Exception:
+                pass
             _reset_mobile_session()
             return None
         result = await asyncio.to_thread(lambda: _parse_html(html))
@@ -725,6 +753,11 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
             return None
         if any(t.lower() in html_text.lower() for t in CLOUDFLARE_TITLES):
             _on_curl_block()
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("n11")
+            except Exception:
+                pass
             _reset_curl_session()
             return None
         result = await asyncio.to_thread(lambda: _parse_html(html_text))

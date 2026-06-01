@@ -144,9 +144,19 @@ async def _get_session() -> tuple:
         _session_idx = (_session_idx + 1) % len(_SESSIONS)
         result = _SESSIONS[_session_idx]
 
-    # Warm-up — lock dışında
+    # Warm-up + browser cookie enjeksiyonu — lock dışında
     if new_entry:
         s, imp, proxy = new_entry
+        # Browser'dan Akamai cookie'lerini al (_abck, bm_sz) ve session'a yükle
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("hepsiburada")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[HB/curl] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[HB/curl] browser cookie enjeksiyonu atlandı: {e}")
+        # Warmup — body indirmeden sadece header/cookie al
         try:
             ua = random.choice(_IOS_UAS)
             warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
@@ -242,7 +252,12 @@ async def _via_ios_safari(url: str) -> Optional[dict]:
         if r.status_code in (404, 410):
             return {"dead_url": True}
         if r.status_code in (403, 429, 503):
-            log.warning(f"[HB/curl] HTTP {r.status_code} — blok, session sıfırlanıyor")
+            log.warning(f"[HB/curl] HTTP {r.status_code} — Akamai cookie yenileniyor")
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("hepsiburada")
+            except Exception:
+                pass
             _reset_session()
             return None
         if r.status_code != 200:

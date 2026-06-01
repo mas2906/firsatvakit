@@ -450,6 +450,16 @@ async def _get_mobile_session() -> tuple:
 
     if new_entry:
         s, imp, proxy = new_entry
+        # Browser'dan PerimeterX/Amazon cookie'lerini al
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("amazon")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[amazon/mobile] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[amazon/mobile] browser cookie enjeksiyonu atlandı: {e}")
+        # Warmup
         try:
             ua = random.choice(_IOS_UAS)
             warmup_hdrs = {**_MOBILE_IOS_HEADERS, "User-Agent": ua}
@@ -486,6 +496,11 @@ async def _via_mobile(url: str) -> Optional[dict]:
             return {"not_found": True}
         if r.status_code in (403, 429, 503):
             _on_mobile_block()
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("amazon")
+            except Exception:
+                pass
             _reset_mobile_session()
             return None
         if r.status_code != 200:

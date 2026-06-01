@@ -86,6 +86,16 @@ async def _get_curl_session() -> tuple:
         result = _SESSIONS[_session_idx]
     if new_entry:
         s, imp, proxy = new_entry
+        # Browser'dan Cloudflare cookie'lerini al (cf_clearance, __cf_bm)
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("trendyol")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[trendyol] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[trendyol] browser cookie enjeksiyonu atlandı: {e}")
+        # Warmup
         try:
             r = await s.get("https://www.trendyol.com/", timeout=8, stream=True)
             await r.aclose()
@@ -126,6 +136,14 @@ async def _get_mobile_session() -> tuple:
         result = _MOBILE_SESSIONS[_mobile_session_idx]
     if new_entry:
         s, imp, proxy = new_entry
+        try:
+            from scrapers.browser_cookies import get_browser_harvester
+            bc = await get_browser_harvester().get("trendyol")
+            if bc:
+                s.cookies.update(bc)
+                log.info(f"[trendyol/mobile] {len(bc)} browser cookie enjekte edildi")
+        except Exception as e:
+            log.debug(f"[trendyol/mobile] browser cookie enjeksiyonu atlandı: {e}")
         try:
             r = await s.get("https://www.trendyol.com/", timeout=8,
                             headers={"User-Agent": random.choice(_TY_MOBILE_UAS)}, stream=True)
@@ -330,11 +348,24 @@ async def _via_mobile(url: str) -> Optional[dict]:
                 "sec-fetch-site": "none",
             })
         r = await session.get(url, headers=headers)
-        if r.status_code != 200:
+        if r.status_code in (403, 429) or r.status_code != 200:
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("trendyol")
+            except Exception:
+                pass
             _reset_mobile_session()
             return None
         html = r.text
-        if not html or len(html) < 2000 or _is_blocked(html):
+        if not html or len(html) < 2000:
+            _reset_mobile_session()
+            return None
+        if _is_blocked(html):
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("trendyol")
+            except Exception:
+                pass
             _reset_mobile_session()
             return None
         data = await asyncio.to_thread(_parse, html, url)
@@ -381,10 +412,15 @@ async def _via_curl_cffi(url: str) -> Optional[dict]:
             return None
 
         if _is_blocked(html):
-            log.info("[trendyol/curl_cffi] Block algılandı — session sıfırlanıyor")
+            log.info("[trendyol/curl_cffi] Block algılandı — CF cookie yenileniyor")
             if proxy:
                 from scrapers.proxy_pool import get_proxy_pool
                 await get_proxy_pool().mark_failed(proxy)
+            try:
+                from scrapers.browser_cookies import get_browser_harvester
+                await get_browser_harvester().force_refresh("trendyol")
+            except Exception:
+                pass
             _reset_curl_session()
             return None
 
