@@ -305,15 +305,22 @@ async def main() -> None:
     for p, c in PLATFORM_CONCURRENT.items():
         log.info(f"  {p}: concurrent={c} batch={c*2}")
 
-    async with httpx.AsyncClient() as client:
-        await reset_stale_jobs(client)
+    # Her platform kendi httpx client'ına sahip — birbirini etkilemez
+    clients = {p: httpx.AsyncClient(timeout=15) for p in platforms}
+    init_client = httpx.AsyncClient(timeout=15)
+    try:
+        await reset_stale_jobs(init_client)
         await asyncio.gather(*[
-            _run_platform(p, client, poll_platform)
+            _run_platform(p, clients[p], poll_platform)
             for p in platforms
         ], *[
-            _run_platform(p, client, express_lane)
+            _run_platform(p, clients[p], express_lane)
             for p in platforms
         ])
+    finally:
+        await init_client.aclose()
+        for c in clients.values():
+            await c.aclose()
 
 
 if __name__ == "__main__":
