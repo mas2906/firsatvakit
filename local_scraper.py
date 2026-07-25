@@ -43,7 +43,7 @@ PLATFORM_CONCURRENT = {
     "amazon":      2,
     "trendyol":    6,
     "hepsiburada": 2,
-    "n11":         6,
+    "n11":         2,   # camoufox RAM ağırlıklı — max 2 browser instance
 }
 
 SCHEDULE = {

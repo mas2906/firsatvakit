@@ -32,6 +32,15 @@ from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.n11")
 
+# Aynı anda max 2 camoufox instance — RAM ve CPU koruması
+_BROWSER_SEM: Optional[asyncio.Semaphore] = None
+
+def _browser_sem() -> asyncio.Semaphore:
+    global _BROWSER_SEM
+    if _BROWSER_SEM is None:
+        _BROWSER_SEM = asyncio.Semaphore(2)
+    return _BROWSER_SEM
+
 _N11_GQL_URL   = "https://www.n11.com/nss/api/graphql"
 _N11_GQL_QUERY = """
 query ProductDetail($contentId: Long!) {
@@ -447,51 +456,54 @@ async def _n11_via_browser(url: str) -> Optional[dict]:
         log.warning("[n11/browser] camoufox kurulu değil")
         return None
     cid = _n11_extract_cid(url)
-    try:
-        gql_result: dict = {}
 
-        async def _on_response(response):
-            if response.status != 200:
-                return
-            if "graphql" not in response.url and "nss/api" not in response.url:
-                return
-            try:
-                j = await response.json()
-                parsed = _n11_parse_gql(j)
-                if parsed and parsed.get("price"):
-                    gql_result.update(parsed)
-                    log.info(f"[n11/browser] GQL intercept ✔ price={parsed.get('price')}")
-            except Exception:
-                pass
+    async with _browser_sem():
+        try:
+            gql_result: dict = {}
 
-        async with AsyncCamoufox(headless=True) as browser:
-            page = await browser.new_page()
-            page.on("response", _on_response)
-
-            try:
-                await page.goto(url, wait_until="networkidle", timeout=40000)
-            except Exception:
+            async def _on_response(response):
+                if response.status != 200:
+                    return
+                if "graphql" not in response.url and "nss/api" not in response.url:
+                    return
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                    j = await response.json()
+                    parsed = _n11_parse_gql(j)
+                    if parsed and parsed.get("price"):
+                        gql_result.update(parsed)
+                        log.info(f"[n11/browser] GQL intercept ✔ price={parsed.get('price')}")
                 except Exception:
                     pass
-                await asyncio.sleep(6)
 
-            if gql_result.get("price"):
-                return gql_result
+            html = ""
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                page.on("response", _on_response)
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=40000)
+                except Exception:
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(5)
 
-            html = await page.content()
-            await page.close()
+                if gql_result.get("price"):
+                    await page.close()
+                    return gql_result
 
-        # Cloudflare engel sayfası (küçük, ürün verisi yok)
-        if len(html) < 15000:
-            log.debug(f"[n11/browser] Cloudflare engeli ({len(html)} byte)")
+                html = await page.content()
+                await page.close()
+                # browser context manager kapanırken Firefox process kapatılır
+
+            if len(html) < 15000:
+                log.debug(f"[n11/browser] Cloudflare engeli ({len(html)} byte)")
+                return None
+
+            return _n11_parse_html(html, cid=cid)
+        except Exception as e:
+            log.debug(f"[n11/browser] hata: {e}")
             return None
-
-        return _n11_parse_html(html, cid=cid)
-    except Exception as e:
-        log.debug(f"[n11/browser] hata: {e}")
-        return None
 
 
 async def scrape_n11(url: str, price_only: bool = False,
