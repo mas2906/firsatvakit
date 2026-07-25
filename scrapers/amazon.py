@@ -263,7 +263,8 @@ def _az_best_img(url: str) -> str:
     CSS sprite / bundle URL'lerini olduğu gibi bırakır."""
     if not url or "|" in url or ".css" in url.lower():
         return url
-    m = re.match(r'(https://m\.media-amazon\.com/images/I/[A-Za-z0-9_-]{8,40})\.', url)
+    # Image ID'leri + ve % içerebilir (örn: 81C+gMIe8yL veya 41%2BJln...)
+    m = re.match(r'(https://m\.media-amazon\.com/images/I/[A-Za-z0-9+%_-]+)\.', url)
     if m:
         return f"{m.group(1)}._AC_SL1500_.jpg"
     return url
@@ -273,7 +274,7 @@ def _az_is_valid_img(url: str) -> bool:
     """Gerçek Amazon ürün görseli mi (CSS sprite/bundle değil)."""
     if not url or "|" in url or ".css" in url.lower():
         return False
-    return bool(re.search(r'/images/I/[A-Za-z0-9_-]{8,40}\._AC_(?:SL|SX|SY)\d+_', url))
+    return "m.media-amazon.com/images/I/" in url
 
 
 def _parse_dadi(el) -> Optional[str]:
@@ -430,7 +431,7 @@ def _az_parse(html: str) -> Optional[dict]:
 
     if not image_url:
         m_cdn = re.search(
-            r'https://m\.media-amazon\.com/images/I/([A-Za-z0-9_-]{8,40})\._AC_(?:SL|SX|SY)\d+_\.jpg',
+            r'https://m\.media-amazon\.com/images/I/([A-Za-z0-9+%_-]+)\._AC_(?:SL|SX|SY)\d+_\.jpg',
             html,
         )
         if m_cdn:
