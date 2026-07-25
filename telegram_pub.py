@@ -220,6 +220,38 @@ async def notify_pending_approval(
     await _send(ADMIN_TOKEN, ADMIN_CHAT_ID, msg, image_url)
 
 
+async def notify_approved_deal_update(
+    deal_id: int,
+    product: dict,
+    new_price: float,
+    old_price: float,
+    pct: float,
+):
+    """Admin botuna onaylı (yayında) deal'da ek indirim bildirimi gönder."""
+    if not ADMIN_TOKEN or not ADMIN_CHAT_ID:
+        return
+
+    platform = normalize_platform(product.get("platform"))
+    emoji = PLATFORM_EMOJI.get(platform, "🛒")
+    title = (product.get("title") or "Başlık yok").strip()[:80]
+    image_url = product.get("image_url")
+    deal_url = f"{DOMAIN}/deal/{deal_id}"
+
+    msg = (
+        f"🏷 <b>[DEAL] Yayındaki Fırsatta Ek İndirim!</b>\n\n"
+        f"{emoji} <b>{platform.capitalize()}</b>\n"
+        f"🛍 <b>{title}</b>\n\n"
+        f"💰 <s>{_fmt_price(old_price)}</s> → 🔥 <b>{_fmt_price(new_price)}</b>\n"
+        f"📉 <b>%{pct:.0f} ek indirim</b>\n\n"
+        f"🔗 <a href='{deal_url}'>Deal Sayfasına Git ↗</a>\n"
+        f"──────────────────\n"
+        f"<i>Bu ürün zaten yayında — fiyat daha da düştü</i>"
+    )
+
+    log.info(f"[tg-admin] onaylı deal güncelleme bildirimi: deal_id={deal_id} platform={platform}")
+    await _send(ADMIN_TOKEN, ADMIN_CHAT_ID, msg, image_url)
+
+
 async def publish_deal(
     db,
     deal_id: int,

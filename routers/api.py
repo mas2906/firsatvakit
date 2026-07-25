@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from affiliate import make_short_slug
 from db import get_db
 from email_utils import send_price_alert
-from telegram_pub import notify_pending_approval
+from telegram_pub import notify_pending_approval, notify_approved_deal_update
 
 from .deps import now_str, require_admin
 
@@ -282,6 +282,24 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
 
     db.commit()
     log.info(f"[webhook] 📋 Deal #{deal_id} onay bekliyor: #{product_id} %{pct:.1f}")
+
+    # Onaylı (yayında) deal varsa admin'e [DEAL] etiketiyle ayrı bildirim at
+    approved_deal = db.execute("""
+        SELECT d.id FROM deals d
+        WHERE d.product_id=? AND d.status='approved' AND d.active=1
+        ORDER BY d.id DESC LIMIT 1
+    """, (product_id,)).fetchone()
+    if approved_deal:
+        try:
+            prod_row = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
+            if prod_row:
+                prod_dict = dict(prod_row)
+                prod_dict["deal_id"] = approved_deal["id"]
+                await notify_approved_deal_update(
+                    approved_deal["id"], prod_dict, price, old_price, round(pct, 1)
+                )
+        except Exception as e:
+            log.warning(f"[webhook] Onaylı deal güncelleme bildirimi hatası: {e}")
 
     if not existing_deal:
         try:
