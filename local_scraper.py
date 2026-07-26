@@ -304,24 +304,46 @@ _CAMOUFOX_MAX = 6      # Bu sayının üzerinde camoufox varsa temizle
 _CAMOUFOX_INTERVAL = 300  # Temizlik sıklığı (saniye)
 
 
+def _pid_alive(pid: int) -> bool:
+    """Verilen PID'e sahip python.exe çalışıyor mu?"""
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+            capture_output=True, text=True
+        )
+        return f'"{pid}"' in r.stdout or f",{pid}," in r.stdout
+    except Exception:
+        return False
+
+
 def _acquire_pid_lock() -> bool:
-    """Tek instance garantisi — PID dosyası mevcutsa ve process varsa çık."""
+    """
+    Atomik PID lock — O_CREAT|O_EXCL ile race condition önlenir.
+    Başka bir instance çalışıyorsa False döner.
+    """
+    my_pid = os.getpid()
+    # Mevcut PID dosyasını kontrol et
     if os.path.exists(_PID_FILE):
         try:
             old_pid = int(open(_PID_FILE).read().strip())
-            # Eski process hâlâ çalışıyor mu?
-            result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {old_pid}", "/FO", "CSV"],
-                capture_output=True, text=True
-            )
-            if str(old_pid) in result.stdout:
+            if old_pid != my_pid and _pid_alive(old_pid):
                 log.warning(f"[pid-lock] Scraper zaten çalışıyor (PID={old_pid}) — çıkılıyor")
                 return False
         except Exception:
             pass
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-    return True
+        try:
+            os.remove(_PID_FILE)
+        except Exception:
+            pass
+    # Atomik dosya oluşturma (O_EXCL: başka process aynı anda yapamaz)
+    try:
+        fd = os.open(_PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(my_pid).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        log.warning("[pid-lock] Race condition — başka instance başladı")
+        return False
 
 
 def _release_pid_lock() -> None:
