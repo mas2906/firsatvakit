@@ -546,18 +546,12 @@ async def scrape_n11(url: str, price_only: bool = False,
                       cached_image: Optional[str] = None) -> Optional[dict]:
     await RL["n11"].wait()
 
-    # Katman 1: curl (HTML cookie al → GQL dene → HTML parse yedek)
-    data = await _n11_via_curl(url)
-    if data and (data.get("dead_url") or data.get("price")):
-        return price_filter(data, price_only, cached_image)
-
-    # Katman 2: camoufox — tam tarayıcı render, Cloudflare bypass
-    log.info(f"[n11] curl başarısız → camoufox: {url[:60]}")
+    # Katman 1: camoufox — tam tarayıcı render, Cloudflare bypass
     data = await _n11_via_browser(url)
     if data and (data.get("dead_url") or data.get("price")):
         return price_filter(data, price_only, cached_image)
 
-    # Katman 3: Playwright (crawlee) — farklı fingerprint, camoufox başarısız olunca
+    # Katman 2: Playwright (crawlee) — farklı fingerprint, camoufox başarısız olunca
     log.info(f"[n11] camoufox başarısız → Playwright: {url[:60]}")
     data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=50)
     return price_filter(data, price_only, cached_image) if data else None
