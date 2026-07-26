@@ -6,6 +6,13 @@ import os
 import sys
 import tempfile as _tempfile
 
+# Camoufox/multiprocessing sistem Python'u spawn edebilir; sadece venv Python çalışsın
+import sysconfig as _sysconfig
+_VENV_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Scripts")
+_ACTUAL_SCRIPTS = _sysconfig.get_path("scripts") or ""
+if _VENV_SCRIPTS.lower() not in _ACTUAL_SCRIPTS.lower():
+    os._exit(0)
+
 if sys.platform == "win32":
     _TMP = r"D:\firsatvakti_temp"
 else:
@@ -15,6 +22,18 @@ os.environ["TEMP"] = _TMP
 os.environ["TMP"] = _TMP
 os.environ["TMPDIR"] = _TMP
 _tempfile.tempdir = _TMP
+
+import shutil
+
+# Crawlee disk queue birikimini önle: her process başlangıcında temiz bir depo
+_CRAWLEE_DIR = os.path.join(_TMP, "crawlee_storage")
+shutil.rmtree(_CRAWLEE_DIR, ignore_errors=True)
+os.makedirs(_CRAWLEE_DIR, exist_ok=True)
+os.environ["CRAWLEE_STORAGE_DIR"] = _CRAWLEE_DIR
+
+# Proje içindeki eski storage dizinini de temizle (önceki çalışmanın kalıntısı)
+_PROJECT_STORAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
+shutil.rmtree(_PROJECT_STORAGE, ignore_errors=True)
 
 import asyncio
 import logging
@@ -44,7 +63,7 @@ PLATFORM_CONCURRENT = {
     "amazon":      2,
     "trendyol":    6,
     "hepsiburada": 2,
-    "n11":         1,   # camoufox RAM ağırlıklı — max 1 browser instance
+    "n11":         1 if sys.platform == "win32" else 2,  # VPS'de daha fazla RAM
 }
 
 SCHEDULE = {
@@ -163,14 +182,15 @@ async def reset_stale_jobs(client: httpx.AsyncClient) -> None:
 
 async def express_lane(platform: str, client: httpx.AsyncClient) -> None:
     """priority=-1 işleri için hızlı şerit."""
-    sem = asyncio.Semaphore(2)
+    conc = PLATFORM_CONCURRENT.get(platform, 2)
+    sem = asyncio.Semaphore(conc)
     running: set[asyncio.Task] = set()
-    log.info(f"[{platform}/express] Başladı")
+    log.info(f"[{platform}/express] Başladı (concurrent={conc})")
 
     while True:
         try:
             running.difference_update({t for t in running if t.done()})
-            free = 2 - len(running)
+            free = conc - len(running)
             if free == 0:
                 await asyncio.sleep(0.5)
                 continue
@@ -280,7 +300,7 @@ async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
                 task.add_done_callback(running.discard)
                 task.add_done_callback(_task_done_callback)
 
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
 
         except Exception as e:
             log.error(f"[{platform}] Poll hatası: {e}")
@@ -305,13 +325,19 @@ _CAMOUFOX_INTERVAL = 300  # Temizlik sıklığı (saniye)
 
 
 def _pid_alive(pid: int) -> bool:
-    """Verilen PID'e sahip python.exe çalışıyor mu?"""
+    """Verilen PID çalışıyor mu? (cross-platform)"""
     try:
-        r = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
-            capture_output=True, text=True
-        )
-        return f'"{pid}"' in r.stdout or f",{pid}," in r.stdout
+        if sys.platform == "win32":
+            r = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                capture_output=True, text=True
+            )
+            return f'"{pid}"' in r.stdout or f",{pid}," in r.stdout
+        else:
+            os.kill(pid, 0)
+            return True
+    except (ProcessLookupError, PermissionError):
+        return False
     except Exception:
         return False
 
@@ -354,22 +380,26 @@ def _release_pid_lock() -> None:
 
 
 def _get_running_pids(name: str) -> set[int]:
-    """Belirtilen isimde çalışan tüm process PID'lerini döndür."""
+    """Belirtilen isimde çalışan tüm process PID'lerini döndür. (cross-platform)"""
     try:
-        r = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV"],
-            capture_output=True, text=True
-        )
-        pids = set()
-        for line in r.stdout.splitlines():
-            if name.lower() in line.lower():
-                parts = line.strip('"').split('","')
-                if len(parts) >= 2:
-                    try:
-                        pids.add(int(parts[1]))
-                    except (ValueError, IndexError):
-                        pass
-        return pids
+        if sys.platform == "win32":
+            r = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV"],
+                capture_output=True, text=True
+            )
+            pids = set()
+            for line in r.stdout.splitlines():
+                if name.lower() in line.lower():
+                    parts = line.strip('"').split('","')
+                    if len(parts) >= 2:
+                        try:
+                            pids.add(int(parts[1]))
+                        except (ValueError, IndexError):
+                            pass
+            return pids
+        else:
+            r = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True)
+            return {int(p) for p in r.stdout.split() if p.isdigit()}
     except Exception:
         return set()
 
@@ -378,34 +408,54 @@ def _kill_orphan_camoufox() -> int:
     """
     Sadece öksüz (parent Python prosesi ölmüş) camoufox'ları öldür.
     Diğer projelerin (amazon_tracker vb.) camoufox'larına dokunmaz.
+    Cross-platform: Windows (wmic/taskkill) ve Linux (ps/kill).
     """
     try:
-        python_pids = _get_running_pids("python.exe")
-
-        # WMI ile camoufox parent PID'lerini al
-        r = subprocess.run(
-            ["wmic", "process", "where", "name='camoufox.exe'",
-             "get", "ProcessId,ParentProcessId", "/format:csv"],
-            capture_output=True, text=True
-        )
-        orphan_pids = []
-        for line in r.stdout.splitlines():
-            parts = [p.strip() for p in line.split(",") if p.strip()]
-            if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-                parent_pid = int(parts[1])
-                pid = int(parts[2])
-                if parent_pid not in python_pids:
-                    orphan_pids.append(pid)
-
-        killed = 0
-        for pid in orphan_pids:
-            r2 = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
+        if sys.platform == "win32":
+            python_pids = _get_running_pids("python.exe")
+            r = subprocess.run(
+                ["wmic", "process", "where", "name='camoufox.exe'",
+                 "get", "ProcessId,ParentProcessId", "/format:csv"],
                 capture_output=True, text=True
             )
-            if "SUCCESS" in r2.stdout:
-                killed += 1
-        return killed
+            orphan_pids = []
+            for line in r.stdout.splitlines():
+                parts = [p.strip() for p in line.split(",") if p.strip()]
+                if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                    parent_pid = int(parts[1])
+                    pid = int(parts[2])
+                    if parent_pid not in python_pids:
+                        orphan_pids.append(pid)
+            killed = 0
+            for pid in orphan_pids:
+                r2 = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                    capture_output=True, text=True)
+                if "SUCCESS" in r2.stdout:
+                    killed += 1
+            return killed
+        else:
+            python_pids = _get_running_pids("python")
+            r = subprocess.run(["ps", "-eo", "pid,ppid,comm"],
+                               capture_output=True, text=True)
+            orphan_pids = []
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and "camoufox" in parts[2].lower():
+                    try:
+                        pid = int(parts[0])
+                        parent_pid = int(parts[1])
+                        if parent_pid not in python_pids:
+                            orphan_pids.append(pid)
+                    except ValueError:
+                        pass
+            killed = 0
+            for pid in orphan_pids:
+                try:
+                    os.kill(pid, 9)
+                    killed += 1
+                except Exception:
+                    pass
+            return killed
     except Exception:
         return 0
 

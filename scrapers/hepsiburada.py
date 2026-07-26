@@ -37,7 +37,9 @@ _HB_IOS_HEADERS = {
 
 
 def _hb_extract_json_at(html: str, start: int) -> Optional[dict]:
-    depth = in_str = esc = 0
+    depth = 0
+    in_str = False
+    esc = False
     end = start
     for i, ch in enumerate(html[start:], start):
         if esc:
@@ -311,6 +313,7 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
                 return {"dead_url": True}
 
         if len(html) > 500_000:
+            cb_fail("hb_curl")
             drop_session("hepsiburada")
             return None
 

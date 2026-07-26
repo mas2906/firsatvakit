@@ -251,7 +251,7 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
 
     # Stok
     stock_val = product.get("stock")
-    stock = "Stokta Var" if (stock_val and int(stock_val) > 0) else "Stok Yok"
+    stock = "Stokta Var" if (stock_val and int(float(stock_val)) > 0) else "Stok Yok"
 
     # Görsel: images[].path  → {0} = boyut placeholder
     images = product.get("images") or []

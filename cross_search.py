@@ -598,7 +598,11 @@ def get_price_comparison(db, product_id: int) -> dict:
         SELECT p.*, pgm.confidence,
                (SELECT ph.price_value FROM price_history ph WHERE ph.product_id=p.id ORDER BY ph.id DESC LIMIT 1) as current_price,
                (SELECT ph.scraped_at  FROM price_history ph WHERE ph.product_id=p.id ORDER BY ph.id DESC LIMIT 1) as price_checked_at,
-               (SELECT d.cart_discount FROM deals d WHERE d.product_id=p.id ORDER BY d.id DESC LIMIT 1) as cart_discount
+               (SELECT d.cart_discount FROM deals d WHERE d.product_id=p.id ORDER BY d.id DESC LIMIT 1) as cart_discount,
+               (
+                   SELECT CASE WHEN ph2.scraped_at >= datetime('now', '-2 hours') THEN 1 ELSE 0 END
+                   FROM price_history ph2 WHERE ph2.product_id=p.id ORDER BY ph2.id DESC LIMIT 1
+               ) as price_is_fresh
         FROM product_group_members pgm
         JOIN products p ON pgm.product_id = p.id
         WHERE pgm.group_id=?
@@ -609,8 +613,11 @@ def get_price_comparison(db, product_id: int) -> dict:
 
     products = [dict(m) for m in members]
     priced = [p for p in products if p.get("current_price")]
-    cheapest = min(priced, key=lambda x: x["current_price"]) if priced else None
-    expensive = max(priced, key=lambda x: x["current_price"]) if priced else None
+    # Cheapest hesaplamasında sadece güncel fiyatları (son 2 saat) kullan
+    fresh_priced = [p for p in priced if p.get("price_is_fresh")]
+    compare_pool = fresh_priced if fresh_priced else priced
+    cheapest = min(compare_pool, key=lambda x: x["current_price"]) if compare_pool else None
+    expensive = max(compare_pool, key=lambda x: x["current_price"]) if compare_pool else None
     savings = None
     if cheapest and expensive and cheapest["id"] != expensive["id"]:
         diff = expensive["current_price"] - cheapest["current_price"]

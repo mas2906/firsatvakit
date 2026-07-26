@@ -156,6 +156,39 @@ async def _requeue_worker():
                 db.commit()
                 log.info(f"[requeue] {promoted} aktif deal girişi priority=1'e yükseltildi")
 
+            # 3c. Karşılaştırma ürünleri — aktif deal grubundaki diğer platform ürünleri
+            # Bunlar deal tablosunda değil ama deal sayfasında gösteriliyor → 30 dakikada bir priority=1
+            compare_rows = db.execute("""
+                SELECT DISTINCT p.id, p.source_url, p.platform
+                FROM products p
+                JOIN product_group_members pgm ON pgm.product_id = p.id
+                WHERE pgm.match_type != 'removed'
+                  AND p.platform IS NOT NULL
+                  AND p.source_url IS NOT NULL
+                  AND (p.last_seen_at IS NULL OR p.last_seen_at < datetime('now', '-30 minutes'))
+                  AND EXISTS (
+                      SELECT 1 FROM product_group_members pgm2
+                      JOIN deals d ON d.product_id = pgm2.product_id
+                      WHERE pgm2.group_id = pgm.group_id AND d.active = 1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM deals d2 WHERE d2.product_id = p.id AND d2.active = 1
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scan_queue sq
+                      WHERE sq.product_id = p.id AND sq.status IN ('pending', 'processing')
+                  )
+            """).fetchall()
+            for r in compare_rows:
+                db.execute(
+                    "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) "
+                    "VALUES(?,?,?,'pending',1,?)",
+                    (r["id"], r["source_url"], r["platform"], now)
+                )
+            if compare_rows:
+                db.commit()
+                log.info(f"[requeue] {len(compare_rows)} karşılaştırma ürünü kuyruğa eklendi (priority=1, 30dk)")
+
             # 4. Tüm ürünler — round tabanlı sıralı tarama (priority=2)
             # round_started_at: settings tablosunda tutulur
             # Bu turda taranmamış ürünler (last_seen_at < round_started_at) kuyruğa alınır

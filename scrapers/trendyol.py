@@ -88,7 +88,7 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
         "brand":         brand,
         "rating":        rs.get("averageRating"),
         "review_count":  rs.get("totalCount"),
-        "stock":         "Bilinmiyor" if in_stock else "Stok Yok",
+        "stock":         "Stokta Var" if in_stock else "Stok Yok",
         "barcode":       None,
         "cart_discount": cart_discount,
         "coupon":        None,

@@ -28,6 +28,21 @@ except ImportError:
     CurlSession = None
     _CURL_OK = False
 
+# Crawlee disk storage birikimini önle:
+# 1) global service_locator → MemoryStorageClient
+# 2) global StorageInstanceManager sıfırla (disk-tabanlı cached queue'ları temizler)
+try:
+    import os as _os
+    from crawlee._service_locator import ServiceLocator as _CrawleeSL, service_locator as _crawlee_sl
+    from crawlee.storage_clients import MemoryStorageClient as _MSC
+    from crawlee.configuration import Configuration as _CrawleeConfig
+    _crawlee_sl._storage_client = _MSC()
+    _tmp_storage = _os.environ.get("CRAWLEE_STORAGE_DIR", r"D:\firsatvakti_temp\crawlee_storage")
+    _crawlee_sl._configuration = _CrawleeConfig(storage_dir=_tmp_storage)
+    _CrawleeSL.global_storage_instance_manager = None
+except Exception:
+    pass
+
 # ── User-agent havuzları ───────────────────────────────────────────────────────
 IOS_UAS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.2 Mobile/15E148 Safari/604.1",
@@ -211,6 +226,12 @@ async def crawlee_pw_scrape(
         return None
 
     result: dict = {}
+
+    # Her çağrıda StorageInstanceManager sıfırla: önceki çağrının cached queue'sunu devralmasın
+    try:
+        _CrawleeSL.global_storage_instance_manager = None
+    except Exception:
+        pass
 
     # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
     # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
