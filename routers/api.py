@@ -633,10 +633,9 @@ async def scraper_monitor(request: Request):
     result = {}
 
     for p in platforms:
-        # Son başarılı tarama
+        # Son başarılı tarama — price_history değişmese bile last_seen_at güncellenir
         last_ok = db.execute(
-            "SELECT MAX(ph.scraped_at) as t FROM price_history ph "
-            "JOIN products pr ON pr.id=ph.product_id WHERE pr.platform=?",
+            "SELECT MAX(pr.last_seen_at) as t FROM products pr WHERE pr.platform=? AND pr.last_seen_at IS NOT NULL",
             (p,)
         ).fetchone()
         last_ok_time = (last_ok["t"] if last_ok else None)
@@ -667,9 +666,9 @@ async def scraper_monitor(request: Request):
 
         # Son 10 dakikada kaç ürün başarıyla tarandı (tarama/dk)
         rate_10m = db.execute(
-            "SELECT COUNT(*) as cnt FROM price_history ph "
-            "JOIN products pr ON pr.id=ph.product_id WHERE pr.platform=? "
-            "AND ph.scraped_at::timestamp >= NOW() - INTERVAL '10 minutes'",
+            "SELECT COUNT(*) as cnt FROM products pr WHERE pr.platform=? "
+            "AND pr.last_seen_at IS NOT NULL "
+            "AND pr.last_seen_at::timestamp >= NOW() - INTERVAL '10 minutes'",
             (p,)
         ).fetchone()
 
