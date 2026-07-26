@@ -47,3 +47,6 @@ start_scraper.sh
 
 # Büyük geçici dizinler
 "D\：／firsatvakti_temp/"
+
+# Crawlee disk storage (MemoryStorageClient kullanılıyor, bu klasör oluşmamalı)
+storage/

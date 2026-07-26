@@ -32,13 +32,13 @@ from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.n11")
 
-# Aynı anda max 2 camoufox instance — RAM ve CPU koruması
+# Aynı anda max 1 camoufox instance — RAM ve CPU koruması
 _BROWSER_SEM: Optional[asyncio.Semaphore] = None
 
 def _browser_sem() -> asyncio.Semaphore:
     global _BROWSER_SEM
     if _BROWSER_SEM is None:
-        _BROWSER_SEM = asyncio.Semaphore(2)
+        _BROWSER_SEM = asyncio.Semaphore(1)
     return _BROWSER_SEM
 
 _N11_GQL_URL   = "https://www.n11.com/nss/api/graphql"

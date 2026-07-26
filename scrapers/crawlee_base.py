@@ -205,17 +205,19 @@ async def crawlee_pw_scrape(
     try:
         from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
         from crawlee import ConcurrencySettings
+        from crawlee.storage_clients import MemoryStorageClient
     except ImportError:
         log.warning("[crawlee] PlaywrightCrawler import başarısız")
         return None
 
     result: dict = {}
 
-    # min_concurrency=1: CPU yükü yüksek olsa bile autoscaler concurrency'yi
-    # 0'a indirmesin — tek URL için en az 1 işlem garantilenir
+    # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
+    # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
     crawler = PlaywrightCrawler(
         headless=True,
         max_requests_per_crawl=1,
+        storage_client=MemoryStorageClient(),
         concurrency_settings=ConcurrencySettings(
             min_concurrency=1,
             max_concurrency=1,
