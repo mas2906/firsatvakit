@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from scrapers.crawlee_base import (
     IOS_UAS, get_session, drop_session, RL,
     cb_ok, cb_fail, cb_reset, price_filter,
-    _CURL_OK,
+    crawlee_pw_scrape, _CURL_OK,
 )
 
 try:
@@ -506,6 +506,41 @@ async def _n11_via_browser(url: str) -> Optional[dict]:
             return None
 
 
+async def _n11_pw_handler(page, url: str) -> Optional[dict]:
+    """Playwright handler: GQL intercept + HTML parse fallback."""
+    gql_result: dict = {}
+
+    async def _on_response(resp):
+        if resp.status != 200:
+            return
+        if "graphql" not in resp.url and "nss/api" not in resp.url:
+            return
+        try:
+            j = await resp.json()
+            parsed = _n11_parse_gql(j)
+            if parsed and parsed.get("price"):
+                gql_result.update(parsed)
+                log.info(f"[n11/pw] GQL intercept ✔ price={parsed.get('price')}")
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+
+    # GQL için 6s bekle
+    for _ in range(6):
+        if gql_result.get("price"):
+            return gql_result
+        await asyncio.sleep(1)
+
+    html = await page.content()
+    cid = _n11_extract_cid(url)
+    return _n11_parse_html(html, cid=cid)
+
+
 async def scrape_n11(url: str, price_only: bool = False,
                       cached_image: Optional[str] = None) -> Optional[dict]:
     await RL["n11"].wait()
@@ -518,4 +553,10 @@ async def scrape_n11(url: str, price_only: bool = False,
     # Katman 2: camoufox — tam tarayıcı render, Cloudflare bypass
     log.info(f"[n11] curl başarısız → camoufox: {url[:60]}")
     data = await _n11_via_browser(url)
+    if data and (data.get("dead_url") or data.get("price")):
+        return price_filter(data, price_only, cached_image)
+
+    # Katman 3: Playwright (crawlee) — farklı fingerprint, camoufox başarısız olunca
+    log.info(f"[n11] camoufox başarısız → Playwright: {url[:60]}")
+    data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=50)
     return price_filter(data, price_only, cached_image) if data else None
