@@ -480,13 +480,15 @@ async def _n11_via_browser(url: str) -> Optional[dict]:
                 page = await browser.new_page()
                 page.on("response", _on_response)
                 try:
-                    await page.goto(url, wait_until="networkidle", timeout=40000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 except Exception:
-                    try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(5)
+                    pass
+
+                # GQL intercept için artımlı bekleme (max 8s)
+                for _ in range(8):
+                    if gql_result.get("price"):
+                        break
+                    await asyncio.sleep(1)
 
                 if gql_result.get("price"):
                     await page.close()
@@ -494,9 +496,8 @@ async def _n11_via_browser(url: str) -> Optional[dict]:
 
                 html = await page.content()
                 await page.close()
-                # browser context manager kapanırken Firefox process kapatılır
 
-            if len(html) < 15000:
+            if len(html) < 8000:
                 log.debug(f"[n11/browser] Cloudflare engeli ({len(html)} byte)")
                 return None
 
