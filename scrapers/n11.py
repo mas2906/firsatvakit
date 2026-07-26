@@ -32,13 +32,13 @@ from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.n11")
 
-# Aynı anda max 1 camoufox instance — RAM ve CPU koruması
+# Aynı anda max 2 camoufox instance
 _BROWSER_SEM: Optional[asyncio.Semaphore] = None
 
 def _browser_sem() -> asyncio.Semaphore:
     global _BROWSER_SEM
     if _BROWSER_SEM is None:
-        _BROWSER_SEM = asyncio.Semaphore(1)
+        _BROWSER_SEM = asyncio.Semaphore(2)
     return _BROWSER_SEM
 
 _N11_GQL_URL   = "https://www.n11.com/nss/api/graphql"
@@ -480,12 +480,12 @@ async def _n11_via_browser(url: str) -> Optional[dict]:
                 page = await browser.new_page()
                 page.on("response", _on_response)
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 except Exception:
                     pass
 
-                # GQL intercept için artımlı bekleme (max 8s)
-                for _ in range(8):
+                # GQL intercept için artımlı bekleme (max 5s)
+                for _ in range(5):
                     if gql_result.get("price"):
                         break
                     await asyncio.sleep(1)
@@ -527,12 +527,12 @@ async def _n11_pw_handler(page, url: str) -> Optional[dict]:
 
     page.on("response", _on_response)
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
     except Exception:
         pass
 
-    # GQL için 6s bekle
-    for _ in range(6):
+    # GQL için 4s bekle
+    for _ in range(4):
         if gql_result.get("price"):
             return gql_result
         await asyncio.sleep(1)
@@ -553,5 +553,5 @@ async def scrape_n11(url: str, price_only: bool = False,
 
     # Katman 2: Playwright (crawlee) — farklı fingerprint, camoufox başarısız olunca
     log.info(f"[n11] camoufox başarısız → Playwright: {url[:60]}")
-    data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=50)
+    data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=30)
     return price_filter(data, price_only, cached_image) if data else None

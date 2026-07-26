@@ -63,7 +63,7 @@ PLATFORM_CONCURRENT = {
     "amazon":      2,
     "trendyol":    6,
     "hepsiburada": 2,
-    "n11":         1 if sys.platform == "win32" else 2,  # VPS'de daha fazla RAM
+    "n11":         2,
 }
 
 SCHEDULE = {
