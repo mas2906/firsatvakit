@@ -204,15 +204,23 @@ async def crawlee_pw_scrape(
     """
     try:
         from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
+        from crawlee import ConcurrencySettings
     except ImportError:
         log.warning("[crawlee] PlaywrightCrawler import başarısız")
         return None
 
     result: dict = {}
 
+    # min_concurrency=1: CPU yükü yüksek olsa bile autoscaler concurrency'yi
+    # 0'a indirmesin — tek URL için en az 1 işlem garantilenir
     crawler = PlaywrightCrawler(
         headless=True,
         max_requests_per_crawl=1,
+        concurrency_settings=ConcurrencySettings(
+            min_concurrency=1,
+            max_concurrency=1,
+            desired_concurrency=1,
+        ),
     )
 
     @crawler.router.default_handler

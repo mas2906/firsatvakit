@@ -255,7 +255,8 @@ def _parse_stock_soup(soup: BeautifulSoup, html: str) -> str:
         return "Stok Yok"
     if "add-to-cart-button" in h_snip or "buy-now-button" in h_snip:
         return "Stokta Var"
-    return "Bilinmiyor"
+    # Net sinyal yok → stokta yok say, yanlış fiyat kaydetme (referans: check_stock_soup)
+    return "Stok Yok"
 
 
 def _az_best_img(url: str) -> str:
