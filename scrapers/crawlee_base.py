@@ -207,6 +207,13 @@ async def _block_route(route) -> None:
 
 
 # ── crawlee PlaywrightCrawler (tek URL, browserforge fingerprint) ─────────────
+# Tüm platformlar ve kuyruklar (normal+express) için TEK global sınır: aynı anda
+# en fazla bu kadar gerçek Chromium instance açık olabilir. Platform başına
+# concurrent ayarları bu sınırı aşabilir (poll+express çakışması dahil) — asıl
+# CPU/RAM tavanını burada garanti ediyoruz.
+_GLOBAL_PW_SEM = asyncio.Semaphore(4)
+
+
 async def crawlee_pw_scrape(
     url: str,
     platform: str,
@@ -217,6 +224,11 @@ async def crawlee_pw_scrape(
     Tek URL için crawlee PlaywrightCrawler çalıştırır.
     browserforge fingerprint otomatik enjekte edilir.
     """
+    cb_key = f"{platform}_pw"
+    if not cb_ok(cb_key):
+        log.debug(f"[crawlee/{platform}] devre kesici askıda — browser başlatılmadı")
+        return None
+
     try:
         from crawlee.crawlers import PlaywrightCrawler, PlaywrightCrawlingContext
         from crawlee import ConcurrencySettings
@@ -227,38 +239,44 @@ async def crawlee_pw_scrape(
 
     result: dict = {}
 
-    # Her çağrıda StorageInstanceManager sıfırla: önceki çağrının cached queue'sunu devralmasın
-    try:
-        _CrawleeSL.global_storage_instance_manager = None
-    except Exception:
-        pass
+    async with _GLOBAL_PW_SEM:
+        # Her çağrıda StorageInstanceManager sıfırla: önceki çağrının cached queue'sunu devralmasın
+        try:
+            _CrawleeSL.global_storage_instance_manager = None
+        except Exception:
+            pass
 
-    # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
-    # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
-    crawler = PlaywrightCrawler(
-        headless=True,
-        max_requests_per_crawl=1,
-        storage_client=MemoryStorageClient(),
-        concurrency_settings=ConcurrencySettings(
-            min_concurrency=1,
-            max_concurrency=1,
-            desired_concurrency=1,
-        ),
-    )
+        # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
+        # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
+        crawler = PlaywrightCrawler(
+            headless=True,
+            max_requests_per_crawl=1,
+            storage_client=MemoryStorageClient(),
+            concurrency_settings=ConcurrencySettings(
+                min_concurrency=1,
+                max_concurrency=1,
+                desired_concurrency=1,
+            ),
+        )
 
-    @crawler.router.default_handler
-    async def _handler(ctx: PlaywrightCrawlingContext):
-        page = ctx.page
-        await page.route("**/*", _block_route)
-        data = await page_handler(page, ctx.request.url)
-        if data:
-            result.update(data)
+        @crawler.router.default_handler
+        async def _handler(ctx: PlaywrightCrawlingContext):
+            page = ctx.page
+            await page.route("**/*", _block_route)
+            data = await page_handler(page, ctx.request.url)
+            if data:
+                result.update(data)
 
-    try:
-        await asyncio.wait_for(crawler.run([url]), timeout=timeout)
-    except asyncio.TimeoutError:
-        log.warning(f"[crawlee/{platform}] PW timeout: {url[:60]}")
-    except Exception as e:
-        log.debug(f"[crawlee/{platform}] PW hata: {e}")
+        try:
+            await asyncio.wait_for(crawler.run([url]), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.warning(f"[crawlee/{platform}] PW timeout: {url[:60]}")
+        except Exception as e:
+            log.debug(f"[crawlee/{platform}] PW hata: {e}")
+
+    if result:
+        cb_reset(cb_key)
+    else:
+        cb_fail(cb_key)
 
     return result if result else None

@@ -6,12 +6,6 @@ import os
 import sys
 import tempfile as _tempfile
 
-# Camoufox/multiprocessing sistem Python'u spawn edebilir; sadece venv Python çalışsın
-import sysconfig as _sysconfig
-_VENV_SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Scripts")
-_ACTUAL_SCRIPTS = _sysconfig.get_path("scripts") or ""
-if _VENV_SCRIPTS.lower() not in _ACTUAL_SCRIPTS.lower():
-    os._exit(0)
 
 if sys.platform == "win32":
     _TMP = r"D:\firsatvakti_temp"
@@ -180,12 +174,12 @@ async def reset_stale_jobs(client: httpx.AsyncClient) -> None:
         log.warning(f"[startup] reset-stale-jobs başarısız: {e}")
 
 
-async def express_lane(platform: str, client: httpx.AsyncClient) -> None:
-    """priority=-1 işleri için hızlı şerit."""
+async def express_lane(platform: str, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> None:
+    """priority=-1 işleri için hızlı şerit. Normal kuyrukla (poll_platform) aynı
+    semaphore'u paylaşır — toplam eşzamanlı iş PLATFORM_CONCURRENT'i aşmaz."""
     conc = PLATFORM_CONCURRENT.get(platform, 2)
-    sem = asyncio.Semaphore(conc)
     running: set[asyncio.Task] = set()
-    log.info(f"[{platform}/express] Başladı (concurrent={conc})")
+    log.info(f"[{platform}/express] Başladı (concurrent={conc}, paylaşımlı)")
 
     while True:
         try:
@@ -217,9 +211,8 @@ async def express_lane(platform: str, client: httpx.AsyncClient) -> None:
             await asyncio.sleep(2)
 
 
-async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
-    """Tek platform için polling döngüsü."""
-    sem: asyncio.Semaphore | None = None
+async def poll_platform(platform: str, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> None:
+    """Tek platform için polling döngüsü. express_lane ile aynı semaphore paylaşılır."""
     concurrent = 0
     batch = 0
     was_active = False
@@ -236,7 +229,6 @@ async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
                 if was_active:
                     log.info(f"[{platform}] Devre dışı — uyku")
                     was_active = False
-                    sem = None
                 # Uyku modunda sadece öncelikli işleri al
                 try:
                     r = await client.get(
@@ -245,8 +237,6 @@ async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
                         timeout=10,
                     )
                     if r.status_code == 200 and (urgent := r.json()):
-                        if sem is None:
-                            sem = asyncio.Semaphore(4)
                         for job in urgent:
                             task = asyncio.create_task(process_job(job, client, sem))
                             running.add(task)
@@ -262,7 +252,6 @@ async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
             if not was_active:
                 concurrent = _calc_concurrent(platform)
                 batch = _calc_batch(concurrent)
-                sem = asyncio.Semaphore(concurrent)
                 running = set()
                 was_active = True
                 log.info(f"[{platform}] Aktif — concurrent={concurrent} batch={batch}")
@@ -307,11 +296,11 @@ async def poll_platform(platform: str, client: httpx.AsyncClient) -> None:
             await asyncio.sleep(POLL_INTERVAL)
 
 
-async def _run_platform(platform: str, client: httpx.AsyncClient, fn) -> None:
+async def _run_platform(platform: str, client: httpx.AsyncClient, fn, sem: asyncio.Semaphore) -> None:
     """Platform loop'unu süresiz çalıştır; crash sonrası 10s bekle."""
     while True:
         try:
-            await fn(platform, client)
+            await fn(platform, client, sem)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
@@ -320,8 +309,6 @@ async def _run_platform(platform: str, client: httpx.AsyncClient, fn) -> None:
 
 
 _PID_FILE = os.path.join(_TMP, "firsatvakti_scraper.pid")
-_CAMOUFOX_MAX = 6      # Bu sayının üzerinde camoufox varsa temizle
-_CAMOUFOX_INTERVAL = 300  # Temizlik sıklığı (saniye)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -379,109 +366,11 @@ def _release_pid_lock() -> None:
         pass
 
 
-def _get_running_pids(name: str) -> set[int]:
-    """Belirtilen isimde çalışan tüm process PID'lerini döndür. (cross-platform)"""
-    try:
-        if sys.platform == "win32":
-            r = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV"],
-                capture_output=True, text=True
-            )
-            pids = set()
-            for line in r.stdout.splitlines():
-                if name.lower() in line.lower():
-                    parts = line.strip('"').split('","')
-                    if len(parts) >= 2:
-                        try:
-                            pids.add(int(parts[1]))
-                        except (ValueError, IndexError):
-                            pass
-            return pids
-        else:
-            r = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True)
-            return {int(p) for p in r.stdout.split() if p.isdigit()}
-    except Exception:
-        return set()
-
-
-def _kill_orphan_camoufox() -> int:
-    """
-    Sadece öksüz (parent Python prosesi ölmüş) camoufox'ları öldür.
-    Diğer projelerin (amazon_tracker vb.) camoufox'larına dokunmaz.
-    Cross-platform: Windows (wmic/taskkill) ve Linux (ps/kill).
-    """
-    try:
-        if sys.platform == "win32":
-            python_pids = _get_running_pids("python.exe")
-            r = subprocess.run(
-                ["wmic", "process", "where", "name='camoufox.exe'",
-                 "get", "ProcessId,ParentProcessId", "/format:csv"],
-                capture_output=True, text=True
-            )
-            orphan_pids = []
-            for line in r.stdout.splitlines():
-                parts = [p.strip() for p in line.split(",") if p.strip()]
-                if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
-                    parent_pid = int(parts[1])
-                    pid = int(parts[2])
-                    if parent_pid not in python_pids:
-                        orphan_pids.append(pid)
-            killed = 0
-            for pid in orphan_pids:
-                r2 = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                                    capture_output=True, text=True)
-                if "SUCCESS" in r2.stdout:
-                    killed += 1
-            return killed
-        else:
-            python_pids = _get_running_pids("python")
-            r = subprocess.run(["ps", "-eo", "pid,ppid,comm"],
-                               capture_output=True, text=True)
-            orphan_pids = []
-            for line in r.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3 and "camoufox" in parts[2].lower():
-                    try:
-                        pid = int(parts[0])
-                        parent_pid = int(parts[1])
-                        if parent_pid not in python_pids:
-                            orphan_pids.append(pid)
-                    except ValueError:
-                        pass
-            killed = 0
-            for pid in orphan_pids:
-                try:
-                    os.kill(pid, 9)
-                    killed += 1
-                except Exception:
-                    pass
-            return killed
-    except Exception:
-        return 0
-
-
-def _count_camoufox() -> int:
-    return len(_get_running_pids("camoufox.exe"))
-
-
-async def _camoufox_watchdog() -> None:
-    """Periyodik orphan camoufox temizliği — diğer projelere dokunmaz."""
-    await asyncio.sleep(60)
-    while True:
-        await asyncio.sleep(_CAMOUFOX_INTERVAL)
-        killed = await asyncio.to_thread(_kill_orphan_camoufox)
-        if killed:
-            log.warning(f"[watchdog] {killed} orphan camoufox temizlendi")
 
 
 async def main() -> None:
     if not _acquire_pid_lock():
         return
-
-    # Başlangıçta orphan camoufox'ları temizle (diğer projelere dokunmaz)
-    killed = _kill_orphan_camoufox()
-    if killed:
-        log.info(f"[startup] {killed} orphan camoufox temizlendi")
 
     platforms = list(PLATFORM_CONCURRENT)
     total_c = sum(PLATFORM_CONCURRENT.values())
@@ -489,14 +378,17 @@ async def main() -> None:
     for p, c in PLATFORM_CONCURRENT.items():
         log.info(f"  {p}: concurrent={c} batch={c*2}")
 
+    # Platform başına TEK semaphore — poll_platform ve express_lane paylaşır,
+    # böylece gerçek eşzamanlı iş tavanı PLATFORM_CONCURRENT'i geçmez (önceden
+    # her lane kendi semaphore'unu yaratıyordu, tavan fiilen 2 katıydı).
+    sems = {p: asyncio.Semaphore(PLATFORM_CONCURRENT[p]) for p in platforms}
     clients = {p: httpx.AsyncClient(timeout=15) for p in platforms}
     init_client = httpx.AsyncClient(timeout=15)
     try:
         await reset_stale_jobs(init_client)
         await asyncio.gather(
-            _camoufox_watchdog(),
-            *[_run_platform(p, clients[p], poll_platform) for p in platforms],
-            *[_run_platform(p, clients[p], express_lane)  for p in platforms],
+            *[_run_platform(p, clients[p], poll_platform, sems[p]) for p in platforms],
+            *[_run_platform(p, clients[p], express_lane,  sems[p]) for p in platforms],
         )
     finally:
         _release_pid_lock()
