@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 -c \":*)",
-      "Bash(rsync -avz --progress /Users/mehmetalisaglam/Desktop/firsatvakti_new/templates/base.html /Users/mehmetalisaglam/Desktop/firsatvakti_new/templates/deal.html /Users/mehmetalisaglam/Desktop/firsatvakti_new/templates/product.html /Users/mehmetalisaglam/Desktop/firsatvakti_new/seo_content.py root@89.252.185.100:/root/firsatvakti/)"
-    ]
-  }
-}

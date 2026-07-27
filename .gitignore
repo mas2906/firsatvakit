@@ -50,3 +50,7 @@ start_scraper.sh
 
 # Crawlee disk storage (MemoryStorageClient kullanılıyor, bu klasör oluşmamalı)
 storage/
+
+# Claude Code local ayarları — gerçek VPS IP / credential içerebilir
+.claude/settings.json
+.claude/settings.local.json
