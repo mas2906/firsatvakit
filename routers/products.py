@@ -57,6 +57,40 @@ def _dedup_history(db, product_id):
     return out
 
 
+def _refresh_stale_comparison(db, products) -> None:
+    """Karşılaştırmadaki bayat fiyatları arka planda hemen yeniler.
+    Aktif fırsatı olan ürünler için 5 dk, diğerleri için 2 saat eşik kullanılır.
+    priority=-1 (express) ile kuyruğa eklenir — rotasyon sırasını beklemeden,
+    normal iş akışının önüne geçerek taranır (bkz. scrapers/utils.py rotasyonu).
+    Zaten kuyrukta düşük öncelikle bekleyen bir iş varsa onu da öne çeker."""
+    threshold_active = (datetime.utcnow() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    threshold_normal = (datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    changed = False
+    for p in products:
+        has_active_deal = db.execute(
+            "SELECT 1 FROM deals WHERE product_id=? AND active=1 LIMIT 1", (p["id"],)
+        ).fetchone()
+        threshold = threshold_active if has_active_deal else threshold_normal
+        last = p.get("last_seen_at") or ""
+        if last >= threshold:
+            continue
+        existing = db.execute(
+            "SELECT id, priority FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')",
+            (p["id"],)
+        ).fetchone()
+        if not existing:
+            db.execute(
+                "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',-1,?)",
+                (p["id"], p["source_url"], p["platform"], now_str())
+            )
+            changed = True
+        elif existing["priority"] > -1:
+            db.execute("UPDATE scan_queue SET priority=-1 WHERE id=?", (existing["id"],))
+            changed = True
+    if changed:
+        db.commit()
+
+
 @router.get("/deals")
 async def deals_redirect(request: Request):
     qs = request.url.query
@@ -352,6 +386,7 @@ async def product_detail(request: Request, product_id: int):
         return RedirectResponse(f"/deal/{deal['id']}", status_code=302)
     history = _dedup_history(db, product_id)
     comparison = get_price_comparison(db, product_id)
+    _refresh_stale_comparison(db, comparison.get("products", []))
     comments_data = get_product_comments(db, product_id)
     meta = build_meta_tags("product", dict(product))
     user = current_user(request)
@@ -450,6 +485,7 @@ async def deal_detail(request: Request, deal_id: int):
     short_url = f"https://firsatvakti.com/go/{short['slug']}" if short else None
     clicks = db.execute("SELECT COUNT(*) FROM clicks WHERE deal_id=?", (deal_id,)).fetchone()[0]
     comparison = get_price_comparison(db, deal["product_id"])
+    _refresh_stale_comparison(db, comparison.get("products", []))
     comments_data = get_product_comments(db, deal["product_id"])
     meta = build_meta_tags("deal", dict(deal))
     user = current_user(request)
@@ -474,25 +510,7 @@ async def compare_page(request: Request, group_id: int):
     data = generate_comparison_data(db, group_id)
     if not data:
         raise HTTPException(404, "Karşılaştırma bulunamadı")
-    threshold_active = (datetime.utcnow() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-    threshold_normal = (datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
-    for p in data.get("products", []):
-        has_active_deal = db.execute(
-            "SELECT 1 FROM deals WHERE product_id=? AND active=1 LIMIT 1", (p["id"],)
-        ).fetchone()
-        threshold = threshold_active if has_active_deal else threshold_normal
-        last = p.get("last_seen_at") or ""
-        if last < threshold:
-            existing = db.execute(
-                "SELECT id FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')",
-                (p["id"],)
-            ).fetchone()
-            if not existing:
-                db.execute(
-                    "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',3,?)",
-                    (p["id"], p["source_url"], p["platform"], now_str())
-                )
-    db.commit()
+    _refresh_stale_comparison(db, data.get("products", []))
     meta = build_meta_tags("comparison", {"name": data["group"]["name"],
                                           "platform_count": data["platform_count"],
                                           "image_url": data["group"].get("image_url")})
