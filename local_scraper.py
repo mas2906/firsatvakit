@@ -67,9 +67,21 @@ SCHEDULE = {
     "hepsiburada": list(range(0, 24)),
 }
 
+# Platform rotasyonu — ban/blok riskini azaltmak için 4 platform aynı anda değil,
+# sırayla taranır. 20 dk'lık döngüde her platform 5 dk aktif, 15 dk pasif olur.
+# Tek kaynak scrapers/utils.py'de (rotation_active_platform) — RateLimiter de
+# aynı hesaplamayı kullanarak siteye giden isteği bizzat bekletir; burada sadece
+# gereksiz iş dispatch etmeyi (ve concurrency slotlarını boşuna işgal etmeyi)
+# önlüyoruz. (priority=-1 express işler — örn. yeni eklenen link — rotasyondan
+# bağımsız, her zaman hemen işlenir; bkz. express_lane.)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scrapers.utils import rotation_active_platform  # noqa: E402
+
 
 def _is_active(platform: str) -> bool:
-    return datetime.now().hour in SCHEDULE[platform]
+    if datetime.now().hour not in SCHEDULE[platform]:
+        return False
+    return rotation_active_platform() == platform
 
 
 def _is_night() -> bool:
@@ -87,7 +99,6 @@ def _calc_batch(concurrent: int) -> int:
     return concurrent * 2
 
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scrapers.router import scrape_product  # noqa: E402
 
 _last_success: dict[str, float] = {}
@@ -109,6 +120,7 @@ async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
         platform     = job["platform"]
         price_only   = job.get("price_only", False)
         cached_image = job.get("cached_image") or None
+        is_priority  = job.get("priority", 0) < 0
 
         log.info(f"[{platform}] #{pid}{' [fiyat]' if price_only else ''}")
         _timeout = (90 if platform == "hepsiburada" else
@@ -117,7 +129,8 @@ async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
                     40)
         try:
             data = await asyncio.wait_for(
-                scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
+                scrape_product(url, platform, price_only=price_only, cached_image=cached_image,
+                                priority=is_priority),
                 timeout=_timeout,
             )
 
@@ -227,9 +240,10 @@ async def poll_platform(platform: str, client: httpx.AsyncClient, sem: asyncio.S
 
             if not active:
                 if was_active:
-                    log.info(f"[{platform}] Devre dışı — uyku")
+                    log.info(f"[{platform}] Rotasyon sırası bitti — pasif (sıradaki: {rotation_active_platform()})")
                     was_active = False
-                # Uyku modunda sadece öncelikli işleri al
+                # Pasif modda sadece öncelikli işleri al — bu zaten express_lane'in
+                # işi, burası ek güvence. Rotasyon dönüşünü kaçırmamak için kısa aralıkla kontrol et.
                 try:
                     r = await client.get(
                         f"{BASE_URL}/api/pending-jobs?platform={platform}&limit=4&priority=-1",
@@ -246,7 +260,7 @@ async def poll_platform(platform: str, client: httpx.AsyncClient, sem: asyncio.S
                         continue
                 except Exception:
                     pass
-                await asyncio.sleep(60)
+                await asyncio.sleep(10)
                 continue
 
             if not was_active:

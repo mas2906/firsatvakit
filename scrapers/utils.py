@@ -5,8 +5,12 @@
 import re
 import random
 import asyncio
+import logging
 import time as _time
+from datetime import datetime
 from typing import Optional
+
+log = logging.getLogger("scraper")
 
 CLOUDFLARE_TITLES = ["Attention Required", "Just a moment", "Checking your browser"]
 CAMOUFOX_STEALTH = ""  # geriye dönük uyumluluk sabiti
@@ -73,19 +77,63 @@ def detect_cart_discount(html_text: str) -> bool:
     return any(p in lower for p in CART_DISCOUNT_PATTERNS)
 
 
-class RateLimiter:
-    """Asyncio tabanlı rate limiter — platform başına sıralı bekleme."""
+# ── Platform rotasyonu ─────────────────────────────────────────────────────────
+# Ban/blok riskini azaltmak için 4 platform aynı anda değil, sırayla taranır.
+# 20 dk'lık döngüde her platform 5 dk aktif, 15 dk pasif olur. Tek kaynak burası —
+# hem local_scraper.py (iş kuyruğa dispatch edilsin mi) hem RateLimiter (siteye
+# gerçekten istek gitsin mi) aynı hesaplamayı kullanır.
+ROTATION_ORDER    = ["trendyol", "n11", "amazon", "hepsiburada"]
+ROTATION_SLOT_MIN = 5
 
-    def __init__(self, min_delay: float, max_delay: float):
+
+def rotation_active_platform() -> str:
+    cycle_min = ROTATION_SLOT_MIN * len(ROTATION_ORDER)
+    slot = (datetime.now().minute % cycle_min) // ROTATION_SLOT_MIN
+    return ROTATION_ORDER[slot]
+
+
+def is_rotation_active(platform: str) -> bool:
+    return rotation_active_platform() == platform
+
+
+class RateLimiter:
+    """Asyncio tabanlı rate limiter — platform başına sıralı bekleme.
+
+    `platform` verilirse, rotasyon sırası bu platformda değilken normal
+    (priority=False) istekleri bekletir — siteye gerçekten istek gitmeden önce
+    rotasyonu burada da uygular (sadece dispatch katmanına güvenmez).
+    `priority=True` (örn. yeni eklenen link) rotasyonu atlar, hep hemen geçer.
+    """
+
+    def __init__(self, min_delay: float, max_delay: float, platform: Optional[str] = None):
         self._min = min_delay
         self._max = max_delay
         self._last_ts = 0.0
         self._sem = asyncio.Semaphore(1)
+        self._platform = platform
 
-    async def wait(self) -> None:
+    async def wait(self, priority: bool = False) -> None:
+        if self._platform and not priority:
+            first = True
+            while not is_rotation_active(self._platform):
+                if first:
+                    log.info(f"[rate-limiter/{self._platform}] rotasyon sırası değil — bekleniyor")
+                    first = False
+                await asyncio.sleep(5)
+
         async with self._sem:
             elapsed = _time.monotonic() - self._last_ts
-            delay = random.uniform(self._min, self._max) - elapsed
+            delay = random.uniform(self._min, self._max)
+            # Gece saatlerinde (00-07) gerçek bir insan çok daha az alışveriş
+            # yapar — temel gecikmeyi yavaşlat.
+            if 0 <= datetime.now().hour < 7:
+                delay *= random.uniform(1.5, 2.0)
+            # İnsan davranışı düz uniform dağılım değildir — çoğu bekleme kısa,
+            # ama arada (dikkat dağılması/okuma gibi) daha uzun duraklamalar olur.
+            # %12 ihtimalle bu uzun-kuyruklu duraklamayı ekle.
+            if random.random() < 0.12:
+                delay += random.uniform(self._max, self._max * 3)
+            delay -= elapsed
             if delay > 0:
                 await asyncio.sleep(delay)
             self._last_ts = _time.monotonic()

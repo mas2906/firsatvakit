@@ -144,10 +144,10 @@ def drop_session(platform: str) -> None:
 
 # ── Rate limiter'lar (platform başına) ───────────────────────────────────────
 RL: dict[str, RateLimiter] = {
-    "trendyol":    RateLimiter(0.5, 1.0),
-    "n11":         RateLimiter(0.4, 0.8),
-    "amazon":      RateLimiter(2.0, 4.0),
-    "hepsiburada": RateLimiter(1.5, 3.0),
+    "trendyol":    RateLimiter(1.0, 2.0, platform="trendyol"),
+    "n11":         RateLimiter(1.0, 2.0, platform="n11"),
+    "amazon":      RateLimiter(1.5, 3.0, platform="amazon"),
+    "hepsiburada": RateLimiter(1.0, 2.0, platform="hepsiburada"),
 }
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
@@ -206,6 +206,48 @@ async def _block_route(route) -> None:
     await route.continue_()
 
 
+# ── Proxy (opsiyonel) ──────────────────────────────────────────────────────────
+# .env'de LOCAL_PROXY veya PROXY_HOST/PROXY_USER/PROXY_PASS/PROXY_PORT tanımlı
+# değilse None döner ve davranış bugünküyle birebir aynı kalır (proxies.txt'nin
+# belgelediği şemayla uyumlu).
+def _build_proxy_configuration():
+    urls = []
+    if _os.environ.get("LOCAL_PROXY"):
+        urls.append(_os.environ["LOCAL_PROXY"])
+    elif _os.environ.get("PROXY_HOST"):
+        host = _os.environ["PROXY_HOST"]
+        port = _os.environ.get("PROXY_PORT", "")
+        user = _os.environ.get("PROXY_USER", "")
+        pw   = _os.environ.get("PROXY_PASS", "")
+        auth = f"{user}:{pw}@" if user else ""
+        hostport = f"{host}:{port}" if port else host
+        urls.append(f"http://{auth}{hostport}")
+    if not urls:
+        return None
+    try:
+        from crawlee.proxy_configuration import ProxyConfiguration
+        return ProxyConfiguration(proxy_urls=urls)
+    except Exception:
+        log.warning("[crawlee] Proxy yapılandırması başarısız, proxysiz devam")
+        return None
+
+
+_PROXY_CONFIG = _build_proxy_configuration()
+
+
+# ── İnsan-benzeri sayfa etkileşimi ────────────────────────────────────────────
+async def _human_interact(page) -> None:
+    """Veri çekmeden önce kısa bir scroll + okuma duraklaması — sabit,
+    makine-gibi bir gezinme yerine gerçek kullanıcı davranışına yaklaşır."""
+    try:
+        for _ in range(random.randint(1, 2)):
+            await page.mouse.wheel(0, random.uniform(200, 900))
+            await asyncio.sleep(random.uniform(0.2, 0.6))
+        await asyncio.sleep(random.uniform(0.3, 1.2))
+    except Exception:
+        pass
+
+
 # ── crawlee PlaywrightCrawler (tek URL, browserforge fingerprint) ─────────────
 # Tüm platformlar ve kuyruklar (normal+express) için TEK global sınır: aynı anda
 # en fazla bu kadar gerçek Chromium instance açık olabilir. Platform başına
@@ -252,6 +294,7 @@ async def crawlee_pw_scrape(
             headless=True,
             max_requests_per_crawl=1,
             storage_client=MemoryStorageClient(),
+            proxy_configuration=_PROXY_CONFIG,
             concurrency_settings=ConcurrencySettings(
                 min_concurrency=1,
                 max_concurrency=1,
@@ -263,6 +306,7 @@ async def crawlee_pw_scrape(
         async def _handler(ctx: PlaywrightCrawlingContext):
             page = ctx.page
             await page.route("**/*", _block_route)
+            await _human_interact(page)
             data = await page_handler(page, ctx.request.url)
             if data:
                 result.update(data)

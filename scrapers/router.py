@@ -23,13 +23,14 @@ async def scrape_product(
     pool=None,
     price_only: bool = False,
     cached_image: Optional[str] = None,
+    priority: bool = False,
 ) -> Optional[dict]:
     fn = _SCRAPERS.get(platform)
     if not fn:
         print(f"[router] Desteklenmeyen platform: {platform}")
         return None
     try:
-        return await fn(url, price_only=price_only, cached_image=cached_image)
+        return await fn(url, price_only=price_only, cached_image=cached_image, priority=priority)
     except Exception as e:
         print(f"[scraper/{platform}] Hata: {e}")
         return None

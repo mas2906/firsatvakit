@@ -572,8 +572,8 @@ async def _az_pw_handler(page, url: str) -> Optional[dict]:
 
 # ── Ana fonksiyon ─────────────────────────────────────────────────────────────
 async def scrape_amazon(url: str, price_only: bool = False,
-                         cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["amazon"].wait()
+                         cached_image: Optional[str] = None, priority: bool = False) -> Optional[dict]:
+    await RL["amazon"].wait(priority=priority)
 
     data = await _az_via_curl(url)
     if data and (data.get("dead_url") or data.get("not_found")):

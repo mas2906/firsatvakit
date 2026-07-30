@@ -146,9 +146,13 @@ def _ty_parse_html(html: str) -> Optional[dict]:
         except Exception:
             pass
 
-    # winnerVariant regex fallback
-    mwv     = re.search(r'"winnerVariant"\s*:\s*\{', html)
-    snippet = html[mwv.start():mwv.start() + 3000] if mwv else html
+    # winnerVariant regex fallback — winnerVariant bulunamazsa TÜM sayfada arama
+    # yapma: sayfadaki "benzer ürünler" gibi widget'lardan alakasız bir ürünün
+    # fiyatını yanlışlıkla asıl ürünün fiyatı sanabilir.
+    mwv = re.search(r'"winnerVariant"\s*:\s*\{', html)
+    if not mwv:
+        return None
+    snippet = html[mwv.start():mwv.start() + 3000]
     mp      = re.search(r'"discountedPrice"\s*:\s*\{"value"\s*:\s*([\d.]+)', snippet)
     if mp:
         try:
@@ -274,8 +278,8 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
 
 
 async def scrape_trendyol(url: str, price_only: bool = False,
-                           cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["trendyol"].wait()
+                           cached_image: Optional[str] = None, priority: bool = False) -> Optional[dict]:
+    await RL["trendyol"].wait(priority=priority)
 
     data = await _ty_via_curl(url)
     if data and (data.get("dead_url") or data.get("price")):

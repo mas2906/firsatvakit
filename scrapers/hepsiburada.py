@@ -401,8 +401,8 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
 
 
 async def scrape_hepsiburada(url: str, price_only: bool = False,
-                              cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["hepsiburada"].wait()
+                              cached_image: Optional[str] = None, priority: bool = False) -> Optional[dict]:
+    await RL["hepsiburada"].wait(priority=priority)
 
     data = await _hb_via_curl(url)
     if data and (data.get("dead_url") or data.get("price")):
