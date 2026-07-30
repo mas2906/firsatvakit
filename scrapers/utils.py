@@ -81,15 +81,31 @@ def detect_cart_discount(html_text: str) -> bool:
 # Ban/blok riskini azaltmak için 4 platform aynı anda değil, sırayla taranır.
 # 20 dk'lık döngüde her platform 5 dk aktif, 15 dk pasif olur. Tek kaynak burası —
 # hem local_scraper.py (iş kuyruğa dispatch edilsin mi) hem RateLimiter (siteye
-# gerçekten istek gitsin mi) aynı hesaplamayı kullanır.
+# gerçekten istek gitsin mi) hem de VPS'teki admin monitor (/api/scraper-monitor)
+# aynı hesaplamayı kullanır. UTC kullanıyoruz ki local makine ile VPS'in saat
+# dilimi farkı rotasyon durumunu birbirinden saptırmasın.
 ROTATION_ORDER    = ["trendyol", "n11", "amazon", "hepsiburada"]
 ROTATION_SLOT_MIN = 5
 
 
+def _rotation_now() -> datetime:
+    return datetime.utcnow()
+
+
 def rotation_active_platform() -> str:
     cycle_min = ROTATION_SLOT_MIN * len(ROTATION_ORDER)
-    slot = (datetime.now().minute % cycle_min) // ROTATION_SLOT_MIN
+    now = _rotation_now()
+    slot = (now.minute % cycle_min) // ROTATION_SLOT_MIN
     return ROTATION_ORDER[slot]
+
+
+def rotation_minutes_left() -> float:
+    """Aktif platformun sırasının bitmesine kalan dakika."""
+    cycle_min = ROTATION_SLOT_MIN * len(ROTATION_ORDER)
+    now = _rotation_now()
+    pos = (now.minute % cycle_min) + now.second / 60.0
+    into_slot = pos % ROTATION_SLOT_MIN
+    return round(ROTATION_SLOT_MIN - into_slot, 1)
 
 
 def is_rotation_active(platform: str) -> bool:
