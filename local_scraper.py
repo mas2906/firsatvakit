@@ -55,7 +55,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 # Amazon/HB: Playwright fallback var → düşük concurrent (RAM tasarrufu)
 PLATFORM_CONCURRENT = {
     "amazon":      5,
-    "trendyol":    6,
+    "trendyol":    4,
     "hepsiburada": 5,
     "n11":         5,
 }
