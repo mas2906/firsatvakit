@@ -278,8 +278,8 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
 
 
 async def scrape_trendyol(url: str, price_only: bool = False,
-                           cached_image: Optional[str] = None, priority: bool = False) -> Optional[dict]:
-    await RL["trendyol"].wait(priority=priority)
+                           cached_image: Optional[str] = None) -> Optional[dict]:
+    await RL["trendyol"].wait()
 
     data = await _ty_via_curl(url)
     if data and (data.get("dead_url") or data.get("price")):

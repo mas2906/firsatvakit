@@ -120,7 +120,6 @@ async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
         platform     = job["platform"]
         price_only   = job.get("price_only", False)
         cached_image = job.get("cached_image") or None
-        is_priority  = job.get("priority", 0) < 0
 
         log.info(f"[{platform}] #{pid}{' [fiyat]' if price_only else ''}")
         _timeout = (90 if platform == "hepsiburada" else
@@ -129,8 +128,7 @@ async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
                     40)
         try:
             data = await asyncio.wait_for(
-                scrape_product(url, platform, price_only=price_only, cached_image=cached_image,
-                                priority=is_priority),
+                scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
                 timeout=_timeout,
             )
 

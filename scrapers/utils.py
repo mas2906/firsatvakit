@@ -115,10 +115,10 @@ def is_rotation_active(platform: str) -> bool:
 class RateLimiter:
     """Asyncio tabanlı rate limiter — platform başına sıralı bekleme.
 
-    `platform` verilirse, rotasyon sırası bu platformda değilken normal
-    (priority=False) istekleri bekletir — siteye gerçekten istek gitmeden önce
-    rotasyonu burada da uygular (sadece dispatch katmanına güvenmez).
-    `priority=True` (örn. yeni eklenen link) rotasyonu atlar, hep hemen geçer.
+    `platform` verilirse, rotasyon sırası bu platformda değilken TÜM istekleri
+    (öncelikli işler dahil) bekletir — siteye gerçekten istek gitmeden önce
+    rotasyonu burada da uygular (sadece dispatch katmanına güvenmez). Rotasyon
+    katı: hiçbir istek sırası gelmeden siteye gitmez.
     """
 
     def __init__(self, min_delay: float, max_delay: float, platform: Optional[str] = None):
@@ -128,8 +128,8 @@ class RateLimiter:
         self._sem = asyncio.Semaphore(1)
         self._platform = platform
 
-    async def wait(self, priority: bool = False) -> None:
-        if self._platform and not priority:
+    async def wait(self) -> None:
+        if self._platform:
             first = True
             while not is_rotation_active(self._platform):
                 if first:

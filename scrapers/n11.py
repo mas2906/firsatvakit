@@ -338,7 +338,7 @@ async def _n11_pw_handler(page, url: str) -> Optional[dict]:
 
 
 async def scrape_n11(url: str, price_only: bool = False,
-                      cached_image: Optional[str] = None, priority: bool = False) -> Optional[dict]:
-    await RL["n11"].wait(priority=priority)
+                      cached_image: Optional[str] = None) -> Optional[dict]:
+    await RL["n11"].wait()
     data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=30)
     return price_filter(data, price_only, cached_image) if data else None

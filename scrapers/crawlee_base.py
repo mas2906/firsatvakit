@@ -144,10 +144,10 @@ def drop_session(platform: str) -> None:
 
 # ── Rate limiter'lar (platform başına) ───────────────────────────────────────
 RL: dict[str, RateLimiter] = {
-    "trendyol":    RateLimiter(1.0, 2.0, platform="trendyol"),
-    "n11":         RateLimiter(1.0, 2.0, platform="n11"),
-    "amazon":      RateLimiter(1.5, 3.0, platform="amazon"),
-    "hepsiburada": RateLimiter(1.0, 2.0, platform="hepsiburada"),
+    "trendyol":    RateLimiter(2.0, 5.5, platform="trendyol"),
+    "n11":         RateLimiter(2.0, 5.5, platform="n11"),
+    "amazon":      RateLimiter(2.0, 5.5, platform="amazon"),
+    "hepsiburada": RateLimiter(2.0, 5.5, platform="hepsiburada"),
 }
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
