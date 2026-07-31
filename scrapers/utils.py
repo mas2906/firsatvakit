@@ -12,9 +12,6 @@ from typing import Optional
 
 log = logging.getLogger("scraper")
 
-CLOUDFLARE_TITLES = ["Attention Required", "Just a moment", "Checking your browser"]
-CAMOUFOX_STEALTH = ""  # geriye dönük uyumluluk sabiti
-
 
 def normalize_image_url(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -54,27 +51,6 @@ def parse_price_tr_clean(text: Optional[str]) -> Optional[float]:
         return v if v > 0 else None
     except ValueError:
         return None
-
-
-CART_DISCOUNT_PATTERNS = [
-    "sepette indirim",
-    "sepete indirim",
-    "sepette ekstra",
-    "sepete ekstra",
-    "2. ürüne",
-    "ikinci ürüne",
-    "çoklu alım",
-    "kombinasyon fiyat",
-    "cart discount",
-]
-
-
-def detect_cart_discount(html_text: str) -> bool:
-    """HTML metninde sepette indirim göstergesi arar."""
-    if not html_text:
-        return False
-    lower = html_text.lower()
-    return any(p in lower for p in CART_DISCOUNT_PATTERNS)
 
 
 # ── Platform rotasyonu ─────────────────────────────────────────────────────────
@@ -153,6 +129,3 @@ class RateLimiter:
             if delay > 0:
                 await asyncio.sleep(delay)
             self._last_ts = _time.monotonic()
-
-    def reset(self) -> None:
-        self._last_ts = 0.0

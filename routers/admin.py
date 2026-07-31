@@ -16,6 +16,7 @@ from db import get_db
 from scraper_router import (clean_tracking_params, detect_platform, enqueue_url,
                              is_short_url, resolve_short_url)
 from telegram_pub import publish_deal
+from whatsapp_pub import publish_deal_whatsapp
 
 from .api import _dispatch_scrape, _run_cross_search
 from .deps import (_verify_csrf, cache_invalidate_index, current_user,
@@ -166,6 +167,10 @@ async def admin_approve_deal(deal_id: int, request: Request, affiliate_url: str 
     prod_dict = dict(product)
     prod_dict["deal_id"] = deal_id
     await publish_deal(db, deal_id, prod_dict, deal["new_price"], deal["old_price"], deal["discount_pct"], slug)
+    try:
+        await publish_deal_whatsapp(deal_id, prod_dict, deal["new_price"], deal["old_price"], deal["discount_pct"], slug)
+    except Exception as e:
+        log.warning(f"WhatsApp yayını başarısız (deal #{deal_id}): {e}")
     title = (prod_dict.get("title") or "Ürün").strip()[:80]
     pct = deal["discount_pct"]
     old_p = int(deal["old_price"])

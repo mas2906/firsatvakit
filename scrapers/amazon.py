@@ -20,7 +20,7 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from scrapers.crawlee_base import (
-    IOS_UAS, CHROME_PROFILES, make_chrome_headers,
+    CHROME_PROFILES, make_chrome_headers,
     get_session, drop_session, RL, cb_ok, cb_fail, cb_reset,
     price_filter, crawlee_pw_scrape, _CURL_OK,
 )

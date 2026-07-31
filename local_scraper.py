@@ -54,10 +54,10 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 # Trendyol/N11: API tabanlı → yüksek concurrent mümkün
 # Amazon/HB: Playwright fallback var → düşük concurrent (RAM tasarrufu)
 PLATFORM_CONCURRENT = {
-    "amazon":      2,
+    "amazon":      5,
     "trendyol":    6,
-    "hepsiburada": 2,
-    "n11":         2,
+    "hepsiburada": 5,
+    "n11":         5,
 }
 
 SCHEDULE = {
