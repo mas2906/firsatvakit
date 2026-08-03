@@ -119,10 +119,15 @@ async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
         cached_image = job.get("cached_image") or None
 
         log.info(f"[{platform}] #{pid}{' [fiyat]' if price_only else ''}")
-        _timeout = (90 if platform == "hepsiburada" else
-                    60 if platform == "amazon"       else
-                    60 if platform == "n11"          else
-                    40)
+        # DevTools/gercek-veri olcumune gore kalibre edildi: bu deger rate
+        # limiter bekleme suresini (RL max) + Playwright yedek denemesinin
+        # kendi ic timeout'unu (crawlee_pw_scrape timeout=) kapsamali, yoksa
+        # Playwright kendi suresini bile tamamlamadan disaridan oldururuluyor
+        # (orn. eski trendyol: RL max 40s + PW 48s > eski timeout 40s).
+        _timeout = (95 if platform == "trendyol"    else  # RL 40s + PW 48s
+                    80 if platform == "amazon"       else  # RL 20s + PW 50s
+                    65 if platform == "n11"          else  # RL 20s + PW 30s
+                    90)                                    # hepsiburada: RL 15s + PW 55s
         try:
             data = await asyncio.wait_for(
                 scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
