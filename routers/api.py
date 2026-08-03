@@ -14,7 +14,6 @@ from email_utils import send_price_alert
 from telegram_pub import notify_pending_approval, notify_approved_deal_update
 
 from .deps import now_str, require_admin
-from scrapers.utils import rotation_active_platform, rotation_minutes_left, ROTATION_ORDER, ROTATION_SLOT_MIN
 
 log = logging.getLogger("main")
 
@@ -725,20 +724,9 @@ async def scraper_monitor(request: Request):
     for p in platforms:
         result[p]["errors_1h"] = errors_1h.get(p, 0)
 
-    active_platform = rotation_active_platform()
-    minutes_left = rotation_minutes_left()
-    next_idx = (ROTATION_ORDER.index(active_platform) + 1) % len(ROTATION_ORDER)
-
     result["_meta"] = {
         "alive": (any_alive["cnt"] > 0) if any_alive else False,
         "checked_at": now_str(),
-        "rotation": {
-            "active": active_platform,
-            "next": ROTATION_ORDER[next_idx],
-            "minutes_left": minutes_left,
-            "slot_min": ROTATION_SLOT_MIN,
-            "order": ROTATION_ORDER,
-        },
         "recent_ok": [
             {
                 "time": r["scraped_at"],

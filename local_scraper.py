@@ -19,15 +19,21 @@ _tempfile.tempdir = _TMP
 
 import shutil
 
-# Crawlee disk queue birikimini önle: her process başlangıcında temiz bir depo
 _CRAWLEE_DIR = os.path.join(_TMP, "crawlee_storage")
-shutil.rmtree(_CRAWLEE_DIR, ignore_errors=True)
-os.makedirs(_CRAWLEE_DIR, exist_ok=True)
+_PROJECT_STORAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
 os.environ["CRAWLEE_STORAGE_DIR"] = _CRAWLEE_DIR
 
-# Proje içindeki eski storage dizinini de temizle (önceki çalışmanın kalıntısı)
-_PROJECT_STORAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
-shutil.rmtree(_PROJECT_STORAGE, ignore_errors=True)
+
+def _reset_crawlee_storage() -> None:
+    """Crawlee disk queue birikimini önle: temiz bir depoyla başla.
+    PID kilidi alındıktan SONRA çağrılmalı — aksi halde kilidi kaybedip hemen
+    çıkacak bir kopya süreç bile bu paylaşılan dizini silip asıl sürecin
+    ayağına dolanabilir (geçmişte tam olarak buna bağlı çökmeler yaşandı)."""
+    shutil.rmtree(_CRAWLEE_DIR, ignore_errors=True)
+    os.makedirs(_CRAWLEE_DIR, exist_ok=True)
+    # Proje içindeki eski storage dizinini de temizle (önceki çalışmanın kalıntısı)
+    shutil.rmtree(_PROJECT_STORAGE, ignore_errors=True)
+
 
 import asyncio
 import logging
@@ -50,14 +56,15 @@ API_KEY       = os.getenv("SCRAPER_SERVICE_KEY", "firsatvakti-scraper-key")
 WEBHOOK_KEY   = os.getenv("FRONTEND_WEBHOOK_KEY", "firsatvakti-webhook-key")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 
-# Platform başına eş zamanlı iş sayısı
-# Trendyol/N11: API tabanlı → yüksek concurrent mümkün
-# Amazon/HB: Playwright fallback var → düşük concurrent (RAM tasarrufu)
+# Platform başına eş zamanlı iş sayısı — ürünler günde bir kez tarandığı için
+# (bkz. scheduler.py) hız değil güvenlik önceliklidir, bilerek düşük tutulur.
+# Trendyol kataloğu küçük olduğu için (bkz. /admin) daha da düşük — daha önce
+# yüksek concurrency + kısa gecikmeyle blok yemişti.
 PLATFORM_CONCURRENT = {
-    "amazon":      5,
-    "trendyol":    4,
-    "hepsiburada": 5,
-    "n11":         5,
+    "amazon":      2,
+    "trendyol":    1,
+    "hepsiburada": 2,
+    "n11":         2,
 }
 
 SCHEDULE = {
@@ -67,21 +74,11 @@ SCHEDULE = {
     "hepsiburada": list(range(0, 24)),
 }
 
-# Platform rotasyonu — ban/blok riskini azaltmak için 4 platform aynı anda değil,
-# sırayla taranır. 20 dk'lık döngüde her platform 5 dk aktif, 15 dk pasif olur.
-# Tek kaynak scrapers/utils.py'de (rotation_active_platform) — RateLimiter de
-# aynı hesaplamayı kullanarak siteye giden isteği bizzat bekletir; burada sadece
-# gereksiz iş dispatch etmeyi (ve concurrency slotlarını boşuna işgal etmeyi)
-# önlüyoruz. (priority=-1 express işler — örn. yeni eklenen link — rotasyondan
-# bağımsız, her zaman hemen işlenir; bkz. express_lane.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scrapers.utils import rotation_active_platform  # noqa: E402
 
 
 def _is_active(platform: str) -> bool:
-    if datetime.now().hour not in SCHEDULE[platform]:
-        return False
-    return rotation_active_platform() == platform
+    return datetime.now().hour in SCHEDULE[platform]
 
 
 def _is_night() -> bool:
@@ -238,10 +235,10 @@ async def poll_platform(platform: str, client: httpx.AsyncClient, sem: asyncio.S
 
             if not active:
                 if was_active:
-                    log.info(f"[{platform}] Rotasyon sırası bitti — pasif (sıradaki: {rotation_active_platform()})")
+                    log.info(f"[{platform}] Planlanan saatlerin dışında — pasif")
                     was_active = False
                 # Pasif modda sadece öncelikli işleri al — bu zaten express_lane'in
-                # işi, burası ek güvence. Rotasyon dönüşünü kaçırmamak için kısa aralıkla kontrol et.
+                # işi, burası ek güvence.
                 try:
                     r = await client.get(
                         f"{BASE_URL}/api/pending-jobs?platform={platform}&limit=4&priority=-1",
@@ -321,46 +318,51 @@ async def _run_platform(platform: str, client: httpx.AsyncClient, fn, sem: async
 
 
 _PID_FILE = os.path.join(_TMP, "firsatvakti_scraper.pid")
+_MUTEX_NAME = "Global\\FirsatVaktiScraperSingleInstance"
+_ERROR_ALREADY_EXISTS = 183
+_win_mutex_handle = None
 
 
 def _pid_alive(pid: int) -> bool:
-    """Verilen PID çalışıyor mu? (cross-platform)"""
+    """Verilen PID çalışıyor mu? (sadece dosya-tabanlı fallback için kullanılır,
+    Windows'ta asıl kilit mekanizması artık _acquire_pid_lock_win altındaki
+    named mutex — bkz. orada ki yorum)."""
     try:
         if sys.platform == "win32":
             r = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=5,
             )
-            return f'"{pid}"' in r.stdout or f",{pid}," in r.stdout
+            return f'"{pid}"' in r.stdout
         else:
             os.kill(pid, 0)
             return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     except Exception:
-        return False
+        return True  # belirsizse güvenli taraf: canlı kabul et
 
 
-def _acquire_pid_lock() -> bool:
-    """
-    Atomik PID lock — O_CREAT|O_EXCL ile race condition önlenir.
-    Başka bir instance çalışıyorsa False döner.
-    """
+def _acquire_pid_lock_file() -> bool:
+    """Dosya tabanlı yedek kilit (Windows dışı platformlar veya mutex
+    başarısız olursa). O_CREAT|O_EXCL atomik ama tasklist kontrolüne
+    dayandığı için Windows'ta tek başına yeterince güvenilir değil —
+    asıl mekanizma _acquire_pid_lock_win."""
     my_pid = os.getpid()
-    # Mevcut PID dosyasını kontrol et
     if os.path.exists(_PID_FILE):
         try:
             old_pid = int(open(_PID_FILE).read().strip())
-            if old_pid != my_pid and _pid_alive(old_pid):
-                log.warning(f"[pid-lock] Scraper zaten çalışıyor (PID={old_pid}) — çıkılıyor")
-                return False
         except Exception:
-            pass
+            old_pid = None
+        if old_pid is not None and old_pid != my_pid and _pid_alive(old_pid):
+            log.warning(f"[pid-lock] Scraper zaten çalışıyor (PID={old_pid}) — çıkılıyor")
+            return False
         try:
             os.remove(_PID_FILE)
         except Exception:
             pass
-    # Atomik dosya oluşturma (O_EXCL: başka process aynı anda yapamaz)
     try:
         fd = os.open(_PID_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.write(fd, str(my_pid).encode())
@@ -371,7 +373,56 @@ def _acquire_pid_lock() -> bool:
         return False
 
 
+def _acquire_pid_lock() -> bool:
+    """Tek örnek garantisi. Windows'ta işletim sistemi seviyesinde ATOMİK bir
+    named mutex kullanılır (CreateMutexW) — dosya + tasklist kontrolüne göre
+    iki temel avantajı var:
+      1. TOCTOU yarışı imkansız (tek kernel çağrısı, "kontrol et sonra yaz"
+         iki adımlı deseni yok) — daha önce dosya-tabanlı kilit, aynı saniye
+         içinde başlayan iki watchdog tetikleyicisinde (AtStartup+AtLogOn)
+         her ikisinin de kilidi "kazandığını" sanmasına yol açmıştı.
+      2. Süreç çökse/zorla kapatılsa bile mutex OS tarafından otomatik
+         serbest bırakılır — "eski PID'yi manuel temizle" derdi kalmaz.
+    Windows dışı sistemlerde (ya da mutex API'si her nedense başarısız
+    olursa) dosya tabanlı yönteme düşülür."""
+    global _win_mutex_handle
+    if sys.platform != "win32":
+        return _acquire_pid_lock_file()
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+        err = ctypes.get_last_error()
+    except Exception as e:
+        log.warning(f"[pid-lock] Windows mutex API kullanılamadı ({e}) — dosya tabanlı kilide düşülüyor")
+        return _acquire_pid_lock_file()
+
+    if not handle:
+        log.warning(f"[pid-lock] Mutex oluşturulamadı (hata={err}) — dosya tabanlı kilide düşülüyor")
+        return _acquire_pid_lock_file()
+    if err == _ERROR_ALREADY_EXISTS:
+        log.warning("[pid-lock] Scraper zaten çalışıyor (mutex sahipli) — çıkılıyor")
+        kernel32.CloseHandle(handle)
+        return False
+
+    _win_mutex_handle = handle
+    return True
+
+
 def _release_pid_lock() -> None:
+    global _win_mutex_handle
+    if _win_mutex_handle:
+        try:
+            import ctypes
+            ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(_win_mutex_handle)
+        except Exception:
+            pass
+        _win_mutex_handle = None
+        return
     try:
         os.remove(_PID_FILE)
     except Exception:
@@ -383,6 +434,7 @@ def _release_pid_lock() -> None:
 async def main() -> None:
     if not _acquire_pid_lock():
         return
+    _reset_crawlee_storage()
 
     platforms = list(PLATFORM_CONCURRENT)
     total_c = sum(PLATFORM_CONCURRENT.values())

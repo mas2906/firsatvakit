@@ -142,12 +142,17 @@ def drop_session(platform: str) -> None:
         pass
 
 
-# ── Rate limiter'lar (platform başına) ───────────────────────────────────────
+# ── Rate limiter'lar (platform başına) ─────────────────────────────────────────
+# Ürünler günde bir kez taranıyor (scheduler.py'deki tur bazlı kuyruk) — bu yüzden
+# hız değil güvenlik önceliklidir. Değerler, en büyük kataloğu (hepsiburada) bile
+# düşük concurrency ile günde rahatça bitirecek şekilde bilerek geniş tutuldu.
+# Trendyol daha önce bu değerler düşükken (2.0-5.5sn, concurrency=6) blok yemişti;
+# kataloğu küçük olduğu için (bkz. /admin) en yavaş/güvenli aralık ona verildi.
 RL: dict[str, RateLimiter] = {
-    "trendyol":    RateLimiter(2.0, 5.5, platform="trendyol"),
-    "n11":         RateLimiter(2.0, 5.5, platform="n11"),
-    "amazon":      RateLimiter(2.0, 5.5, platform="amazon"),
-    "hepsiburada": RateLimiter(2.0, 5.5, platform="hepsiburada"),
+    "trendyol":    RateLimiter(15.0, 40.0),
+    "n11":         RateLimiter(8.0, 20.0),
+    "amazon":      RateLimiter(8.0, 20.0),
+    "hepsiburada": RateLimiter(6.0, 15.0),
 }
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────

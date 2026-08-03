@@ -25,6 +25,16 @@ from scrapers.utils import parse_price_tr_clean
 
 log = logging.getLogger("scraper.trendyol")
 
+# Amazon/Hepsiburada'da olup Trendyol'da eksik olan engel/captcha tespiti —
+# 200 OK dönse bile içerik bir bot-doğrulama sayfası olabilir. Bu tespit
+# olmadan "yanmış" oturum fark edilmeden tekrar tekrar kullanılıp ban riskini
+# katlıyordu.
+_TY_BLOCK_MARKERS = [
+    "captcha", "access denied", "just a moment", "attention required",
+    "checking your browser", "unusual traffic", "güvenlik doğrulaması",
+    "robot değilsiniz", "erişiminiz kısıtlandı", "cf-challenge",
+]
+
 _TY_API_PRIMARY = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{cid}"
 _TY_BASKET_KEYS = [
     "basketPrice", "flashSalePrice", "droppedPrice", "promotionPrice",
@@ -200,7 +210,10 @@ async def _ty_via_curl(url: str) -> Optional[dict]:
         r  = await session.get(url, headers={
             "User-Agent":      ua,
             "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+            "Cache-Control":   "no-cache",
+            "Pragma":          "no-cache",
             "Referer":         "https://www.trendyol.com/",
         }, allow_redirects=True, timeout=20)
 
@@ -215,6 +228,13 @@ async def _ty_via_curl(url: str) -> Optional[dict]:
 
         html = r.text
         if not html or len(html) < 3000:
+            drop_session("trendyol")
+            return None
+
+        low = html[:5000].lower()
+        if any(k in low for k in _TY_BLOCK_MARKERS):
+            log.warning(f"[trendyol/curl] engel/captcha sayfası tespit edildi — oturum atılıyor")
+            cb_fail("ty_curl")
             drop_session("trendyol")
             return None
 
@@ -271,6 +291,11 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
                 return result
 
     html = await page.content()
+    low = (html or "")[:5000].lower()
+    if any(k in low for k in _TY_BLOCK_MARKERS):
+        log.warning("[trendyol/pw] engel/captcha sayfası tespit edildi")
+        return None
+
     data = _ty_parse_html(html)
     if data and data.get("price"):
         log.info(f"[trendyol/pw] ✔(html) price={data.get('price')}")

@@ -115,7 +115,7 @@ async def _requeue_worker():
                 db.commit()
                 log.info(f"[requeue] {len(new_rows)} yeni link kuyruğa eklendi (priority=0)")
 
-            # 3. Aktif deal ürünleri — 5 dakikada bir (priority=1)
+            # 3. Aktif deal ürünleri — günde bir kez (priority=1, genel turdan biraz öncelikli)
             # last_seen_at IS NULL → hiç taranmamış ama aktif deal var, hemen ekle
             deal_rows = db.execute("""
                 SELECT DISTINCT p.id, p.source_url, p.platform
@@ -124,7 +124,7 @@ async def _requeue_worker():
                 WHERE d.active = 1
                   AND p.platform IS NOT NULL
                   AND p.source_url IS NOT NULL
-                  AND (p.last_seen_at IS NULL OR p.last_seen_at::timestamp < NOW() - INTERVAL '5 minutes')
+                  AND (p.last_seen_at IS NULL OR p.last_seen_at::timestamp < NOW() - INTERVAL '24 hours')
                   AND NOT EXISTS (
                       SELECT 1 FROM scan_queue sq
                       WHERE sq.product_id = p.id
@@ -142,22 +142,8 @@ async def _requeue_worker():
                 db.commit()
                 log.info(f"[requeue] {len(deal_rows)} aktif deal kuyruğa eklendi (priority=1)")
 
-            # 3b. Aktif deal ürünlerinin priority=2 bekleyen girişlerini priority=1'e yükselt
-            promoted = db.execute("""
-                UPDATE scan_queue SET priority=1, updated_at=?
-                WHERE status='pending' AND priority > 1
-                  AND product_id IN (
-                      SELECT DISTINCT p.id FROM products p
-                      JOIN deals d ON d.product_id = p.id
-                      WHERE d.active = 1
-                  )
-            """, (now,)).rowcount
-            if promoted:
-                db.commit()
-                log.info(f"[requeue] {promoted} aktif deal girişi priority=1'e yükseltildi")
-
-            # 3c. Karşılaştırma ürünleri — aktif deal grubundaki diğer platform ürünleri
-            # Bunlar deal tablosunda değil ama deal sayfasında gösteriliyor → 30 dakikada bir priority=1
+            # 3c. Karşılaştırma ürünleri — aktif deal grubundaki diğer platform ürünleri.
+            # Bunlar deal tablosunda değil ama deal sayfasında gösteriliyor → günde bir kez priority=1
             compare_rows = db.execute("""
                 SELECT DISTINCT p.id, p.source_url, p.platform
                 FROM products p
@@ -165,7 +151,7 @@ async def _requeue_worker():
                 WHERE pgm.match_type != 'removed'
                   AND p.platform IS NOT NULL
                   AND p.source_url IS NOT NULL
-                  AND (p.last_seen_at IS NULL OR p.last_seen_at < datetime('now', '-30 minutes'))
+                  AND (p.last_seen_at IS NULL OR p.last_seen_at < datetime('now', '-24 hours'))
                   AND EXISTS (
                       SELECT 1 FROM product_group_members pgm2
                       JOIN deals d ON d.product_id = pgm2.product_id
@@ -187,7 +173,7 @@ async def _requeue_worker():
                 )
             if compare_rows:
                 db.commit()
-                log.info(f"[requeue] {len(compare_rows)} karşılaştırma ürünü kuyruğa eklendi (priority=1, 30dk)")
+                log.info(f"[requeue] {len(compare_rows)} karşılaştırma ürünü kuyruğa eklendi (priority=1, günlük)")
 
             # 4. Tüm ürünler — round tabanlı sıralı tarama (priority=2)
             # round_started_at: settings tablosunda tutulur
