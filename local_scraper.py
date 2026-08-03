@@ -318,7 +318,7 @@ async def _run_platform(platform: str, client: httpx.AsyncClient, fn, sem: async
 
 
 _PID_FILE = os.path.join(_TMP, "firsatvakti_scraper.pid")
-_MUTEX_NAME = "Global\\FirsatVaktiScraperSingleInstance"
+_MUTEX_NAME = "Global\\FirsatVaktiScraperSingleInstance_v2"
 _ERROR_ALREADY_EXISTS = 183
 _win_mutex_handle = None
 
@@ -383,6 +383,13 @@ def _acquire_pid_lock() -> bool:
          her ikisinin de kilidi "kazandığını" sanmasına yol açmıştı.
       2. Süreç çökse/zorla kapatılsa bile mutex OS tarafından otomatik
          serbest bırakılır — "eski PID'yi manuel temizle" derdi kalmaz.
+    ÖNEMLİ: Mutex'i varsayılan (NULL) güvenlik tanımlayıcısıyla oluşturmak,
+    farklı yetki seviyesindeki (elevated/standart) süreçlerin aynı mutex'e
+    erişimini ENGELLİYOR (UAC split-token) — bu yüzden burada açıkça
+    "Everyone/World" erişimine izin veren bir SDDL tanımlayıcısı kullanılıyor.
+    Bu olmadan, watchdog'un yükseltilmiş yetkiyle başlattığı bir kopya ile
+    farklı bağlamda başlayan başka bir kopya birbirini göremiyor, ikisi de
+    kilidi "kazandığını" sanıp aynı platforma paralel istek atabiliyordu.
     Windows dışı sistemlerde (ya da mutex API'si her nedense başarısız
     olursa) dosya tabanlı yönteme düşülür."""
     global _win_mutex_handle
@@ -392,11 +399,34 @@ def _acquire_pid_lock() -> bool:
     try:
         import ctypes
         from ctypes import wintypes
+
+        class _SECURITY_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [("nLength", wintypes.DWORD),
+                        ("lpSecurityDescriptor", ctypes.c_void_p),
+                        ("bInheritHandle", wintypes.BOOL)]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)
+        ]
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+        kernel32.CreateMutexW.argtypes = [ctypes.POINTER(_SECURITY_ATTRIBUTES), wintypes.BOOL, wintypes.LPCWSTR]
         kernel32.CreateMutexW.restype = wintypes.HANDLE
-        handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+
+        # "D:(A;;GA;;;WD)" = herkese (World) tam erişim (Generic All) izni ver.
+        psd = ctypes.c_void_p()
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW("D:(A;;GA;;;WD)", 1, ctypes.byref(psd), None):
+            raise OSError(f"SDDL dönüştürme başarısız (hata={ctypes.get_last_error()})")
+
+        sa = _SECURITY_ATTRIBUTES()
+        sa.nLength = ctypes.sizeof(_SECURITY_ATTRIBUTES)
+        sa.lpSecurityDescriptor = psd
+        sa.bInheritHandle = False
+
+        handle = kernel32.CreateMutexW(ctypes.byref(sa), False, _MUTEX_NAME)
         err = ctypes.get_last_error()
+        kernel32.LocalFree(psd)
     except Exception as e:
         log.warning(f"[pid-lock] Windows mutex API kullanılamadı ({e}) — dosya tabanlı kilide düşülüyor")
         return _acquire_pid_lock_file()
