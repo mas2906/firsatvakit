@@ -685,12 +685,21 @@ async def scraper_monitor(request: Request):
         "SELECT COUNT(*) as cnt FROM price_history WHERE scraped_at::timestamp >= NOW() - INTERVAL '30 minutes'"
     ).fetchone()
 
-    # Son 20 başarılı tarama (aktivite akışı)
+    # Son 20 başarılı tarama (aktivite akışı) — platform başına en fazla 5 satır
+    # garantilenir (ROW_NUMBER ile), yoksa yüksek hacimli platformlar (ör.
+    # hepsiburada) düşük hacimli olanları (ör. trendyol) listeden tamamen
+    # eleyebiliyordu; halbuki o platform da sorunsuz taramaya devam ediyor
+    # olabilir, sadece fiyatı değişmemiş oluyordu.
     recent_ok = db.execute("""
-        SELECT ph.scraped_at, ph.price_value, p.title, p.platform, p.id as product_id
-        FROM price_history ph
-        JOIN products p ON p.id = ph.product_id
-        ORDER BY ph.id DESC LIMIT 20
+        SELECT scraped_at, price_value, title, platform, product_id
+        FROM (
+            SELECT ph.scraped_at, ph.price_value, p.title, p.platform, p.id as product_id,
+                   ROW_NUMBER() OVER (PARTITION BY p.platform ORDER BY ph.id DESC) as rn
+            FROM price_history ph
+            JOIN products p ON p.id = ph.product_id
+        ) ranked
+        WHERE rn <= 5
+        ORDER BY scraped_at DESC LIMIT 20
     """).fetchall()
 
     # Son 20 hata (aktivite akışı)
