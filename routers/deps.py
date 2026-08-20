@@ -105,13 +105,17 @@ async def require_csrf(request: Request) -> None:
         if not _verify_csrf(request, header_token):
             raise HTTPException(403, "Geçersiz CSRF token")
         return
-    # Header yoksa Origin/Referer ile kaynak doğrula
-    site = os.getenv("SITE_URL", "https://firsatvakti.com")
-    origin  = request.headers.get("Origin", "")
+    # Header yoksa Origin/Referer ile kaynak doğrula.
+    # DİKKAT: tam eşleşme (==) şart — startswith() ile "https://site.com.evil.com"
+    # gibi bir Origin de geçerli sayılırdı (CSRF korumasını tamamen atlatırdı).
+    site = os.getenv("SITE_URL", "https://firsatvakti.com").rstrip("/")
+    origin  = request.headers.get("Origin", "").rstrip("/")
     referer = request.headers.get("Referer", "")
-    if origin and not origin.startswith(site):
+    referer_origin = referer.split("/", 3)
+    referer_origin = "/".join(referer_origin[:3]) if len(referer_origin) >= 3 else referer
+    if origin and origin != site:
         raise HTTPException(403, "Geçersiz istek kaynağı (CSRF)")
-    if not origin and not referer.startswith(site):
+    if not origin and referer_origin != site:
         raise HTTPException(403, "Geçersiz istek kaynağı (CSRF)")
 
 
@@ -169,6 +173,19 @@ def current_user(request: Request) -> Optional[dict]:
     return get_db().execute(
         "SELECT id, username, email, role FROM users WHERE id=?", (uid,)
     ).fetchone()
+
+
+def get_client_ip(request: Request) -> str:
+    """Gerçek istemci IP'si. Uygulama sadece 127.0.0.1'de dinliyor (nginx
+    dışından erişilemez) ve nginx X-Real-IP'yi $remote_addr ile SABİT olarak
+    set ediyor (proxy_set_header X-Real-IP $remote_addr) — yani istemci bu
+    header'ı spoof edemez, nginx her zaman üzerine yazar. Bu header
+    okunmadan request.client.host kullanılırsa herkes nginx'in kendi IP'sini
+    paylaşır ve rate-limit/brute-force kilidi fiilen anlamsızlaşır."""
+    real_ip = request.headers.get("X-Real-IP", "").strip()
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
 
 
 def require_admin(request: Request):

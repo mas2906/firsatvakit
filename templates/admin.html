@@ -89,6 +89,12 @@
       n11:         { label: 'N11',         color: '#8b5cf6' },
     };
 
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function timeAgo(isoStr) {
       if (!isoStr) return '—';
       var diff = Math.floor((Date.now() - new Date(isoStr.replace(' ','T')+'Z').getTime()) / 1000);
@@ -167,8 +173,8 @@
         nlBox.style.display = 'block';
         nlList.innerHTML = nl.map(function(r) {
           return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
-            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;">[' + r.platform.toUpperCase() + ']</span>'
-            + '<b>#' + r.product_id + '</b> ' + (r.title || '—')
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;">[' + escapeHtml((r.platform||'').toUpperCase()) + ']</span>'
+            + '<b>#' + r.product_id + '</b> ' + escapeHtml(r.title || '—')
             + ' — <span style="color:#dc2626;font-weight:700;">' + r.count + '/100 hata</span>'
             + '<form method="post" action="/admin/product/' + r.product_id + '/clear-errors" style="display:inline;margin:0;">'
             + '<button type="submit" style="background:#f59e0b;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Hataları Sıfırla</button>'
@@ -190,8 +196,8 @@
       } else {
         okFeed.innerHTML = okItems.map(function(r) {
           return '<div style="border-bottom:1px solid var(--border);padding:2px 0;">'
-            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + (r.platform||'').toUpperCase() + '</span> '
-            + '<span style="color:var(--text);">' + (r.title || '#' + r.product_id) + '</span> '
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + escapeHtml((r.platform||'').toUpperCase()) + '</span> '
+            + '<span style="color:var(--text);">' + escapeHtml(r.title || '#' + r.product_id) + '</span> '
             + '<span style="color:#10b981;font-weight:700;">' + (r.price ? r.price.toFixed(2) + ' ₺' : '') + '</span> '
             + '<span style="color:var(--muted);font-size:10px;float:right;">' + timeAgo(r.time) + '</span>'
           + '</div>';
@@ -205,10 +211,11 @@
         errFeed.innerHTML = '<span style="color:var(--muted);">Hata yok</span>';
       } else {
         errFeed.innerHTML = errItems.map(function(r) {
+          var msg = r.msg || '';
           return '<div style="border-bottom:1px solid var(--border);padding:2px 0;">'
-            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + (r.platform||'').toUpperCase() + '</span> '
-            + (r.title ? '<span style="color:var(--muted);">' + r.title + '</span> ' : '')
-            + '<span style="color:#dc2626;" title="' + r.msg + '">' + r.msg.substring(0, 40) + (r.msg.length > 40 ? '…' : '') + '</span> '
+            + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;font-size:10px;">' + escapeHtml((r.platform||'').toUpperCase()) + '</span> '
+            + (r.title ? '<span style="color:var(--muted);">' + escapeHtml(r.title) + '</span> ' : '')
+            + '<span style="color:#dc2626;" title="' + escapeHtml(msg) + '">' + escapeHtml(msg.substring(0, 40)) + (msg.length > 40 ? '…' : '') + '</span> '
             + '<span style="color:var(--muted);font-size:10px;float:right;">' + timeAgo(r.time) + '</span>'
           + '</div>';
         }).join('');

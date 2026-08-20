@@ -13,7 +13,7 @@ from security import (check_login_allowed, hash_password, migrate_password_on_lo
                       needs_rehash, record_login_attempt, record_login_attempt_db,
                       verify_password)
 
-from .deps import _is_rate_limited, _verify_csrf, current_user, now_str, templates
+from .deps import _is_rate_limited, _verify_csrf, current_user, get_client_ip, now_str, templates
 
 router = APIRouter()
 
@@ -35,13 +35,14 @@ async def register_get(request: Request):
 @router.post("/register")
 async def register_post(request: Request, username: str = Form(...), email: str = Form(...),
                         password: str = Form(...), csrf_token: str = Form("")):
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     if _is_rate_limited(ip, "register"):
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "register",
                                                         "error": "Çok fazla deneme. Lütfen bekleyin."})
     if not _verify_csrf(request, csrf_token):
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "register",
                                                         "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
+    email = email.strip().lower()
     db = get_db()
     if db.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "register",
@@ -67,14 +68,15 @@ async def login_get(request: Request):
 async def login_post(request: Request, email: str = Form(...), password: str = Form(...),
                      csrf_token: str = Form("")):
     db = get_db()
-    ip = request.client.host if request.client else "unknown"
+    ip = get_client_ip(request)
     if _is_rate_limited(ip, "login"):
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "login",
                                                         "error": "Çok fazla deneme. Lütfen bekleyin."})
     if not _verify_csrf(request, csrf_token):
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "login",
                                                         "error": "Geçersiz istek. Sayfayı yenileyip tekrar dene."})
-    allowed, wait = check_login_allowed(email)
+    email = email.strip().lower()
+    allowed, wait = check_login_allowed(email, db)
     if not allowed:
         return templates.TemplateResponse("auth.html", {"request": request, "mode": "login",
                                                         "error": f"Çok fazla hatalı deneme. {wait//60} dk sonra tekrar dene."})
