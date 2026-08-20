@@ -361,7 +361,10 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
             return {"dead_url": True}
 
     html = await page.content()
-    if len(html or "") > 500_000:
+    # Playwright/Camoufox masaüstü sayfayı tam hydrate ediyor: aynı ürün curl_cffi'nin
+    # mobil HTML'inden çok daha büyük dönebiliyor (gerçek örnek: 807KB) — eski 500KB
+    # sınırı bunu "bozuk sayfa" sanıp geçerli veriyi atıyordu.
+    if len(html or "") > 2_000_000:
         return None
     low = (html or "")[:5000].lower()
     if any(k in low for k in ("captcha", "cf-challenge", "access denied")):
