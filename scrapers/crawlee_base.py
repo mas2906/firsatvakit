@@ -28,6 +28,19 @@ except ImportError:
     CurlSession = None
     _CURL_OK = False
 
+# Camoufox: Playwright fallback'ın tarayıcı motoru. C++ seviyesinde fingerprint
+# enjeksiyonu yapan patched Firefox — vanilla Chromium+browserforge'a göre
+# Cloudflare/bot tespiti karşısında çok daha zor ayırt edilir. Kurulu değilse
+# (ör. henüz `camoufox fetch` çalıştırılmamış bir ortam) sessizce eski
+# PlaywrightCrawler davranışına düşülür.
+try:
+    from camoufox import AsyncNewBrowser as _camoufox_new_browser
+    from crawlee.browsers import PlaywrightBrowserPlugin as _PWPlugin, PlaywrightBrowserController as _PWController
+    from crawlee._utils.context import ensure_context as _ensure_context
+    _CAMOUFOX_OK = True
+except ImportError:
+    _CAMOUFOX_OK = False
+
 # Crawlee disk storage birikimini önle:
 # 1) global service_locator → MemoryStorageClient
 # 2) global StorageInstanceManager sıfırla (disk-tabanlı cached queue'ları temizler)
@@ -253,9 +266,38 @@ async def _human_interact(page) -> None:
         pass
 
 
-# ── crawlee PlaywrightCrawler (tek URL, browserforge fingerprint) ─────────────
+# ── Camoufox tarayıcı eklentisi ────────────────────────────────────────────────
+if _CAMOUFOX_OK:
+    class _CamoufoxPlugin(_PWPlugin):
+        """PlaywrightBrowserPlugin'in Chromium yerine Camoufox (patched Firefox)
+        başlatan versiyonu. Windows fingerprint + tr-TR locale: mevcut curl_cffi
+        Chrome/Windows profilleriyle (bkz. CHROME_PROFILES) ve Accept-Language
+        header'larıyla tutarlı kalması için."""
+
+        @_ensure_context
+        async def new_browser(self) -> "_PWController":
+            if not self._playwright:
+                raise RuntimeError("Playwright başlatılmamış.")
+            browser = await _camoufox_new_browser(
+                self._playwright,
+                headless=True,
+                os=["windows"],
+                locale="tr-TR",
+                humanize=True,
+                block_webrtc=True,
+            )
+            return _PWController(
+                browser=browser,
+                max_open_pages_per_browser=1,
+                header_generator=None,  # Camoufox kendi header/fingerprint'ini üretir
+            )
+
+
+# ── crawlee PlaywrightCrawler (tek URL) ────────────────────────────────────────
+# Motor: Camoufox varsa Camoufox (patched Firefox), yoksa vanilla Chromium +
+# crawlee'nin browserforge fingerprint enjeksiyonu.
 # Tüm platformlar ve kuyruklar (normal+express) için TEK global sınır: aynı anda
-# en fazla bu kadar gerçek Chromium instance açık olabilir. Platform başına
+# en fazla bu kadar gerçek tarayıcı instance açık olabilir. Platform başına
 # concurrent ayarları bu sınırı aşabilir (poll+express çakışması dahil) — asıl
 # CPU/RAM tavanını burada garanti ediyoruz.
 _GLOBAL_PW_SEM = asyncio.Semaphore(4)
@@ -293,10 +335,7 @@ async def crawlee_pw_scrape(
         except Exception:
             pass
 
-        # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
-        # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
-        crawler = PlaywrightCrawler(
-            headless=True,
+        crawler_kwargs = dict(
             max_requests_per_crawl=1,
             storage_client=MemoryStorageClient(),
             proxy_configuration=_PROXY_CONFIG,
@@ -306,6 +345,15 @@ async def crawlee_pw_scrape(
                 desired_concurrency=1,
             ),
         )
+        if _CAMOUFOX_OK:
+            from crawlee.browsers import BrowserPool
+            crawler_kwargs["browser_pool"] = BrowserPool(plugins=[_CamoufoxPlugin()])
+        else:
+            crawler_kwargs["headless"] = True
+
+        # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
+        # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
+        crawler = PlaywrightCrawler(**crawler_kwargs)
 
         @crawler.router.default_handler
         async def _handler(ctx: PlaywrightCrawlingContext):
