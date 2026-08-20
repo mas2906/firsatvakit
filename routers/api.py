@@ -690,12 +690,18 @@ async def scraper_monitor(request: Request):
     # hepsiburada) düşük hacimli olanları (ör. trendyol) listeden tamamen
     # eleyebiliyordu; halbuki o platform da sorunsuz taramaya devam ediyor
     # olabilir, sadece fiyatı değişmemiş oluyordu.
+    # İç sorgu (ORDER BY id DESC LIMIT 3000) price_history_pkey index'iyle
+    # sabit maliyetli kalır — pencere fonksiyonu tüm tabloya (bu panel her
+    # 10sn'de bir çağrıldığı için 142K+ satırda 500ms+'a çıkıp disk'e taşan
+    # bir sort'a yol açıyordu) değil, en yeni 3000 satıra uygulanır. 3000,
+    # en düşük hacimli platformun (trendyol) derinliğinin (~230) kat kat
+    # üzerinde güvenli bir marj.
     recent_ok = db.execute("""
         SELECT scraped_at, price_value, title, platform, product_id
         FROM (
             SELECT ph.scraped_at, ph.price_value, p.title, p.platform, p.id as product_id,
                    ROW_NUMBER() OVER (PARTITION BY p.platform ORDER BY ph.id DESC) as rn
-            FROM price_history ph
+            FROM (SELECT * FROM price_history ORDER BY id DESC LIMIT 3000) ph
             JOIN products p ON p.id = ph.product_id
         ) ranked
         WHERE rn <= 5
