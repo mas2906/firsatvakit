@@ -267,6 +267,7 @@ async def admin_delete_deal(deal_id: int, request: Request):
     db = get_db()
     db.execute("DELETE FROM short_links WHERE deal_id=?", (deal_id,))
     db.execute("DELETE FROM clicks WHERE deal_id=?", (deal_id,))
+    db.execute("DELETE FROM deal_publish_log WHERE deal_id=?", (deal_id,))
     db.execute("DELETE FROM deals WHERE id=?", (deal_id,))
     db.commit()
     return RedirectResponse("/admin", status_code=302)

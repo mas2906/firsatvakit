@@ -476,7 +476,8 @@ async def deal_detail(request: Request, deal_id: int):
     deal = db.execute("""
         SELECT d.*, p.title, p.image_url, p.description, p.rating,
                p.review_count, p.platform, p.source_url, p.asin_or_id, p.stock
-        FROM deals d JOIN products p ON d.product_id=p.id WHERE d.id=?
+        FROM deals d JOIN products p ON d.product_id=p.id
+        WHERE d.id=? AND d.status IN ('approved', 'expired')
     """, (deal_id,)).fetchone()
     if not deal:
         raise HTTPException(404, "Fırsat bulunamadı")
@@ -525,7 +526,7 @@ async def short_redirect(slug: str, request: Request):
     row = db.execute("""
         SELECT sl.*, d.product_id, d.affiliate_url, p.source_url, p.platform, p.asin_or_id
         FROM short_links sl JOIN deals d ON sl.deal_id=d.id JOIN products p ON d.product_id=p.id
-        WHERE sl.slug=?
+        WHERE sl.slug=? AND d.status IN ('approved', 'expired')
     """, (slug,)).fetchone()
     if not row:
         raise HTTPException(404, "Link bulunamadı")
