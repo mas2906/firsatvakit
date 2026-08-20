@@ -9,6 +9,7 @@ Telegram yayıncı.
 - Aboneler    : Kanal botu ile kişisel bildirimleri iletir
 """
 
+import html
 import logging
 import os
 import asyncio
@@ -65,7 +66,7 @@ def build_deal_message(product: dict, new_price: float, old_price: float, pct: f
     platform = normalize_platform(product.get("platform"))
     emoji = PLATFORM_EMOJI.get(platform, "🛒")
 
-    title = (product.get("title") or "").strip()[:80]
+    title = html.escape((product.get("title") or "").strip()[:80])
     short_url = f"{DOMAIN}/go/{short_slug}"
     deal_url = f"{DOMAIN}/deal/{product.get('deal_id', '')}"
 
@@ -199,7 +200,7 @@ async def notify_pending_approval(
     platform = normalize_platform(product.get("platform"))
     emoji = PLATFORM_EMOJI.get(platform, "🛒")
 
-    title = (product.get("title") or "Başlık yok").strip()[:80]
+    title = html.escape((product.get("title") or "Başlık yok").strip()[:80])
     image_url = product.get("image_url")
 
     admin_url = f"{DOMAIN}/admin"
@@ -233,7 +234,7 @@ async def notify_approved_deal_update(
 
     platform = normalize_platform(product.get("platform"))
     emoji = PLATFORM_EMOJI.get(platform, "🛒")
-    title = (product.get("title") or "Başlık yok").strip()[:80]
+    title = html.escape((product.get("title") or "Başlık yok").strip()[:80])
     image_url = product.get("image_url")
     deal_url = f"{DOMAIN}/deal/{deal_id}"
 

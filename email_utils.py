@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """E-posta gönderme modülü — SMTP ile şifre sıfırlama."""
 
+import html as _html
 import os, smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -40,6 +41,7 @@ def send_email(to: str, subject: str, html_body: str) -> bool:
 
 def send_password_reset(to: str, username: str, token: str) -> bool:
     reset_link = f"{SITE_URL}/reset-password/{token}"
+    username = _html.escape(username or "")
     html = f"""
 <!DOCTYPE html>
 <html lang="tr">
@@ -101,6 +103,11 @@ def send_price_alert(to: str, username: str, product_title: str,
                      old_price: float, new_price: float, pct: float,
                      deal_url: str) -> bool:
     """Takip edilen üründe fiyat düşüşü bildirimi gönder."""
+    # CR/LF ve fazla boşluk temizlenir (Subject header injection'ı da önler),
+    # ardından HTML gövdesi için ayrıca escape edilir.
+    safe_title = " ".join((product_title or "").split())
+    title_html = _html.escape(safe_title[:100])
+    username = _html.escape(username or "")
     old_fmt = f"{old_price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     new_fmt = f"{new_price:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     html = f"""
@@ -122,7 +129,7 @@ def send_price_alert(to: str, username: str, product_title: str,
             <h2 style="color:#1a1a1a;margin:0 0 8px;font-size:20px;">Takip ettiğin üründe fiyat düştü!</h2>
             <p style="color:#555;margin:0 0 20px;">Merhaba <strong>{username}</strong>,</p>
             <div style="background:#fff8f0;border-left:4px solid #f4501c;padding:16px 20px;border-radius:8px;margin-bottom:24px;">
-              <p style="margin:0 0 12px;font-weight:700;color:#1a1a1a;">{product_title[:100]}</p>
+              <p style="margin:0 0 12px;font-weight:700;color:#1a1a1a;">{title_html}</p>
               <p style="margin:0;font-size:18px;">
                 <s style="color:#aaa;">{old_fmt} TL</s>
                 &nbsp;→&nbsp;
@@ -154,4 +161,4 @@ def send_price_alert(to: str, username: str, product_title: str,
 </body>
 </html>
 """
-    return send_email(to, f"🔥 Fiyat düştü: {product_title[:50]}", html)
+    return send_email(to, f"🔥 Fiyat düştü: {safe_title[:50]}", html)

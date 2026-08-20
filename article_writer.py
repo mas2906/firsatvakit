@@ -74,10 +74,13 @@ def pick_topics(db, count: int) -> list[dict]:
     if not available:
         available = TOPIC_POOL  # Hepsi kullanıldıysa sıfırla
 
-    # Günün tarihi seed ile deterministik ama günlük değişen seçim
+    # Günün tarihi seed ile deterministik ama günlük değişen seçim.
+    # NOT: Python'un yerleşik hash() fonksiyonu str için process başına
+    # rastgele tuzlanır (PYTHONHASHSEED) — aynı gün ikinci kez çalıştırıldığında
+    # farklı bir sıralama üretip "deterministik" iddiasını bozardı. md5 sabittir.
     import hashlib
     today_seed = int(hashlib.md5(str(date.today()).encode()).hexdigest(), 16)
-    shuffled = sorted(available, key=lambda x: hash(x[0] + str(today_seed)))
+    shuffled = sorted(available, key=lambda x: hashlib.md5((x[0] + str(today_seed)).encode()).hexdigest())
     return [{"title": t[0], "category": t[1], "tags": t[2]} for t in shuffled[:count]]
 
 
@@ -165,16 +168,23 @@ def main():
         if not article:
             continue
 
-        result = create_article(
-            db,
-            title       = article["title"],
-            body_html   = article["body_html"],
-            author_id   = ADMIN_USER,
-            category    = article["category"],
-            tags        = article["tags"],
-            summary     = article["summary"],
-            status      = args.status,
-        )
+        try:
+            result = create_article(
+                db,
+                title       = article["title"],
+                body_html   = article["body_html"],
+                author_id   = ADMIN_USER,
+                category    = article["category"],
+                tags        = article["tags"],
+                summary     = article["summary"],
+                status      = args.status,
+            )
+        except Exception as e:
+            # Tek bir DB hatası (kilit, dup-slug, statement timeout) günün
+            # geri kalan makalelerinin hiç yazılmamasına yol açmasın —
+            # logla, bu konuyu atla, döngüye devam et.
+            print(f"  ❌ DB hatası (konu atlanıyor): {e}")
+            continue
         if result.get("ok"):
             ok += 1
             slug = result.get("slug", "")
