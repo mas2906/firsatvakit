@@ -564,6 +564,14 @@ async def _az_pw_handler(page, url: str) -> Optional[dict]:
         await asyncio.sleep(0.3)
     except Exception:
         pass
+
+    # ASIN redirect tespiti (curl katmanındaki kontrolün Playwright karşılığı) —
+    # olmadan Amazon bir ürünü başka bir ASIN'e birleştirdiğinde, yanlış ürünün
+    # verisi asıl istenen product_id altına kaydedilebiliyordu.
+    asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
+    if asin_m and asin_m.group(1) not in (page.url or ""):
+        return {"not_found": True}
+
     html = await page.content()
     if not html or len(html) < 3000:
         return None

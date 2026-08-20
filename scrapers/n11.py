@@ -31,13 +31,33 @@ def _n11_extract_cid(url: str) -> Optional[int]:
     return None
 
 
-def _n11_parse_gql(data: dict) -> Optional[dict]:
+_N11_GQL_ID_KEYS = ("contentId", "groupId", "id", "productId")
+
+
+def _n11_parse_gql(data: dict, target_cid: Optional[int] = None) -> Optional[dict]:
     try:
         detail = data["data"]["productDetail"]
     except (KeyError, TypeError):
         return None
     if not detail:
         return None
+
+    # Kimlik doğrulama: n11 sayfasında "benzer ürünler" gibi widget'lar da
+    # aynı productDetail şemasını kullanan GraphQL cevapları döndürebilir —
+    # bunlar istenen üründen farklı bir ürünün fiyatını taşıyabilir. Yanıtta
+    # bilinen bir kimlik alanı varsa ve hedef contentId ile uyuşmuyorsa
+    # reddet. Alan hiç yoksa (şema bilinmiyor) mevcut davranışı bozmamak
+    # için kabul et — sadece bilinen bir uyuşmazlıkta reddet.
+    if target_cid is not None:
+        for key in _N11_GQL_ID_KEYS:
+            if key in detail:
+                try:
+                    if int(detail[key]) != int(target_cid):
+                        log.warning(f"[n11/gql] kimlik uyuşmazlığı ({key}={detail[key]!r} != {target_cid}) — reddedildi")
+                        return None
+                except (TypeError, ValueError):
+                    pass
+                break
 
     price_block  = detail.get("price") or {}
     stock_block  = detail.get("stock") or {}
@@ -160,8 +180,12 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
     if target_cid:
         product = next((c for c in candidates if c.get("groupId") == target_cid), None)
         if not product:
-            log.debug(f"[n11/model] groupId={target_cid} bulunamadı, {len(candidates)} aday var")
-            product = candidates[0]
+            # candidates[0]'a düşmek yanlış ürünün (öneri/benzer ürün widget'ı)
+            # verisini asıl ürün sanıp kaydetme riski taşıyordu — gerçek
+            # verilerde groupId==target_cid eşleşmesi güvenilir şekilde
+            # bulunuyor, bulunamıyorsa veri döndürmemek daha güvenli.
+            log.debug(f"[n11/model] groupId={target_cid} bulunamadı, {len(candidates)} aday var — reddedildi")
+            return None
     else:
         product = candidates[0]
 
@@ -306,6 +330,7 @@ def _n11_parse_html(html: str, cid: Optional[int] = None) -> Optional[dict]:
 async def _n11_pw_handler(page, url: str) -> Optional[dict]:
     """Playwright handler: GQL intercept + HTML parse fallback."""
     gql_result: dict = {}
+    target_cid = _n11_extract_cid(url)
 
     async def _on_response(resp):
         if resp.status != 200:
@@ -314,7 +339,7 @@ async def _n11_pw_handler(page, url: str) -> Optional[dict]:
             return
         try:
             j = await resp.json()
-            parsed = _n11_parse_gql(j)
+            parsed = _n11_parse_gql(j, target_cid=target_cid)
             if parsed and parsed.get("price"):
                 gql_result.update(parsed)
                 log.info(f"[n11/pw] GQL intercept ✔ price={parsed.get('price')}")
