@@ -5,7 +5,11 @@ jinja2==3.1.4
 python-multipart==0.0.9
 httpx==0.27.0
 curl_cffi>=0.7.0
+# 1.60.0 Camoufox'un Firefox driver'iyla cakisiyor: sayfa hata event'inde
+# Node driver'i cokertip crawlee'yi "Connection closed" ile bitiriyor (WSL'de dogrulandi)
+playwright==1.59.0
 playwright-stealth>=1.0.0
+camoufox>=0.4.11
 beautifulsoup4==4.12.3
 bcrypt==4.2.0
 python-dotenv==1.0.1
