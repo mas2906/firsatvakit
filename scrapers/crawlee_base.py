@@ -373,7 +373,11 @@ async def crawlee_pw_scrape(
 
     if result:
         cb_reset(cb_key)
+        if platform in RL:
+            RL[platform].record_success()
     else:
         cb_fail(cb_key)
+        if platform in RL:
+            RL[platform].record_failure()
 
     return result if result else None

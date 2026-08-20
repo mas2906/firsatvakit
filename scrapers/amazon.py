@@ -499,6 +499,7 @@ async def _az_via_curl(url: str) -> Optional[dict]:
             return {"not_found": True}
         if r.status_code in (403, 429, 503):
             cb_fail("az_curl")
+            RL["amazon"].record_failure()
             drop_session("amazon")
             return None
         if r.status_code != 200:
@@ -521,15 +522,18 @@ async def _az_via_curl(url: str) -> Optional[dict]:
             return {"not_found": True}
         if _az_is_blocked(html):
             cb_fail("az_curl")
+            RL["amazon"].record_failure()
             drop_session("amazon")
             return None
 
         data = await asyncio.to_thread(_az_parse, html)
         if data:
             cb_reset("az_curl")
+            RL["amazon"].record_success()
             log.info(f"[amazon/curl] ✔ price={data.get('price')} seller={data.get('seller')}")
         else:
             cb_fail("az_curl")
+            RL["amazon"].record_failure()
         return data
     except Exception as e:
         err = str(e)

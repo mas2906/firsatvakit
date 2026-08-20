@@ -295,6 +295,7 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
             return {"dead_url": True}
         if r.status_code in (403, 429, 503):
             cb_fail("hb_curl")
+            RL["hepsiburada"].record_failure()
             drop_session("hepsiburada")
             return None
         if r.status_code != 200:
@@ -314,12 +315,14 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
 
         if len(html) > 500_000:
             cb_fail("hb_curl")
+            RL["hepsiburada"].record_failure()
             drop_session("hepsiburada")
             return None
 
         low = html[:5000].lower()
         if any(k in low for k in ("captcha", "cf-challenge", "just a moment", "access denied")):
             cb_fail("hb_curl")
+            RL["hepsiburada"].record_failure()
             drop_session("hepsiburada")
             return None
 
@@ -330,6 +333,7 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
         result = _hb_parse_html(html)
         if result and result.get("price"):
             cb_reset("hb_curl")
+            RL["hepsiburada"].record_success()
             log.info(f"[hepsiburada/curl] ✔ price={result.get('price')}")
         return result
     except Exception as e:
