@@ -127,6 +127,23 @@ def _all_barcodes_from_page(platform: str, html: str) -> list:
     if platform == "amazon":
         found = re.findall(r'"gtin\d*"\s*:\s*"(\d{8,14})"', html, re.IGNORECASE)
         found += re.findall(r'(?:EAN|GTIN|Barkod|UPC)[^\d<]{0,30}(\d{8,14})', html, re.IGNORECASE)
+        # Yukarıdaki desen etiket ile değer arasında HTML tag'i (<th>Barkod</th><td>...)
+        # varsa eşleşmiyor — teknik özellikler tablosu genelde bu şekilde, bu yüzden
+        # düz metin (innerText benzeri) üzerinde de "Barkod:"/ISBN-13 arıyoruz.
+        try:
+            text = BeautifulSoup(html, "html.parser").get_text("\n")
+            m = re.search(r"Barkod[^\d]{0,20}(\d[\d\s\-]{6,18}\d)", text)
+            if m:
+                digits = re.sub(r"[^\d]", "", m.group(1))
+                if 8 <= len(digits) <= 14:
+                    found.append(digits)
+            m = re.search(r"ISBN-13[^\d]{0,10}([\d\-\s]{10,20})", text)
+            if m:
+                digits = re.sub(r"[^\d]", "", m.group(1))
+                if 8 <= len(digits) <= 14:
+                    found.append(digits)
+        except Exception:
+            pass
         return list(dict.fromkeys(found))
     return []
 
@@ -240,11 +257,6 @@ async def cross_search_product(db, product_id: int, search_platforms: list = Non
             for r in results[:3]:
                 r_url = r.get("url", "")
                 if not r_url: continue
-                if plat == "amazon":
-                    r["barcode"] = barcode
-                    match = r
-                    print(f"[cross] ✔ amazon (barkod aramasından): {r.get('title','?')[:50]}")
-                    break
                 page_html = await _get(r_url)
                 page_barcodes = _all_barcodes_from_page(plat, page_html) if page_html else []
                 if barcode in page_barcodes:
@@ -308,8 +320,14 @@ def _save_match(db, group_id, result, platform):
     if price and price > 0:
         db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,'TRY',?)", (pid, price, now))
 
-    db.execute("INSERT OR IGNORE INTO product_group_members(group_id,product_id,match_type,confidence,added_at) VALUES(?,?,'auto_barcode',0.9,?)",
-               (group_id, pid, now))
+    is_title_fallback = result.get("match_type") == "title_fallback"
+    db.execute(
+        "INSERT OR IGNORE INTO product_group_members(group_id,product_id,match_type,confidence,added_at) VALUES(?,?,?,?,?)",
+        (group_id, pid,
+         "title_fallback" if is_title_fallback else "auto_barcode",
+         0.5 if is_title_fallback else 0.9,
+         now)
+    )
     # Zaten pending/processing kuyruğu varsa tekrar ekleme
     if not db.execute(
         "SELECT id FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')", (pid,)
