@@ -159,10 +159,12 @@ def drop_session(platform: str) -> None:
 # Ürünler günde bir kez taranıyor (scheduler.py'deki tur bazlı kuyruk) — bu yüzden
 # hız değil güvenlik önceliklidir. Değerler, en büyük kataloğu (hepsiburada) bile
 # düşük concurrency ile günde rahatça bitirecek şekilde bilerek geniş tutuldu.
-# Trendyol daha önce bu değerler düşükken (2.0-5.5sn, concurrency=6) blok yemişti;
-# kataloğu küçük olduğu için (bkz. /admin) en yavaş/güvenli aralık ona verildi.
+# Trendyol daha önce çok daha düşük değerlerde (2.0-5.5sn, concurrency=6) blok
+# yemişti; 8-20sn + concurrency=1 o olaydaki değerin hâlâ belirgin şekilde
+# üzerinde, ama eski 15-40sn'ye göre daha hızlı — adaptif backoff (record_failure)
+# blok sinyali gelirse aralığı otomatik genişletir.
 RL: dict[str, RateLimiter] = {
-    "trendyol":    RateLimiter(15.0, 40.0),
+    "trendyol":    RateLimiter(8.0, 20.0),
     "n11":         RateLimiter(8.0, 20.0),
     "amazon":      RateLimiter(8.0, 20.0),
     "hepsiburada": RateLimiter(6.0, 15.0),
@@ -254,14 +256,55 @@ _PROXY_CONFIG = _build_proxy_configuration()
 
 
 # ── İnsan-benzeri sayfa etkileşimi ────────────────────────────────────────────
+# Referans: github.com/mas2906/ecom scraper'ının _human_scroll'u — gaussian
+# adım büyüklüğü, ara sıra geri kaydırma ve fare hareketi eklendi. Onların
+# kategori-listesi taramasındaki "sayfa sonuna in" kısmı burada yok — biz tek
+# bir ürün detay sayfasındayız, amaç "okuyormuş gibi" birkaç doğal adım atmak.
 async def _human_interact(page) -> None:
     """Veri çekmeden önce kısa bir scroll + okuma duraklaması — sabit,
     makine-gibi bir gezinme yerine gerçek kullanıcı davranışına yaklaşır."""
     try:
-        for _ in range(random.randint(1, 2)):
-            await page.mouse.wheel(0, random.uniform(200, 900))
-            await asyncio.sleep(random.uniform(0.2, 0.6))
+        vp_h = await page.evaluate("window.innerHeight") or 900
+        steps = random.randint(2, 4)
+        for _ in range(steps):
+            step = max(100, int(random.gauss(vp_h * 0.5, vp_h * 0.2)))
+            await page.mouse.wheel(0, step)
+            await asyncio.sleep(random.uniform(0.3, 0.9))
+
+            # %25 ihtimalle "yanlış yere kaydırdım" gibi geri dönüş
+            if random.random() < 0.25:
+                await page.mouse.wheel(0, -random.randint(80, 250))
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            # %35 ihtimalle fare hareketi (fingerprint çeşitliliği)
+            if random.random() < 0.35:
+                try:
+                    vp_w = await page.evaluate("window.innerWidth") or 1280
+                    await page.mouse.move(
+                        random.randint(80, max(81, vp_w - 80)),
+                        random.randint(80, max(81, vp_h - 80)),
+                    )
+                except Exception:
+                    pass
+
+            # %15 ihtimalle "ürüne bakıyormuş gibi" uzun duraklama
+            if random.random() < 0.15:
+                await asyncio.sleep(random.uniform(1.0, 2.5))
+
         await asyncio.sleep(random.uniform(0.3, 1.2))
+    except Exception:
+        pass
+
+
+async def _warmup_navigation(page, base_url: str) -> None:
+    """Asıl hedefe gitmeden önce platformun ana sayfasını ziyaret eder —
+    gerçek kullanıcı izlenimi + çerez/oturum ısınması sağlar (referans:
+    github.com/mas2906/ecom scraper'ı, hem amazon hem trendyol'da kullanılıyor).
+    Başarısız olursa sessizce geçilir — asıl hedefe gidiş buna bağımlı değil."""
+    try:
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await _human_interact(page)
     except Exception:
         pass
 

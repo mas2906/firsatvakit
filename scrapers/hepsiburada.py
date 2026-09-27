@@ -307,12 +307,6 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
             drop_session("hepsiburada")
             return None
 
-        final_url = str(getattr(r, "url", url))
-        if final_url and final_url.rstrip("/") != url.rstrip("/"):
-            fu_l = final_url.lower()
-            if not any(p in fu_l for p in ("/pm-", "/p/hb", "-pm-", "/p/hbc")):
-                return {"dead_url": True}
-
         if len(html) > 500_000:
             cb_fail("hb_curl")
             RL["hepsiburada"].record_failure()
@@ -357,12 +351,6 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
         )
     except Exception:
         await asyncio.sleep(2)
-
-    pw_url = page.url
-    if pw_url and pw_url.rstrip("/") != url.rstrip("/"):
-        fu_l = pw_url.lower()
-        if not any(p in fu_l for p in ("/pm-", "/p/hb", "-pm-", "/p/hbc")):
-            return {"dead_url": True}
 
     html = await page.content()
     # Playwright/Camoufox masaüstü sayfayı tam hydrate ediyor: aynı ürün curl_cffi'nin
@@ -409,8 +397,8 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
 
 async def scrape_hepsiburada(url: str, price_only: bool = False,
                               cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["hepsiburada"].wait()
-
+    # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
+    # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
     data = await _hb_via_curl(url)
     if data and (data.get("dead_url") or data.get("price")):
         return price_filter(data, price_only, cached_image)

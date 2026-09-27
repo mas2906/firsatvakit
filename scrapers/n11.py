@@ -1,19 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""N11 scraper — Playwright (crawlee) tabanlı, GQL intercept + HTML parse."""
+"""
+N11 scraper
+
+Katman mimarisi:
+  0) curl_cffi iOS Safari HTML (window.model JSON parse)
+  1) crawlee PlaywrightCrawler (GQL intercept + HTML parse fallback)
+
+curl katmanı sonradan eklendi: n11.com bu sunucunun IP'sini hiç
+bloklamıyor (düz curl isteği anında 200 + window.model verisiyle
+dönüyor) — asıl sorun n11'in sadece Playwright'a bağımlı olup en
+yavaş/en kırılgan yönteme mahkum kalmasıydı.
+"""
 
 import asyncio
 import json
 import logging
+import random
 import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from scrapers.crawlee_base import RL, price_filter, crawlee_pw_scrape
+from scrapers.crawlee_base import (
+    IOS_UAS, get_session, drop_session, RL,
+    cb_ok, cb_fail, cb_reset, price_filter,
+    crawlee_pw_scrape, _CURL_OK,
+)
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.n11")
+
+_N11_BLOCK_MARKERS = [
+    "captcha", "access denied", "just a moment", "attention required",
+    "checking your browser", "unusual traffic", "güvenlik doğrulaması",
+    "robot değilsiniz", "erişiminiz kısıtlandı", "cf-challenge",
+]
 
 
 def _n11_extract_cid(url: str) -> Optional[int]:
@@ -196,9 +218,13 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
 
     was_price = None
     for wp_key in ("firstListPrice", "oldPrice"):
-        wp_val = product.get(wp_key)
-        if wp_val and float(wp_val) > price * 1.01:
-            was_price = float(wp_val)
+        # Bazı sayfalarda bu alan ham sayı değil, "18.000 TL" gibi formatlı
+        # bir string olarak geliyor — düz float() burada ValueError fırlatıp
+        # (yakalanmadan) Crawlee'ye kadar çıkıyor, Crawlee de retry fırtınasına
+        # girip dış timeout bütçesini tüketiyordu.
+        wp_val = parse_price_tr_clean(str(product.get(wp_key))) if product.get(wp_key) else None
+        if wp_val and wp_val > price * 1.01:
+            was_price = wp_val
             break
 
     stock_val = product.get("stock")
@@ -362,8 +388,66 @@ async def _n11_pw_handler(page, url: str) -> Optional[dict]:
     return _n11_parse_html(html, cid=cid)
 
 
+async def _n11_via_curl(url: str) -> Optional[dict]:
+    if not _CURL_OK or not cb_ok("n11_curl"):
+        return None
+    try:
+        session = await get_session("n11", "safari18_0")
+        ua = random.choice(IOS_UAS)
+        r = await session.get(url, headers={
+            "User-Agent":      ua,
+            "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
+            "Cache-Control":   "no-cache",
+            "Pragma":          "no-cache",
+            "Referer":         "https://www.n11.com/",
+        }, allow_redirects=True, timeout=20)
+
+        if r.status_code in (404, 410):
+            return {"dead_url": True}
+        if r.status_code in (403, 429, 503):
+            cb_fail("n11_curl")
+            RL["n11"].record_failure()
+            drop_session("n11")
+            return None
+        if r.status_code != 200:
+            return None
+
+        html = r.text
+        if not html or len(html) < 3000:
+            drop_session("n11")
+            return None
+
+        low = html[:5000].lower()
+        if any(k in low for k in _N11_BLOCK_MARKERS):
+            log.warning("[n11/curl] engel/captcha sayfası tespit edildi — oturum atılıyor")
+            cb_fail("n11_curl")
+            RL["n11"].record_failure()
+            drop_session("n11")
+            return None
+
+        cid = _n11_extract_cid(url)
+        result = _n11_parse_html(html, cid=cid)
+        if result and result.get("price"):
+            cb_reset("n11_curl")
+            RL["n11"].record_success()
+            log.info(f"[n11/curl] ✔ price={result.get('price')}")
+        return result
+    except Exception as e:
+        drop_session("n11")
+        log.debug(f"[n11/curl] hata: {e}")
+        return None
+
+
 async def scrape_n11(url: str, price_only: bool = False,
                       cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["n11"].wait()
-    data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=30)
+    # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
+    # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
+    data = await _n11_via_curl(url)
+    if data and (data.get("dead_url") or data.get("price")):
+        return price_filter(data, price_only, cached_image)
+
+    log.info(f"[n11] curl başarısız → Playwright: {url[:60]}")
+    data = await crawlee_pw_scrape(url, "n11", _n11_pw_handler, timeout=55)
     return price_filter(data, price_only, cached_image) if data else None

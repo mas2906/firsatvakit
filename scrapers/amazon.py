@@ -4,10 +4,12 @@
 Amazon.com.tr scraper
 
 Katman mimarisi:
-  0) curl_cffi Chrome fingerprint (en hızlı, ban riski düşük)
-  1) crawlee PlaywrightCrawler (fallback, browserforge stealth)
+  0) crawlee PlaywrightCrawler (browserforge stealth)
 
 Selektörler amazon_tr_scraper.py referansından alınmıştır.
+
+curl_cffi ön-denemesi kaldırıldı (trendyol ile aynı gerekçe): iki katmanı
+sıralı denemek gereksiz gecikme + fazladan istek (ban yüzeyi) ekliyordu.
 """
 
 import asyncio
@@ -19,11 +21,7 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from scrapers.crawlee_base import (
-    CHROME_PROFILES, make_chrome_headers,
-    get_session, drop_session, RL, cb_ok, cb_fail, cb_reset,
-    price_filter, crawlee_pw_scrape, _CURL_OK,
-)
+from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, _warmup_navigation
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.amazon")
@@ -48,16 +46,6 @@ _OOS_KW = [
     "tükendi", "stokta yok", "bu ürün şu anda mevcut değil", "satışa sunulmamaktadır",
     "satışta değil", "temin edilemiyor", "yakında stokta", "ön sipariş", "ürün mevcut değil",
 ]
-
-# Chrome profili seçici — her scrape'te farklı profil döner
-_profile_idx = 0
-
-
-def _pick_chrome_profile() -> dict:
-    global _profile_idx
-    p = CHROME_PROFILES[_profile_idx % len(CHROME_PROFILES)]
-    _profile_idx += 1
-    return p
 
 
 def _az_is_blocked(html: str) -> bool:
@@ -231,6 +219,78 @@ def _get_other_sellers_price(soup: BeautifulSoup) -> Optional[float]:
             m = re.search(r'([\d.]+,\d{2})\s*TL', el.get_text())
             if m:
                 return parse_price_tr_clean(m.group(1) + " TL")
+    return None
+
+
+def _normalize_gtin(digits: str) -> Optional[str]:
+    """GTIN-14'ü EAN-13'e çevirir (başındaki 0'ı atar), uzunluk aralığını doğrular."""
+    digits = re.sub(r"[^\d]", "", digits)
+    if len(digits) == 14 and digits.startswith("0"):
+        digits = digits[1:]
+    return digits if 8 <= len(digits) <= 14 else None
+
+
+def _parse_barcode(html: str, soup: BeautifulSoup) -> Optional[str]:
+    """Ürün sayfasından barkod/EAN/GTIN çıkarır. Öncelik sırası (referans:
+    github.com/mas2906/ecom scraper'ı ve DevTools 'Amazon Barkod Bulucu' scripti):
+    1) rhfHandlerParams.keywords — Amazon'un JS veri katmanındaki asıl EAN alanı,
+       en güvenilir kaynak
+    2) JSON-LD structured data (gtin13/gtin8/gtin/isbn)
+    3) Teknik özellikler tablosu (th→td) — GTIN'in resmi Türkçe adı dahil
+    4) Düz metin üzerinde "Barkod:"/ISBN-13 arama — bidi işaretlerine dayanıklı,
+       yukarıdakilerin hepsi başarısız olursa son çare
+    """
+    for m in re.finditer(r'rhfHandlerParams["\s:]+(\{[^}]+\})', html):
+        try:
+            data = json.loads(m.group(1))
+            kw = str(data.get("keywords", "")).strip()
+            if re.fullmatch(r"\d{8,14}", kw):
+                norm = _normalize_gtin(kw)
+                if norm:
+                    return norm
+        except Exception:
+            pass
+
+    for m in re.finditer(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            for key in ("gtin13", "gtin8", "gtin", "isbn"):
+                val = data.get(key)
+                if val and re.fullmatch(r"\d{8,14}", str(val).strip()):
+                    norm = _normalize_gtin(str(val).strip())
+                    if norm:
+                        return norm
+        except Exception:
+            pass
+
+    for label in ("Global Ticaret Tanımlama Numarası", "GTIN", "EAN", "UPC", "Barkod", "ISBN"):
+        m = re.search(
+            rf'{re.escape(label)}[^<]*</th>\s*<td[^>]*>\s*(\d{{8,14}})\s*</td>',
+            html, re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            norm = _normalize_gtin(m.group(1))
+            if norm:
+                return norm
+
+    # Son çare: rendered text üzerinde ara (etiket-değer arasında görünmez bidi
+    # işaretleri ‎/‏ veya satır sonu olabiliyor — [^\d] hepsini atlayıp doğrudan
+    # rakam dizisini yakalıyoruz)
+    text = soup.get_text("\n")
+    m = re.search(r"Barkod[^\d]{0,20}(\d[\d\s\-]{6,18}\d)", text)
+    if m:
+        norm = _normalize_gtin(m.group(1))
+        if norm:
+            return norm
+
+    m = re.search(r"ISBN-13[^\d]{0,10}([\d\-\s]{10,20})", text)
+    if m:
+        norm = _normalize_gtin(m.group(1))
+        if norm:
+            return norm
+
     return None
 
 
@@ -441,6 +501,9 @@ def _az_parse(html: str) -> Optional[dict]:
     # ── 8) Satıcı ─────────────────────────────────────────────────────────
     seller, is_amazon = _get_seller_info(soup)
 
+    # ── 8b) Barkod (çapraz platform eşleştirme için) ───────────────────────
+    barcode = _parse_barcode(html, soup)
+
     # ── 9) Rating ─────────────────────────────────────────────────────────
     rating = review_count = None
     rating_el = soup.select_one("#acrPopover, [data-hook='rating-out-of-text']")
@@ -481,71 +544,14 @@ def _az_parse(html: str) -> Optional[dict]:
         "coupon_type":     coupon_type,
         "coupon_value":    coupon_value,
         "seller":          seller,
+        "barcode":         barcode,
         "is_amazon":       is_amazon,
     }
 
 
-# ── Katman 0: curl_cffi Chrome fingerprint ────────────────────────────────────
-async def _az_via_curl(url: str) -> Optional[dict]:
-    if not _CURL_OK or not cb_ok("az_curl"):
-        return None
-    try:
-        profile = _pick_chrome_profile()
-        session = await get_session("amazon", profile["impersonate"])
-        headers = make_chrome_headers(profile, referer="https://www.amazon.com.tr/")
-        r = await session.get(url, headers=headers, allow_redirects=True, timeout=20)
-
-        if r.status_code in (404, 410):
-            return {"not_found": True}
-        if r.status_code in (403, 429, 503):
-            cb_fail("az_curl")
-            RL["amazon"].record_failure()
-            drop_session("amazon")
-            return None
-        if r.status_code != 200:
-            drop_session("amazon")
-            return None
-
-        html = r.text
-        if not html or len(html) < 3000:
-            drop_session("amazon")
-            return None
-
-        # ASIN redirect tespiti
-        asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
-        if asin_m:
-            final_url = str(getattr(r, "url", url))
-            if asin_m.group(1) not in final_url:
-                return {"not_found": True}
-
-        if _az_is_notfound(html):
-            return {"not_found": True}
-        if _az_is_blocked(html):
-            cb_fail("az_curl")
-            RL["amazon"].record_failure()
-            drop_session("amazon")
-            return None
-
-        data = await asyncio.to_thread(_az_parse, html)
-        if data:
-            cb_reset("az_curl")
-            RL["amazon"].record_success()
-            log.info(f"[amazon/curl] ✔ price={data.get('price')} seller={data.get('seller')}")
-        else:
-            cb_fail("az_curl")
-            RL["amazon"].record_failure()
-        return data
-    except Exception as e:
-        err = str(e)
-        if "ERR_NAME_NOT_RESOLVED" in err:
-            return {"dead_url": True}
-        drop_session("amazon")
-        log.debug(f"[amazon/curl] hata: {e}")
-        return None
-
-
-# ── Katman 1: Playwright fallback ─────────────────────────────────────────────
+# ── Katman 0: Playwright ───────────────────────────────────────────────────────
 async def _az_pw_handler(page, url: str) -> Optional[dict]:
+    await _warmup_navigation(page, "https://www.amazon.com.tr")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
@@ -585,16 +591,10 @@ async def _az_pw_handler(page, url: str) -> Optional[dict]:
 # ── Ana fonksiyon ─────────────────────────────────────────────────────────────
 async def scrape_amazon(url: str, price_only: bool = False,
                          cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["amazon"].wait()
-
-    data = await _az_via_curl(url)
-    if data and (data.get("dead_url") or data.get("not_found")):
-        return data
-    if data and (data.get("price") or data.get("stock")):
-        return price_filter(data, price_only, cached_image)
-
-    log.info(f"[amazon] curl başarısız → Playwright: {url[:60]}")
-    data = await crawlee_pw_scrape(url, "amazon", _az_pw_handler, timeout=50)
+    # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
+    # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
+    # timeout 50→65: isinma navigasyonu (_warmup_navigation) eklendi, ~15-20s ek sure gerekiyor
+    data = await crawlee_pw_scrape(url, "amazon", _az_pw_handler, timeout=65)
     if data and (data.get("dead_url") or data.get("not_found")):
         return data
     return price_filter(data, price_only, cached_image) if data else None
