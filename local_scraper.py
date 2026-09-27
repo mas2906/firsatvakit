@@ -41,6 +41,7 @@ import subprocess
 import time
 import httpx
 from datetime import datetime
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -92,67 +93,71 @@ def _calc_concurrent(platform: str) -> int:
     return base
 
 
-def _calc_batch(concurrent: int) -> int:
-    return concurrent * 2
-
-
 from scrapers.router import scrape_product  # noqa: E402
+from scrapers.crawlee_base import RL  # noqa: E402
 
 _last_success: dict[str, float] = {}
 _error_streak_logged: dict[str, bool] = {}
 ERROR_RESET_SECS = 15 * 60  # 15 dakika
 
 
-def _task_done_callback(task: asyncio.Task) -> None:
-    if not task.cancelled():
-        exc = task.exception() if not task.cancelled() else None
-        if exc:
-            log.error(f"[task] Yakalanmamış exception: {exc}")
+async def process_job(job: dict, client: httpx.AsyncClient) -> None:
+    """Tek işi baştan sona çalıştırır. Eşzamanlılık artık worker sayısıyla
+    (bkz. _worker) doğal olarak sınırlı — burada ayrıca semaphore'a gerek yok."""
+    pid          = job["product_id"]
+    url          = job["url"]
+    platform     = job["platform"]
+    price_only   = job.get("price_only", False)
+    cached_image = job.get("cached_image") or None
 
+    log.info(f"[{platform}] #{pid}{' [fiyat]' if price_only else ''}")
 
-async def process_job(job: dict, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> None:
-    async with sem:
-        pid          = job["product_id"]
-        url          = job["url"]
-        platform     = job["platform"]
-        price_only   = job.get("price_only", False)
-        cached_image = job.get("cached_image") or None
+    # RL.wait() bilerek dis timeout'un DISINDA cagriliyor: RateLimiter hem
+    # adaptif backoff (blok sinyalinde araligi 4 kata kadar genisletiyor)
+    # hem de %12 ihtimalle "insan gibi uzun duraklama" ekliyor — ikisi
+    # birlestiginde tek basina RL bekleme suresi dis timeout butcesini
+    # asabiliyordu. Bu durumda is asyncio.wait_for tarafindan RL.wait()
+    # icindeyken iptal ediliyordu; bu da ne record_success() ne de
+    # record_failure() cagrilmadigi icin RL'in asla iyilesemeyecegi
+    # sekilde kalici olarak yuksek kalmasina yol aciyordu (n11'de tam
+    # olarak bu yasandi — surec yeniden baslatilana kadar duzelmiyordu).
+    # RL.wait() burada, timeout disinda oldugu icin ne kadar surerse
+    # sursun isi oldurmuyor; asagidaki _timeout artik sadece asil scrape
+    # denemesinin (curl+PW) kendi suresini kapsamak zorunda.
+    await RL[platform].wait()
 
-        log.info(f"[{platform}] #{pid}{' [fiyat]' if price_only else ''}")
-        # DevTools/gercek-veri olcumune gore kalibre edildi: bu deger rate
-        # limiter bekleme suresini (RL max) + Playwright yedek denemesinin
-        # kendi ic timeout'unu (crawlee_pw_scrape timeout=) kapsamali, yoksa
-        # Playwright kendi suresini bile tamamlamadan disaridan oldururuluyor
-        # (orn. eski trendyol: RL max 40s + PW 48s > eski timeout 40s).
-        _timeout = (95 if platform == "trendyol"    else  # RL 40s + PW 48s
-                    80 if platform == "amazon"       else  # RL 20s + PW 50s
-                    65 if platform == "n11"          else  # RL 20s + PW 30s
-                    90)                                    # hepsiburada: RL 15s + PW 55s
-        try:
-            data = await asyncio.wait_for(
-                scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
-                timeout=_timeout,
-            )
+    # DevTools/gercek-veri olcumune gore kalibre edildi: curl on-denemesi
+    # (varsa, session.get timeout=) + Playwright'in kendi ic timeout'u
+    # (crawlee_pw_scrape timeout=) + guvenlik payi.
+    _timeout = (80 if platform == "trendyol"    else  # PW 65s (isinma dahil, curl yok)
+                80 if platform == "amazon"       else  # PW 65s (isinma dahil, curl yok)
+                90 if platform == "n11"          else  # curl 20s + PW 55s
+                90)                                    # hepsiburada: curl 20s + PW 55s
+    try:
+        data = await asyncio.wait_for(
+            scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
+            timeout=_timeout,
+        )
 
-            if data and (data.get("dead_url") or data.get("not_found")):
-                log.warning(f"[{platform}] ☠ #{pid} ölü URL: {url[:60]}")
-                await send_webhook(client, pid, url, platform, {"error": "dead_url"})
-                return
+        if data and (data.get("dead_url") or data.get("not_found")):
+            log.warning(f"[{platform}] ☠ #{pid} ölü URL: {url[:60]}")
+            await send_webhook(client, pid, url, platform, {"error": "dead_url"})
+            return
 
-            if data and data.get("price"):
-                log.info(f"[{platform}] ✔ #{pid} fiyat={data['price']} stok={data.get('stock','-')}")
-                _last_success[platform] = time.time()
-                _error_streak_logged[platform] = False
-            else:
-                log.warning(f"[{platform}] ✘ #{pid} veri yok — {url[:60]}")
+        if data and data.get("price"):
+            log.info(f"[{platform}] ✔ #{pid} fiyat={data['price']} stok={data.get('stock','-')}")
+            _last_success[platform] = time.time()
+            _error_streak_logged[platform] = False
+        else:
+            log.warning(f"[{platform}] ✘ #{pid} veri yok — {url[:60]}")
 
-            await send_webhook(client, pid, url, platform, data or {})
-        except asyncio.TimeoutError:
-            log.error(f"[{platform}] TIMEOUT #{pid}")
-            await send_webhook(client, pid, url, platform, {"error": "timeout"})
-        except Exception as e:
-            log.error(f"[{platform}] HATA #{pid}: {e}")
-            await send_webhook(client, pid, url, platform, {"error": str(e)})
+        await send_webhook(client, pid, url, platform, data or {})
+    except asyncio.TimeoutError:
+        log.error(f"[{platform}] TIMEOUT #{pid}")
+        await send_webhook(client, pid, url, platform, {"error": "timeout"})
+    except Exception as e:
+        log.error(f"[{platform}] HATA #{pid}: {e}")
+        await send_webhook(client, pid, url, platform, {"error": str(e)})
 
 
 async def send_webhook(client: httpx.AsyncClient, product_id: int, url: str,
@@ -187,138 +192,93 @@ async def reset_stale_jobs(client: httpx.AsyncClient) -> None:
         log.warning(f"[startup] reset-stale-jobs başarısız: {e}")
 
 
-async def express_lane(platform: str, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> None:
-    """priority=-1 işleri için hızlı şerit. Normal kuyrukla (poll_platform) aynı
-    semaphore'u paylaşır — toplam eşzamanlı iş PLATFORM_CONCURRENT'i aşmaz."""
-    conc = PLATFORM_CONCURRENT.get(platform, 2)
-    running: set[asyncio.Task] = set()
-    log.info(f"[{platform}/express] Başladı (concurrent={conc}, paylaşımlı)")
-
-    while True:
+async def _fetch_one_job(client: httpx.AsyncClient, platform: str, urgent_only: bool = False) -> Optional[dict]:
+    """Önce öncelikli (admin/kullanıcı ekledi, priority=-1) bir iş var mı bak,
+    yoksa normal kuyruktan bir iş al. İkisi de limit=1: worker boşaldığı an
+    tek bir iş isteyip hemen çalışmaya başlar — batch/poll aralığı beklemesi
+    sadece kuyruk gerçekten boşken (aşağıdaki _worker'daki sleep) devreye girer.
+    urgent_only=True: sadece priority=-1 denenir (pasif saatlerde kullanılır)."""
+    param_sets = [{"platform": platform, "limit": "1", "priority": "-1"}]
+    if not urgent_only:
+        param_sets.append({"platform": platform, "limit": "1"})
+    for params in param_sets:
         try:
-            running.difference_update({t for t in running if t.done()})
-            free = conc - len(running)
-            if free == 0:
-                await asyncio.sleep(0.5)
-                continue
-
             r = await client.get(
-                f"{BASE_URL}/api/pending-jobs?platform={platform}&limit={free}&priority=-1",
+                f"{BASE_URL}/api/pending-jobs",
+                params=params,
                 headers={"X-Api-Key": API_KEY},
                 timeout=10,
             )
             if r.status_code == 200:
                 jobs = r.json()
                 if jobs:
-                    log.info(f"[{platform}/express] {len(jobs)} öncelikli iş")
-                    for job in jobs:
-                        task = asyncio.create_task(process_job(job, client, sem))
-                        running.add(task)
-                        task.add_done_callback(running.discard)
-                        task.add_done_callback(_task_done_callback)
-                    await asyncio.sleep(0.5)
-                    continue
-            await asyncio.sleep(2)
+                    return jobs[0]
         except Exception as e:
-            log.error(f"[{platform}/express] Hata: {e}")
-            await asyncio.sleep(2)
+            log.debug(f"[{platform}] pending-jobs isteği başarısız: {e}")
+    return None
 
 
-async def poll_platform(platform: str, client: httpx.AsyncClient, sem: asyncio.Semaphore) -> None:
-    """Tek platform için polling döngüsü. express_lane ile aynı semaphore paylaşılır."""
-    concurrent = 0
-    batch = 0
+async def _worker(platform: str, worker_id: int, client: httpx.AsyncClient) -> None:
+    """Tek bir eşzamanlı çalışma slotu. İş biter bitmez —hiç ara vermeden—
+    bir sonraki işi ister; sadece kuyruk gerçekten boşken kısa bir bekleme
+    devreye girer. Eskiden ayrı poll_platform + express_lane döngüleri
+    paylaşımlı bir semaphore üzerinden aynı işi yapıyordu — artık her worker
+    kendi başına bir slot, ekstra senkronizasyona gerek yok."""
     was_active = False
-    running: set[asyncio.Task] = set()
-    _empty_count = 0
-    _last_success[platform] = time.time()
-    _error_streak_logged[platform] = False
+    empty_count = 0
+    log.info(f"[{platform}/{worker_id}] Başladı")
 
     while True:
         try:
-            active = _is_active(platform)
-
-            if not active:
+            if not _is_active(platform):
                 if was_active:
-                    log.info(f"[{platform}] Planlanan saatlerin dışında — pasif")
+                    log.info(f"[{platform}/{worker_id}] Planlanan saatlerin dışında — pasif")
                     was_active = False
-                # Pasif modda sadece öncelikli işleri al — bu zaten express_lane'in
-                # işi, burası ek güvence.
-                try:
-                    r = await client.get(
-                        f"{BASE_URL}/api/pending-jobs?platform={platform}&limit=4&priority=-1",
-                        headers={"X-Api-Key": API_KEY},
-                        timeout=10,
-                    )
-                    if r.status_code == 200 and (urgent := r.json()):
-                        for job in urgent:
-                            task = asyncio.create_task(process_job(job, client, sem))
-                            running.add(task)
-                            task.add_done_callback(running.discard)
-                            task.add_done_callback(_task_done_callback)
-                        await asyncio.sleep(2)
-                        continue
-                except Exception:
-                    pass
+                # Pasif modda sadece öncelikli (priority=-1) işler alınmaya devam eder.
+                job = await _fetch_one_job(client, platform, urgent_only=True)
+                if job:
+                    await process_job(job, client)
+                    continue
                 await asyncio.sleep(10)
                 continue
 
             if not was_active:
-                concurrent = _calc_concurrent(platform)
-                batch = _calc_batch(concurrent)
-                running = set()
                 was_active = True
-                log.info(f"[{platform}] Aktif — concurrent={concurrent} batch={batch}")
+                log.info(f"[{platform}/{worker_id}] Aktif")
 
-            running.difference_update({t for t in running if t.done()})
-            free = concurrent - len(running)
-            if free == 0:
-                await asyncio.sleep(1)
+            # Amazon gece saatlerinde (0-7) ekstra worker'larla (_calc_concurrent
+            # ile 2 katına çıkar) çalışır — gündüz bu ekstra worker'lar (worker_id
+            # temel PLATFORM_CONCURRENT'i aşıyorsa) bekleme moduna geçer.
+            if worker_id >= _calc_concurrent(platform):
+                await asyncio.sleep(60)
                 continue
 
-            limit = min(free, batch)
-            r = await client.get(
-                f"{BASE_URL}/api/pending-jobs?platform={platform}&limit={limit}",
-                headers={"X-Api-Key": API_KEY},
-                timeout=10,
-            )
-            if r.status_code != 200:
-                log.warning(f"[{platform}] Poll {r.status_code}")
+            job = await _fetch_one_job(client, platform)
+            if not job:
+                empty_count += 1
+                if empty_count % 20 == 1:
+                    log.info(f"[{platform}/{worker_id}] Kuyruk boş (#{empty_count})")
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
+            empty_count = 0
 
-            jobs = r.json()
-            if not jobs:
-                _empty_count += 1
-                if _empty_count % 10 == 1:
-                    log.info(f"[{platform}] Kuyruk boş (#{_empty_count})")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-            _empty_count = 0
-
-            log.info(f"[{platform}] {len(jobs)} iş ({len(running)} çalışıyor)")
-            for job in jobs:
-                task = asyncio.create_task(process_job(job, client, sem))
-                running.add(task)
-                task.add_done_callback(running.discard)
-                task.add_done_callback(_task_done_callback)
-
-            await asyncio.sleep(0)
+            await process_job(job, client)
+            # İş bitti — hiç beklemeden döngü başına dönüp bir sonrakini iste.
 
         except Exception as e:
-            log.error(f"[{platform}] Poll hatası: {e}")
+            log.error(f"[{platform}/{worker_id}] Hata: {e}")
             await asyncio.sleep(POLL_INTERVAL)
 
 
-async def _run_platform(platform: str, client: httpx.AsyncClient, fn, sem: asyncio.Semaphore) -> None:
-    """Platform loop'unu süresiz çalıştır; crash sonrası 10s bekle."""
+async def _run_worker(platform: str, worker_id: int, client: httpx.AsyncClient) -> None:
+    """Worker'ı süresiz çalıştır; beklenmeyen bir çöküş olursa 10s bekleyip yeniden başlat."""
     while True:
         try:
-            await fn(platform, client, sem)
+            await _worker(platform, worker_id, client)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception as e:
-            log.error(f"[{platform}/{fn.__name__}] Beklenmeyen çıkış: {e} — 10s sonra yeniden")
+            log.error(f"[{platform}/{worker_id}] Beklenmeyen çıkış: {e} — 10s sonra yeniden")
             await asyncio.sleep(10)
 
 
@@ -475,20 +435,22 @@ async def main() -> None:
     total_c = sum(PLATFORM_CONCURRENT.values())
     log.info(f"WSL Local Scraper (crawlee) başladı — toplam concurrent={total_c}")
     for p, c in PLATFORM_CONCURRENT.items():
-        log.info(f"  {p}: concurrent={c} batch={c*2}")
+        log.info(f"  {p}: concurrent={c}")
 
-    # Platform başına TEK semaphore — poll_platform ve express_lane paylaşır,
-    # böylece gerçek eşzamanlı iş tavanı PLATFORM_CONCURRENT'i geçmez (önceden
-    # her lane kendi semaphore'unu yaratıyordu, tavan fiilen 2 katıydı).
-    sems = {p: asyncio.Semaphore(PLATFORM_CONCURRENT[p]) for p in platforms}
+    # Her worker = tek bir eşzamanlı slot (bkz. _worker). Amazon gece
+    # saatlerinde (_calc_concurrent) 2 katına çıkabildiği için o kadar worker
+    # baştan doğuruyoruz — gündüz fazlalar kendi içlerinde bekleme moduna geçer.
+    worker_counts = {p: (c * 2 if p == "amazon" else c) for p, c in PLATFORM_CONCURRENT.items()}
     clients = {p: httpx.AsyncClient(timeout=15) for p in platforms}
     init_client = httpx.AsyncClient(timeout=15)
     try:
         await reset_stale_jobs(init_client)
-        await asyncio.gather(
-            *[_run_platform(p, clients[p], poll_platform, sems[p]) for p in platforms],
-            *[_run_platform(p, clients[p], express_lane,  sems[p]) for p in platforms],
-        )
+        tasks = [
+            _run_worker(p, wid, clients[p])
+            for p in platforms
+            for wid in range(worker_counts[p])
+        ]
+        await asyncio.gather(*tasks)
     finally:
         _release_pid_lock()
         await init_client.aclose()

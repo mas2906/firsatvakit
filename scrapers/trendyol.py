@@ -5,22 +5,20 @@ Trendyol scraper
 
 Katman mimarisi:
   0) public.trendyol.com JSON API  (NXDOMAIN — devre dışı)
-  1) curl_cffi iOS Safari HTML
-  2) crawlee PlaywrightCrawler     (XHR intercept + HTML fallback)
+  1) crawlee PlaywrightCrawler     (XHR intercept + HTML fallback)
+
+curl_cffi ön-denemesi kaldırıldı: trendyol'da çoğunlukla bloklanıp Playwright'a
+düşüyordu, iki katman sıralı denemek gereksiz gecikme + fazladan istek (ban
+yüzeyi) ekliyordu.
 """
 
 import asyncio
 import json
 import logging
-import random
 import re
 from typing import Optional
 
-from scrapers.crawlee_base import (
-    IOS_UAS, get_session, drop_session, RL,
-    cb_ok, cb_fail, cb_reset, price_filter,
-    crawlee_pw_scrape, _CURL_OK,
-)
+from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, _warmup_navigation
 from scrapers.utils import parse_price_tr_clean
 
 log = logging.getLogger("scraper.trendyol")
@@ -40,11 +38,6 @@ _TY_BASKET_KEYS = [
     "basketPrice", "flashSalePrice", "droppedPrice", "promotionPrice",
     "basketSellingPrice", "campaignSellingPrice", "memberPrice", "loyaltyDiscountedPrice",
 ]
-
-
-def _ty_extract_cid(url: str) -> Optional[str]:
-    m = re.search(r"-p-(\d+)", url)
-    return m.group(1) if m else None
 
 
 def _pv(v) -> Optional[float]:
@@ -105,6 +98,40 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
     }
 
 
+def _ty_parse_ldjson(html: str) -> Optional[dict]:
+    """schema.org Product ld+json'dan temel ürün verisi çıkarır (referans:
+    github.com/mas2906/ecom scraper'ı)."""
+    for m in re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            data = next((d for d in data if isinstance(d, dict) and d.get("@type") == "Product"), None)
+        if not isinstance(data, dict) or data.get("@type") != "Product":
+            continue
+
+        offers = data.get("offers") or {}
+        if isinstance(offers, list):
+            offers = offers[0] if offers else {}
+        price = _pv(offers.get("price"))
+        title = (data.get("name") or "").strip()
+        if not price or not title:
+            continue
+
+        brand_raw = data.get("brand") or {}
+        brand = brand_raw.get("name") if isinstance(brand_raw, dict) else None
+        in_stock = "instock" in str(offers.get("availability") or "").lower()
+
+        return {
+            "title": title, "price": price, "image_url": None,
+            "stock": "Stokta Var" if in_stock else "Stok Yok",
+            "cart_discount": False, "coupon": None,
+            "brand": brand, "barcode": None, "rating": None, "review_count": None,
+        }
+    return None
+
+
 def _ty_parse_html(html: str) -> Optional[dict]:
     # __PRODUCT_DETAIL_APP_INITIAL_STATE__
     m = re.search(r"__PRODUCT_DETAIL_APP_INITIAL_STATE__\s*=\s*\{", html)
@@ -156,6 +183,16 @@ def _ty_parse_html(html: str) -> Optional[dict]:
         except Exception:
             pass
 
+    # schema.org ld+json — state blob'ları (__PRODUCT_DETAIL_APP_INITIAL_STATE__,
+    # __NEXT_DATA__) sayfa yapısı değiştikçe kırılıyor; ld+json ise stabil ve
+    # platform-bağımsız bir standart (referans: github.com/mas2906/ecom scraper'ı,
+    # "detay sayfası mikro-servisleri kararsız, ld+json stabil" notu). was_price/
+    # cart_discount gibi zenginleştirilmiş alanları taşımıyor ama son regex
+    # fallback'ten (winnerVariant) daha güvenilir, bu yüzden ondan önce denenir.
+    ld = _ty_parse_ldjson(html)
+    if ld:
+        return ld
+
     # winnerVariant regex fallback — winnerVariant bulunamazsa TÜM sayfada arama
     # yapma: sayfadaki "benzer ürünler" gibi widget'lardan alakasız bir ürünün
     # fiyatını yanlışlıkla asıl ürünün fiyatı sanabilir.
@@ -201,58 +238,11 @@ async def _ty_via_api(url: str) -> Optional[dict]:
     return None
 
 
-async def _ty_via_curl(url: str) -> Optional[dict]:
-    if not _CURL_OK or not cb_ok("ty_curl"):
-        return None
-    try:
-        session = await get_session("trendyol", "safari18_0")
-        ua = random.choice(IOS_UAS)
-        r  = await session.get(url, headers={
-            "User-Agent":      ua,
-            "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
-            "Cache-Control":   "no-cache",
-            "Pragma":          "no-cache",
-            "Referer":         "https://www.trendyol.com/",
-        }, allow_redirects=True, timeout=20)
-
-        if r.status_code in (404, 410):
-            return {"dead_url": True}
-        if r.status_code in (403, 429, 503):
-            cb_fail("ty_curl")
-            RL["trendyol"].record_failure()
-            drop_session("trendyol")
-            return None
-        if r.status_code != 200:
-            return None
-
-        html = r.text
-        if not html or len(html) < 3000:
-            drop_session("trendyol")
-            return None
-
-        low = html[:5000].lower()
-        if any(k in low for k in _TY_BLOCK_MARKERS):
-            log.warning(f"[trendyol/curl] engel/captcha sayfası tespit edildi — oturum atılıyor")
-            cb_fail("ty_curl")
-            RL["trendyol"].record_failure()
-            drop_session("trendyol")
-            return None
-
-        result = _ty_parse_html(html)
-        if result and result.get("price"):
-            cb_reset("ty_curl")
-            RL["trendyol"].record_success()
-            log.info(f"[trendyol/curl] ✔ price={result.get('price')}")
-        return result
-    except Exception as e:
-        drop_session("trendyol")
-        log.debug(f"[trendyol/curl] hata: {e}")
-        return None
-
-
 async def _ty_pw_handler(page, url: str) -> Optional[dict]:
+    # XHR intercept listener'ı takmadan önce ısınma navigasyonu yap — aksi
+    # halde ana sayfadaki alakasız istekler _on_response'a düşüp gürültü yapar.
+    await _warmup_navigation(page, "https://www.trendyol.com")
+
     _api_json: list = []
 
     async def _on_response(resp):
@@ -279,11 +269,6 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
     except Exception:
         await asyncio.sleep(3)
 
-    actual_url = page.url
-    cid = _ty_extract_cid(url)
-    if cid and actual_url and f"-p-{cid}" not in actual_url and "trendyol.com" in actual_url:
-        return {"dead_url": True}
-
     if _api_json:
         body    = _api_json[-1]
         product = (body.get("result") or {}).get("product") or body.get("product")
@@ -307,12 +292,8 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
 
 async def scrape_trendyol(url: str, price_only: bool = False,
                            cached_image: Optional[str] = None) -> Optional[dict]:
-    await RL["trendyol"].wait()
-
-    data = await _ty_via_curl(url)
-    if data and (data.get("dead_url") or data.get("price")):
-        return price_filter(data, price_only, cached_image)
-
-    log.info(f"[trendyol] curl başarısız → Playwright: {url[:60]}")
-    data = await crawlee_pw_scrape(url, "trendyol", _ty_pw_handler, timeout=48)
+    # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
+    # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
+    # timeout 48→65: isinma navigasyonu (_warmup_navigation) eklendi, ~15-20s ek sure gerekiyor
+    data = await crawlee_pw_scrape(url, "trendyol", _ty_pw_handler, timeout=65)
     return price_filter(data, price_only, cached_image) if data else None

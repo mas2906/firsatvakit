@@ -98,27 +98,27 @@ def generate_comparison_data(db, group_id):
 def build_meta_tags(page_type, data=None):
     d = data or {}
     if page_type == "deal":
-        t = d.get("title","Fırsat"); pct = d.get("discount_pct",0); pl = d.get("platform","").title()
+        t = d.get("title") or "Fırsat"; pct = d.get("discount_pct") or 0; pl = (d.get("platform") or "").title()
         new_p = d.get("new_price"); old_p = d.get("old_price")
         price_str = f"{new_p:.0f} TL (Normal: {old_p:.0f} TL). " if new_p and old_p else ""
         desc = f"{t[:80]} — {pl}'da %{pct:.0f} indirim! {price_str}Fiyat geçmişi ve takibi FırsatVakti'de."
         return {"title": f"%{pct:.0f} İndirim — {t[:55]} | FırsatVakti",
                 "description": desc[:160],
-                "og_image": d.get("image_url",""),
+                "og_image": d.get("image_url") or "",
                 "og_type": "product"}
     if page_type == "product":
-        t = d.get("title","Ürün"); pl = d.get("platform","").title()
+        t = d.get("title") or "Ürün"; pl = (d.get("platform") or "").title()
         return {"title": f"{t[:60]} Fiyat Takibi | FırsatVakti",
                 "description": f"{t[:100]} için {pl} fiyat geçmişi, indirim takibi ve fırsat bildirimi.",
-                "og_image": d.get("image_url","")}
+                "og_image": d.get("image_url") or ""}
     if page_type == "comparison":
-        n = d.get("name","Karşılaştırma"); pc = d.get("platform_count",0)
+        n = d.get("name") or "Karşılaştırma"; pc = d.get("platform_count") or 0
         return {"title": f"{n[:60]} — {pc} Platformda Karşılaştırma | FırsatVakti",
                 "description": f"{n[:80]}: Amazon, Trendyol, N11, Hepsiburada fiyatlarını karşılaştırın ve en ucuzunu bulun.",
-                "og_image": d.get("image_url","")}
+                "og_image": d.get("image_url") or ""}
     if page_type == "article":
-        return {"title": f"{d.get('title','')[:60]} | FırsatVakti Blog",
-                "description": d.get("summary","")[:160], "og_image": d.get("cover_image","")}
+        return {"title": f"{(d.get('title') or '')[:60]} | FırsatVakti Blog",
+                "description": (d.get("summary") or "")[:160], "og_image": d.get("cover_image") or ""}
     if page_type == "index":
         return {"title": "FırsatVakti — Amazon, Trendyol, N11 Fırsat ve İndirim Takibi",
                 "description": "Amazon, Trendyol, Hepsiburada ve N11'den gerçek indirimler. Günlük kampanyalar, fiyat düşüş bildirimi ve ücretsiz fırsat takibi.",

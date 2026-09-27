@@ -290,11 +290,14 @@ async def _requeue_worker():
             # lock beklemesini önlemek için her döngü sonunda commit zorunlu.
             db.commit()
 
-            await asyncio.sleep(30)
+            # 30s -> 5s: yeni-link/deal-yenileme/tur taraması işleri artık
+            # scan_queue'ya çok daha sık düşüyor, taranan bir platform bir
+            # sonraki işi 30s yerine en fazla 5s içinde bulabiliyor.
+            await asyncio.sleep(5)
 
         except Exception as e:
             log.error(f"[requeue] Hata: {e}", exc_info=True)
-            await asyncio.sleep(30)
+            await asyncio.sleep(5)
 
 
 async def main_loop():

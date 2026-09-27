@@ -379,8 +379,12 @@ async def product_detail(request: Request, product_id: int):
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     if not product:
         raise HTTPException(404, "Ürün bulunamadı")
+    # Sadece /deal/{id} sayfasının gerçekten göstereceği (approved/expired)
+    # deal'lar için yönlendir — aksi halde pending/rejected bir deal'ı olan
+    # ürünler /deal/{id}'de 404 alıp ürün sayfasına hiç ulaşamıyordu.
     deal = db.execute(
-        "SELECT id FROM deals WHERE product_id=? ORDER BY id DESC LIMIT 1", (product_id,)
+        "SELECT id FROM deals WHERE product_id=? AND status IN ('approved','expired') "
+        "ORDER BY id DESC LIMIT 1", (product_id,)
     ).fetchone()
     if deal:
         return RedirectResponse(f"/deal/{deal['id']}", status_code=302)
