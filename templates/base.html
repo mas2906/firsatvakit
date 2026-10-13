@@ -532,7 +532,7 @@
 
 <!-- MOBİL ALT GEZİNME (yeni tema) -->
 {% set _path = request.url.path %}
-<nav class="fv-bottomnav" aria-label="Alt menü">
+<div class="fv-bottomnav" role="navigation" aria-label="Alt menü">
   <a href="/" class="{{ 'on' if _path == '/' else '' }}">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21H3z"/></svg>Fırsatlar</a>
   <a href="/dipte" class="{{ 'on' if _path == '/dipte' else '' }}">
@@ -541,7 +541,7 @@
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>Alarmlar</a>
   <a href="/submit" class="{{ 'on' if _path == '/submit' else '' }}">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Link Ekle</a>
-</nav>
+</div>
 
 <script>
 // ── DROPDOWN ────────────────────────────────────────────────
