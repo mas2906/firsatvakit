@@ -98,22 +98,33 @@ def now_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# Platforma göre "kontrol edilmedi" süresi. Beymen günde bir (24 sa) eşitleniyor,
+# Karaca 12 saatte bir taranıyor — sabit 12 saat onaylanan Beymen fırsatlarını bir
+# sonraki eşitlemeyi beklemeden kapatıyordu (2026-10-13). Tarama aralığı + pay.
+_EXPIRE_HOURS_BY_PLATFORM = {"beymen": 30, "karaca": 18}
+
+
 async def auto_expire_stale_deals():
-    """{AUTO_EXPIRE_HOURS} saattir kontrol edilmemiş aktif deal'ları pasife al."""
+    """Platformun tarama aralığı + pay kadar süredir kontrol edilmemiş aktif deal'ları
+    pasife al (varsayılan AUTO_EXPIRE_HOURS)."""
     db = get_db()
     now = now_str()
+    hours_case = "CASE p.platform " + " ".join(
+        f"WHEN '{pl}' THEN {h}" for pl, h in _EXPIRE_HOURS_BY_PLATFORM.items()
+    ) + f" ELSE {int(AUTO_EXPIRE_HOURS)} END"
     expired = db.execute(f"""
-        SELECT d.id FROM deals d
+        SELECT d.id, p.platform FROM deals d
         JOIN products p ON d.product_id = p.id
         WHERE d.active = 1
           AND (
             p.last_seen_at IS NULL
-            OR p.last_seen_at::timestamp < NOW() - INTERVAL '{AUTO_EXPIRE_HOURS} hours'
+            OR p.last_seen_at::timestamp < NOW() - ({hours_case}) * INTERVAL '1 hour'
           )
     """).fetchall()
     for row in expired:
         db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?", (now, row["id"]))
-        log.info(f"Deal #{row['id']} pasife alındı — {AUTO_EXPIRE_HOURS} saattir kontrol edilmedi")
+        h = _EXPIRE_HOURS_BY_PLATFORM.get(row["platform"], AUTO_EXPIRE_HOURS)
+        log.info(f"Deal #{row['id']} pasife alındı — {h} saattir kontrol edilmedi")
     if expired:
         db.commit()
         log.info(f"[expire] Toplam {len(expired)} deal pasife alındı")
