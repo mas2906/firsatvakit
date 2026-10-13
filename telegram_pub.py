@@ -327,6 +327,13 @@ async def publish_deal(
     db.execute("UPDATE deals SET active=1 WHERE id=?", (deal_id,))
     db.commit()
 
+    # 3) Anahtar kelimeli fiyat alarmları (yeni tema) — yayın akışını asla bozmasın
+    try:
+        from price_alerts import notify_price_alerts
+        await notify_price_alerts(db, deal_id, product, new_price, old_price, pct)
+    except Exception as e:
+        log.warning(f"[alarm] fiyat alarmı kontrolü hatası: {e}")
+
 
 async def send_admin_alert(message: str):
     """

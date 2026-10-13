@@ -180,3 +180,52 @@ def find_pump_events(points: Sequence[Point]) -> list[PumpEvent]:
         if P >= R * 1.15 and D >= R * 0.99 and 3 <= days_high <= 60 and days_low >= 7:
             events.append(PumpEvent(cp[j][0], R, P, D, days_high))
     return events
+
+
+# ── FırsatVakti Puanı (0–100) ─────────────────────────────────────────────────
+# Yeni tema (2026-10-13): ana sayfa akışı bu puana göre sıralanır. Ağırlıklar:
+#   40 — 30 günlük (süre ağırlıklı) ortalamaya göre indirim (%40 indirim = tam puan)
+#   25 — tüm zamanların en düşük fiyatı (yalnızca 30 günün en düşüğüyse 12)
+#   20 — platformlar arası en ucuz (karşılaştırma grubu yoksa nötr 10)
+#   15 — temiz geçmiş: indirimden önce zam yok ve aynı fiyat son 30 günde tekrarlanmamış
+# "Önce zam sonra indirim" ayrıca 30 puan düşürür.
+@dataclass
+class DealScore:
+    score: int
+    ref_price: Optional[float]      # 30 günlük ortalama (kartta üstü çizili fiyat)
+    pct: float                      # ortalamaya göre indirim %
+    all_time_low: bool
+    low30: bool
+    repeated: bool
+    pumped: bool
+
+
+def deal_score(points: Sequence[Point], price: float, at: datetime,
+               cheapest: Optional[bool] = None) -> DealScore:
+    pts = _norm(points)
+    cp = _compress(pts)
+    # Mevcut fiyatın başladığı an (aynı fiyattaki son kesintisiz dönem)
+    start = at
+    for t, p in reversed(cp):
+        if abs(p - price) < 0.005:
+            start = t
+        else:
+            break
+    win = _window(pts, start, 30)
+    segs = _segments(win, start) if win else []
+    ref = _weighted_median(segs) if segs else None
+    pct = (ref - price) / ref * 100 if ref else 0.0
+    before = [p for t, p in pts if t < start]
+    all_time_low = bool(before) and price <= min(before) * 1.005
+    low30 = bool(segs) and price < min(p for p, _ in segs) * NEW_LOW_TOLERANCE
+    repeated = any(abs(p - price) / price < 0.01 for t, p in cp
+                   if start - timedelta(days=30) <= t < start)
+    pumped = any(e.date >= at - timedelta(days=90) for e in find_pump_events(pts))
+
+    s = 40 * min(max(pct, 0) / 40, 1)
+    s += 25 if all_time_low else (12 if low30 else 0)
+    s += 20 if cheapest else (10 if cheapest is None else 0)
+    s += 15 if not (repeated or pumped) else 0
+    if pumped:
+        s -= 30
+    return DealScore(int(round(max(0, min(100, s)))), ref, pct, all_time_low, low30, repeated, pumped)

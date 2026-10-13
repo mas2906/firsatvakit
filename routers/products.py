@@ -8,7 +8,7 @@ from affiliate import build_affiliate_url, make_short_slug
 from comments import get_product_comments
 from cross_search import get_price_comparison
 from db import get_db
-from price_rules import find_pump_events
+from price_rules import deal_score, find_pump_events
 from hepsiburada_link import is_hb_short_url, normalize_hb_url, resolve_hb_short_url
 from scraper_router import (clean_tracking_params, detect_platform, enqueue_url,
                              extract_product_id, extract_url_from_text, is_short_url,
@@ -17,7 +17,7 @@ from seo_content import build_meta_tags, generate_comparison_data
 
 from .deps import (
     _GROUP_CHEAPEST_FILTER, _cache_get, _cache_set, _is_rate_limited, _verify_csrf,
-    current_user, get_client_ip, get_ticker_items, now_str, templates,
+    current_user, get_client_ip, now_str, templates,
 )
 
 router = APIRouter()
@@ -164,13 +164,19 @@ async def get_dipte_items() -> list:
 
 
 @router.get("/dipte")
-async def dipte(request: Request):
-    items = await get_dipte_items()
-    meta = {"title": f"Şu An En Düşük Fiyatında Olan {len(items)} Ürün — Gerçek Fırsatlar | FırsatVakti",
+async def dipte(request: Request, platform: str = ""):
+    if platform and platform not in STORE_NAMES:
+        platform = ""
+    cards = await _feed(get_db(), "dipte", platform, None)   # yeni tema kartları, puana göre
+    cards = sorted(cards, key=lambda c: (c["score"], c["pct"]), reverse=True)
+    meta = {"title": f"Şu An En Düşük Fiyatında Olan {len(cards)} Ürün — Gerçek Fırsatlar | FırsatVakti",
             "description": ("Fiyat geçmişine göre şu anda tüm zamanların en düşük fiyatında olan ürünler: "
-                            "Amazon, Trendyol, Hepsiburada ve N11'de medyan fiyatının en az %15 altındaki gerçek indirimler.")}
+                            "Amazon, Trendyol, Hepsiburada, N11, Karaca ve Beymen'de olağan fiyatının en az %15 altındaki gerçek indirimler.")}
+    if platform:
+        meta["canonical"] = f"/dipte?platform={platform}"
     return templates.TemplateResponse("dipte.html", {
-        "request": request, "user": current_user(request), "items": items, "meta": meta,
+        "request": request, "user": current_user(request), "cards": cards, "meta": meta,
+        "platform": platform, "stores": STORE_NAMES,
     })
 
 
@@ -180,172 +186,216 @@ async def deals_redirect(request: Request):
     return RedirectResponse(url=f"/?{qs}" if qs else "/", status_code=301)
 
 
+# ── Yeni tema (2026-10-13): puanlı fırsat akışı ───────────────────────────────
+STORE_NAMES = {"amazon": "Amazon", "trendyol": "Trendyol", "hepsiburada": "Hepsiburada",
+               "n11": "N11", "karaca": "Karaca", "beymen": "Beymen"}
+FEED_TABS = [("one-cikanlar", "Öne Çıkanlar"), ("populer", "Popüler"),
+             ("sana-ozel", "Sana Özel"), ("dipte", "Şu An Dipte")]
+_TAB_ALIASES = {"all": "one-cikanlar", "top_discount": "one-cikanlar", "cheapest": "one-cikanlar",
+                "today": "one-cikanlar", "most_clicked": "populer"}
+_FEED_PER_PAGE = 24
+
+
+def _load_points(db, product_ids) -> dict:
+    """Ürün başına fiyat geçmişi [(zaman, fiyat)] — tek sorgu."""
+    ids = sorted({int(i) for i in product_ids if i})
+    out = {i: [] for i in ids}
+    if not ids:
+        return out
+    for r in db.execute(
+        f"SELECT product_id, scraped_at, price_value FROM price_history "
+        f"WHERE price_value > 0 AND product_id IN ({','.join(map(str, ids))}) ORDER BY scraped_at, id"
+    ).fetchall():
+        out[r["product_id"]].append((r["scraped_at"], r["price_value"]))
+    return out
+
+
+def _card(points, *, url, title, image_url, platform, price, at, cheapest=None,
+          deal_id=None, created_at=None, stock=None, click_count=0) -> dict:
+    """Kart verisi + FırsatVakti Puanı ve sinyal çipleri."""
+    sc = deal_score(points, price, at, cheapest)
+    chips = []
+    if sc.pumped:
+        chips.append(("bad", "İndirimden önce zamlandı"))
+    elif sc.repeated:
+        chips.append(("warn", "Bu indirim sık tekrarlanıyor"))
+    if sc.all_time_low and not sc.pumped:
+        chips.append(("low", "Tüm zamanların en düşüğü"))
+    elif sc.low30 and not sc.pumped:
+        chips.append(("low", "30 günün en düşüğü"))
+    if cheapest:
+        chips.append(("cheap", "En ucuz burada"))
+    return {
+        "url": url, "title": title or "Ürün", "image_url": image_url, "platform": platform,
+        "store": STORE_NAMES.get(platform, (platform or "").title()),
+        "price": price, "ref": sc.ref_price if sc.ref_price and sc.ref_price > price else None,
+        "pct": max(0, round(sc.pct)), "score": sc.score, "chips": chips[:2],
+        "deal_id": deal_id, "created_at": created_at, "stock": stock, "click_count": click_count or 0,
+    }
+
+
+_ACTIVE_DEALS_SQL = """
+    SELECT d.id, d.product_id, d.new_price, d.created_at, p.title, p.image_url, p.platform, p.stock,
+           (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) AS click_count,
+           (SELECT p2.platform FROM products p2
+             JOIN product_group_members pgm2 ON p2.id=pgm2.product_id
+             JOIN (SELECT product_id, price_value FROM price_history
+                   WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=p2.id
+             WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
+               AND (p2.stock IS NULL OR p2.stock != 'Stok Yok')
+             ORDER BY lp.price_value ASC LIMIT 1) AS best_compare_platform,
+           (SELECT 1 FROM product_group_members pgm4 WHERE pgm4.product_id=d.product_id LIMIT 1) AS in_group
+    FROM deals d LEFT JOIN products p ON d.product_id = p.id
+    INNER JOIN (SELECT product_id, MAX(id) AS max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id = best.max_id
+    WHERE d.active=1 {extra}
+    LIMIT 500
+"""
+
+
+def _active_deal_cards(db, platform: str) -> list:
+    extra, params = "", []
+    if platform:
+        extra, params = " AND p.platform=?", [platform]
+    rows = [dict(r) for r in db.execute(
+        _ACTIVE_DEALS_SQL.format(extra=extra + _GROUP_CHEAPEST_FILTER), params).fetchall()]
+    pts = _load_points(db, [r["product_id"] for r in rows])
+    now = datetime.utcnow()
+    cards = []
+    for r in rows:
+        cheapest = (r["best_compare_platform"] == r["platform"]) if r["in_group"] else None
+        c = _card(pts.get(r["product_id"], []), url=f"/deal/{r['id']}", title=r["title"],
+                  image_url=r["image_url"], platform=r["platform"], price=r["new_price"], at=now,
+                  cheapest=cheapest, deal_id=r["id"], created_at=r["created_at"],
+                  stock=r["stock"], click_count=r["click_count"])
+        c["product_id"] = r["product_id"]
+        cards.append(c)
+    return cards
+
+
+async def _feed(db, tab: str, platform: str, user) -> list:
+    """Sekmeye göre sıralı kart listesi. Kişisel olmayan veriler 60 sn önbellekli."""
+    import asyncio
+    if tab == "dipte":
+        key = f"feed:dipte:{platform}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
+        items = [d for d in await get_dipte_items() if not platform or d["platform"] == platform]
+
+        def build():
+            pts = _load_points(get_db(), [d["id"] for d in items])
+            now = datetime.utcnow()
+            return [_card(pts.get(d["id"], []), url=f"/product/{d['id']}", title=d["title"],
+                          image_url=d["image_url"], platform=d["platform"], price=d["cur"],
+                          at=now, created_at=d.get("since")) for d in items]
+        cards = sorted(await asyncio.to_thread(build), key=lambda c: (c["score"], c["pct"]), reverse=True)
+        _cache_set(key, cards)
+        return cards
+
+    key = f"feed:deals:{platform}"
+    cards = _cache_get(key)
+    if cards is None:
+        cards = await asyncio.to_thread(lambda: _active_deal_cards(get_db(), platform))
+        _cache_set(key, cards)
+
+    if tab == "populer":
+        return sorted(cards, key=lambda c: (c["click_count"], c["score"]), reverse=True)
+    if tab == "sana-ozel":
+        if not user:
+            return []
+        from price_alerts import _norm
+        watched = {r["product_id"] for r in db.execute(
+            "SELECT product_id FROM product_watchlist WHERE user_id=?", (user["id"],)).fetchall()}
+        kws = [_norm(r["keyword"]) for r in db.execute(
+            "SELECT keyword FROM price_alerts WHERE user_id=?", (user["id"],)).fetchall()]
+        kws = [k for k in kws if k]
+        mine = [c for c in cards if c.get("product_id") in watched
+                or any(k in _norm(c["title"]) for k in kws)]
+        return sorted(mine, key=lambda c: c["score"], reverse=True)
+    return sorted(cards, key=lambda c: (c["score"], c["pct"]), reverse=True)
+
+
 @router.get("/")
-async def index(request: Request, platform: str = "", sort: str = "newest",
-                page: int = 1, tab: str = "all"):
+async def index(request: Request, platform: str = "", page: int = 1, tab: str = "one-cikanlar",
+                sort: str = ""):
     db = get_db()
-    per_page = 24
-
-    # Sayfa verisi cache'i — aynı filtre kombinasyonu 60s içinde DB'ye gitmez
-    page_key = f"index_page:{platform}:{sort}:{tab}:{page}"
-    page_data = _cache_get(page_key)
-
-    if page_data is None:
-        offset = (page - 1) * per_page
-        where, params = "WHERE d.active=1", []
-        if platform:
-            where += " AND p.platform=?"
-            params.append(platform)
-
-        if tab == "top_discount":
-            order = "d.discount_pct DESC"
-        elif tab == "most_clicked":
-            order = "click_count DESC"
-        elif tab == "cheapest":
-            order = "d.new_price ASC"
-        elif tab == "today":
-            order = "d.created_at DESC"
-            where += " AND DATE(d.created_at)=DATE('now')"
-        else:
-            order = {"newest": "d.created_at DESC", "discount": "d.discount_pct DESC",
-                     "price": "d.new_price ASC"}.get(sort, "d.created_at DESC")
-
-        where += _GROUP_CHEAPEST_FILTER
-
-        deals = db.execute(f"""
-            SELECT d.*, p.title, p.image_url, p.rating, p.review_count, p.platform, p.stock, p.last_seen_at,
-                   (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count,
-                   (SELECT pgm.group_id FROM product_group_members pgm WHERE pgm.product_id=d.product_id LIMIT 1) as compare_group_id,
-                   (SELECT p2.platform FROM products p2
-                    JOIN product_group_members pgm2 ON p2.id=pgm2.product_id
-                    JOIN (SELECT product_id, price_value FROM price_history WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=p2.id
-                    WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
-                    AND (p2.stock IS NULL OR p2.stock != 'Stok Yok')
-                    ORDER BY lp.price_value ASC LIMIT 1) as best_compare_platform,
-                   (SELECT MIN(lp.price_value) FROM product_group_members pgm2
-                    JOIN products p2x ON p2x.id=pgm2.product_id
-                    JOIN (SELECT product_id, price_value FROM price_history WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=pgm2.product_id
-                    WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
-                    AND (p2x.stock IS NULL OR p2x.stock != 'Stok Yok')) as best_compare_price
-            FROM deals d LEFT JOIN products p ON d.product_id = p.id
-            INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id = best.max_id
-            {where.replace("WHERE","AND")} ORDER BY {order} LIMIT ? OFFSET ?
-        """, (*params, per_page, offset)).fetchall()
-
-        total = db.execute(
-            f"SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id {where}",
-            params
-        ).fetchone()[0]
-
-        page_data = {
-            "deals": [dict(r) for r in deals],
-            "total_pages": max(1, (total + per_page - 1) // per_page),
-        }
-        _cache_set(page_key, page_data)
-
-    # Paylaşılan veriler (stats, ticker, yeni/popüler deallar) — ayrı cache
-    shared = _cache_get("index_shared")
-    if shared is None:
-        stats = db.execute(
-            "SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,"
-            " (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops,"
-            " (SELECT COUNT(*) FROM product_watchlist) as watchlist_count,"
-            " (SELECT COUNT(*) FROM product_groups) as tracked_products_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='karaca') as karaca_count,"
-            " (SELECT COUNT(*) FROM products WHERE platform='beymen') as beymen_count"
-        ).fetchone()
-        new_deals = db.execute(
-            "SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,"
-            " (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count"
-            " FROM deals d LEFT JOIN products p ON d.product_id=p.id"
-            " INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id"
-            " WHERE d.active=1" + _GROUP_CHEAPEST_FILTER + " ORDER BY d.created_at DESC LIMIT 8"
-        ).fetchall()
-        popular_deals = db.execute(
-            "SELECT d.*, p.title, p.image_url, p.rating, p.platform, p.stock, p.last_seen_at,"
-            " (SELECT COUNT(*) FROM clicks c WHERE c.deal_id=d.id) as click_count"
-            " FROM deals d LEFT JOIN products p ON d.product_id=p.id"
-            " INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id"
-            " WHERE d.active=1" + _GROUP_CHEAPEST_FILTER + " ORDER BY click_count DESC LIMIT 8"
-        ).fetchall()
-        ticker = get_ticker_items(db)
-        shared = {
-            "stats": dict(stats) if stats else {},
-            "new_deals": [dict(r) for r in new_deals],
-            "popular_deals": [dict(r) for r in popular_deals],
-            "ticker_items": [dict(r) for r in ticker],
-        }
-        _cache_set("index_shared", shared)
-
+    tab = _TAB_ALIASES.get(tab, tab)
+    if tab not in dict(FEED_TABS):
+        tab = "one-cikanlar"
+    if platform and platform not in STORE_NAMES:
+        platform = ""
     user = current_user(request)
-    user_min_discount = 5
+    cards = await _feed(db, tab, platform, user)
+    total_pages = max(1, (len(cards) + _FEED_PER_PAGE - 1) // _FEED_PER_PAGE)
+    page = min(max(page, 1), total_pages)
+    page_cards = cards[(page - 1) * _FEED_PER_PAGE: page * _FEED_PER_PAGE]
+
+    alert_count = 0
     if user:
-        from routers.misc import ensure_notify_table
-        ensure_notify_table(db)
-        ns = db.execute("SELECT min_discount FROM notify_settings WHERE user_id=?", (user["id"],)).fetchone()
-        if ns:
-            user_min_discount = ns["min_discount"]
+        alert_count = db.execute("SELECT COUNT(*) FROM price_alerts WHERE user_id=?",
+                                 (user["id"],)).fetchone()[0]
 
     meta = build_meta_tags("index", {"platform": platform, "page": page})
-    # Sıralama/sekme varyantları aynı içeriğin kopyası → platform + sayfa dışındaki
-    # parametreleri canonical'dan at
+    # Sekme varyantları aynı içeriğin farklı sıralaması → canonical platform + sayfa
     qs = "&".join(p for p in (f"platform={platform}" if platform else "",
                               f"page={page}" if page > 1 else "") if p)
     meta["canonical"] = "/" + (f"?{qs}" if qs else "")
-    if tab != "all" or sort != "newest":
+    if tab != "one-cikanlar":
         meta["robots"] = "noindex, follow"
     return templates.TemplateResponse("index.html", {
-        "request": request, "deals": page_data["deals"], "platform": platform, "sort": sort,
-        "tab": tab, "page": page, "total_pages": page_data["total_pages"],
-        "stats": shared["stats"], "user": user, "q": "",
-        "ticker_items": shared["ticker_items"], "meta": meta,
-        "user_min_discount": user_min_discount,
-        "new_deals": shared["new_deals"], "popular_deals": shared["popular_deals"],
-        # "Şu An Dipte" şeridi (mobilde de görünür) — platform filtresi seçiliyse ona göre
-        "dipte_items": [d for d in await get_dipte_items() if not platform or d["platform"] == platform][:12],
+        "request": request, "user": user, "q": "", "meta": meta,
+        "cards": page_cards, "tab": tab, "tabs": FEED_TABS, "platform": platform,
+        "stores": STORE_NAMES, "page": page, "total_pages": total_pages,
+        "alert_count": alert_count, "total_cards": len(cards),
     })
 
 
 @router.get("/search")
-async def search(request: Request, q: str = "", page: int = 1):
+async def search(request: Request, q: str = "", page: int = 1, platform: str = ""):
+    """Yeni tema: tüm takip edilen ürünlerde arar (eskiden sadece aktif fırsatlarda —
+    aktif fırsat az olduğu için çoğu arama boş dönüyordu); sonuçlar puana göre sıralı."""
+    import asyncio
     db = get_db()
-    deals, total_pages, per_page = [], 1, 24
-    if q.strip():
-        kw = f"%{q.strip()}%"
-        offset = (page - 1) * per_page
-        deals = db.execute("""
-            SELECT d.*, p.title, p.image_url, p.rating, p.review_count, p.platform, p.stock
-            FROM deals d LEFT JOIN products p ON d.product_id=p.id
-            INNER JOIN (SELECT product_id, MAX(id) as max_id FROM deals WHERE active=1 GROUP BY product_id) best ON d.id=best.max_id
-            WHERE d.active=1 AND (p.title LIKE ? OR p.platform LIKE ?) ORDER BY d.discount_pct DESC LIMIT ? OFFSET ?
-        """, (kw, kw, per_page, offset)).fetchall()
-        total = db.execute(
-            "SELECT COUNT(DISTINCT d.product_id) FROM deals d LEFT JOIN products p ON d.product_id=p.id"
-            " WHERE d.active=1 AND (p.title LIKE ? OR p.platform LIKE ?)", (kw, kw)
-        ).fetchone()[0]
-        total_pages = max(1, (total + per_page - 1) // per_page)
-    stats = db.execute(
-        "SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,"
-        " (SELECT COUNT(*) FROM deals WHERE active=1 AND DATE(created_at)=DATE('now')) as today_drops,"
-        " (SELECT COUNT(*) FROM product_watchlist) as watchlist_count,"
-        " (SELECT COUNT(*) FROM product_groups) as tracked_products_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='amazon') as amazon_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='trendyol') as trendyol_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='n11') as n11_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='hepsiburada') as hepsiburada_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='karaca') as karaca_count,"
-        " (SELECT COUNT(*) FROM products WHERE platform='beymen') as beymen_count"
-    ).fetchone()
+    q = q.strip()
+    if platform and platform not in STORE_NAMES:
+        platform = ""
+    cards = []
+    if len(q) >= 2:
+        def build():
+            dbt = get_db()
+            extra, params = "", [f"%{q}%"]
+            if platform:
+                extra, params = " AND p.platform=?", params + [platform]
+            rows = [dict(r) for r in dbt.execute(f"""
+                SELECT p.id, p.title, p.image_url, p.platform, p.stock, p.last_seen_at,
+                       (SELECT price_value FROM price_history h WHERE h.product_id=p.id
+                        ORDER BY scraped_at DESC, id DESC LIMIT 1) AS price,
+                       (SELECT d.id FROM deals d WHERE d.product_id=p.id AND d.active=1
+                        ORDER BY d.id DESC LIMIT 1) AS deal_id
+                FROM products p
+                WHERE p.title ILIKE ? {extra}
+                ORDER BY p.last_seen_at DESC NULLS LAST
+                LIMIT 120
+            """, params).fetchall()]
+            rows = [r for r in rows if r["price"]]
+            pts = _load_points(dbt, [r["id"] for r in rows])
+            now = datetime.utcnow()
+            out = [_card(pts.get(r["id"], []),
+                         url=f"/deal/{r['deal_id']}" if r["deal_id"] else f"/product/{r['id']}",
+                         title=r["title"], image_url=r["image_url"], platform=r["platform"],
+                         price=r["price"], at=now, deal_id=r["deal_id"],
+                         created_at=r["last_seen_at"], stock=r["stock"]) for r in rows]
+            return sorted(out, key=lambda c: (c["score"], c["pct"]), reverse=True)
+        cards = await asyncio.to_thread(build)
+    total_pages = max(1, (len(cards) + _FEED_PER_PAGE - 1) // _FEED_PER_PAGE)
+    page = min(max(page, 1), total_pages)
     return templates.TemplateResponse("index.html", {
-        "request": request, "deals": deals, "platform": "", "sort": "discount",
-        "page": page, "total_pages": total_pages, "stats": stats,
-        "user": current_user(request), "q": q, "ticker_items": get_ticker_items(db),
+        "request": request, "user": current_user(request), "q": q,
+        "cards": cards[(page - 1) * _FEED_PER_PAGE: page * _FEED_PER_PAGE],
+        "tab": "", "tabs": FEED_TABS, "platform": platform, "stores": STORE_NAMES,
+        "page": page, "total_pages": total_pages, "alert_count": 0, "total_cards": len(cards),
         # Arama sonuç sayfaları ince/tekrarlı içerik — indekslenmesin, linkler takip edilsin
-        "meta": {"title": f"“{q.strip()[:60]}” İndirimleri ve Fiyatları | FırsatVakti" if q.strip() else "Ara | FırsatVakti",
+        "meta": {"title": f"“{q[:60]}” İndirimleri ve Fiyatları | FırsatVakti" if q else "Ara | FırsatVakti",
                  "robots": "noindex, follow"},
     })
 

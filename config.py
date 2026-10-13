@@ -87,6 +87,8 @@ RATE_LIMIT_MAX_REQUESTS = {
     "login":    10,   # Dakikada 10 giriş denemesi
     "register": 3,    # Dakikada 3 kayıt denemesi
     "comment":  5,    # Dakikada 5 yorum
+    "vote":     30,   # Dakikada 30 fırsat oyu
+    "alert":    10,   # Dakikada 10 fiyat alarmı işlemi
 }
 
 # ── Cache ────────────────────────────────────────────────────────

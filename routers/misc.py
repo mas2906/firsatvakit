@@ -9,7 +9,8 @@ from db import get_db
 from seo_content import (build_meta_tags, generate_sitemap_xml, get_article_by_slug,
                           list_articles)
 
-from .deps import _is_rate_limited, _verify_csrf, current_user, now_str, require_admin, templates
+from .deps import (_is_rate_limited, _verify_csrf, current_user, get_client_ip, now_str,
+                   require_admin, templates)
 
 router = APIRouter()
 
@@ -245,3 +246,89 @@ async def settings_tg(request: Request, tg_chat_id: str = Form(""), wa_phone: st
         db.execute("UPDATE tg_subscriptions SET active=0 WHERE user_id=?", (user["id"],))
     db.commit()
     return RedirectResponse("/settings?saved=1", status_code=302)
+
+
+# ── Yeni tema (2026-10-13): fırsat oyları ve fiyat alarmları ───────────────────
+
+@router.post("/api/deal/{deal_id}/vote")
+async def deal_vote(deal_id: int, request: Request, vote: int = Form(...), csrf_token: str = Form("")):
+    """İyi (+1) / kötü (-1) fırsat oyu. Aynı oya tekrar basmak oyu geri alır.
+    Misafirler IP özetiyle oy verebilir; oylar şimdilik gösterilmiyor."""
+    import hashlib
+    if not _verify_csrf(request, csrf_token):
+        raise HTTPException(403, "Geçersiz istek")
+    ip = get_client_ip(request)
+    if _is_rate_limited(ip, "vote"):
+        raise HTTPException(429, "Çok fazla oy, biraz bekle")
+    if vote not in (1, -1):
+        raise HTTPException(400, "Geçersiz oy")
+    db = get_db()
+    if not db.execute("SELECT 1 FROM deals WHERE id=?", (deal_id,)).fetchone():
+        raise HTTPException(404, "Fırsat bulunamadı")
+    user = current_user(request)
+    voter = f"u:{user['id']}" if user else "ip:" + hashlib.sha256(ip.encode()).hexdigest()[:16]
+    existing = db.execute("SELECT vote FROM deal_votes WHERE deal_id=? AND voter=?",
+                          (deal_id, voter)).fetchone()
+    if existing and existing["vote"] == vote:
+        db.execute("DELETE FROM deal_votes WHERE deal_id=? AND voter=?", (deal_id, voter))
+        state = 0
+    else:
+        db.execute(
+            "INSERT INTO deal_votes(deal_id, voter, vote, created_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(deal_id, voter) DO UPDATE SET vote=excluded.vote, created_at=excluded.created_at",
+            (deal_id, voter, vote, now_str()))
+        state = vote
+    db.commit()
+    return {"ok": True, "vote": state}
+
+
+@router.get("/alerts")
+async def alerts_page(request: Request, ok: str = "", err: str = ""):
+    from price_alerts import MAX_ALERTS_PER_USER, MIN_PCT_OPTIONS
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    rows = get_db().execute(
+        "SELECT id, keyword, min_pct, created_at, last_notified_at FROM price_alerts "
+        "WHERE user_id=? ORDER BY id DESC", (user["id"],)).fetchall()
+    return templates.TemplateResponse("alerts.html", {
+        "request": request, "user": user, "alerts": rows, "ok": ok, "err": err,
+        "max_alerts": MAX_ALERTS_PER_USER, "pct_options": MIN_PCT_OPTIONS,
+        "meta": {"title": "Fiyat Alarmlarım | FırsatVakti", "robots": "noindex, follow"},
+    })
+
+
+@router.post("/alerts")
+async def alerts_create(request: Request, keyword: str = Form(""), min_pct: int = Form(10),
+                        csrf_token: str = Form("")):
+    from price_alerts import MAX_ALERTS_PER_USER, MIN_PCT_OPTIONS
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    if not _verify_csrf(request, csrf_token) or _is_rate_limited(get_client_ip(request), "alert"):
+        return RedirectResponse("/alerts?err=istek", status_code=303)
+    kw = " ".join(keyword.split())[:60]
+    if len(kw) < 2:
+        return RedirectResponse("/alerts?err=kelime", status_code=303)
+    if min_pct not in MIN_PCT_OPTIONS:
+        min_pct = MIN_PCT_OPTIONS[0]
+    db = get_db()
+    count = db.execute("SELECT COUNT(*) FROM price_alerts WHERE user_id=?", (user["id"],)).fetchone()[0]
+    if count >= MAX_ALERTS_PER_USER:
+        return RedirectResponse("/alerts?err=limit", status_code=303)
+    db.execute("INSERT INTO price_alerts(user_id, keyword, min_pct, created_at) VALUES(?,?,?,?)",
+               (user["id"], kw, min_pct, now_str()))
+    db.commit()
+    return RedirectResponse("/alerts?ok=1", status_code=303)
+
+
+@router.post("/alerts/{alert_id}/delete")
+async def alerts_delete(alert_id: int, request: Request, csrf_token: str = Form("")):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    if _verify_csrf(request, csrf_token):
+        db = get_db()
+        db.execute("DELETE FROM price_alerts WHERE id=? AND user_id=?", (alert_id, user["id"]))
+        db.commit()
+    return RedirectResponse("/alerts", status_code=303)

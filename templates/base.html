@@ -251,6 +251,127 @@
       .deals-grid { gap: 8px; }
       .deals-grid .card-body { padding: 8px; }
     }
+
+    /* ══ YENİ TEMA (2026-10-13) — puanlı fırsat akışı ════════════════════ */
+    :root {
+      --fv-ink: #15151c; --fv-sub: #5c5c68; --fv-line: #e4e4ea; --fv-soft: #f0f0f3;
+      --fv-card: #ffffff; --fv-ground: #f4f4f6; --fv-accent: #e8481c;
+      --fv-hi-bg: #14532d; --fv-hi-fg: #ffffff; --fv-mid-bg: #dcfce7; --fv-mid-fg: #14532d;
+      --fv-lo-bg: #f1f1f4; --fv-lo-fg: #3f3f4a; --fv-bad-bg: #fee2e2; --fv-bad-fg: #7f1d1d;
+      --fv-warn-bg: #fef3c7; --fv-warn-fg: #78350f; --fv-cheap-bg: #dbeafe; --fv-cheap-fg: #1e3a8a;
+      --fv-strip-bg: #15151c; --fv-strip-fg: #e8e8ee;
+    }
+    [data-theme="dark"] {
+      --fv-ink: #f0f0f5; --fv-sub: #a6a6b8; --fv-line: rgba(255,255,255,0.09); --fv-soft: #22222e;
+      --fv-card: #1a1a24; --fv-ground: #0f0f14; --fv-accent: #ff6a3d;
+      --fv-hi-bg: #22c55e; --fv-hi-fg: #052e16; --fv-mid-bg: #14532d; --fv-mid-fg: #bbf7d0;
+      --fv-lo-bg: #2c2c3a; --fv-lo-fg: #d4d4e0; --fv-bad-bg: #450a0a; --fv-bad-fg: #fecaca;
+      --fv-warn-bg: #422006; --fv-warn-fg: #fde68a; --fv-cheap-bg: #172554; --fv-cheap-fg: #bfdbfe;
+      --fv-strip-bg: #000000; --fv-strip-fg: #d4d4e0;
+    }
+    body { background: var(--fv-ground); }
+
+    .fv-strip { background: var(--fv-strip-bg); color: var(--fv-strip-fg); font-size: 13px; font-weight: 500; }
+    .fv-strip-in { max-width: 1400px; margin: 0 auto; padding: 8px clamp(16px,4vw,48px); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .fv-strip b { color: #ffb38f; font-weight: 600; }
+
+    .fv-search { flex: 1 1 320px; max-width: 520px; display: flex !important; align-items: center; gap: 8px; background: var(--fv-soft); border: 1px solid var(--fv-line); border-radius: 10px; padding: 0 12px; height: 44px; }
+    .fv-search input { border: 0; background: transparent; font: inherit; font-size: 15px; flex: 1; outline: none; color: var(--fv-ink); min-width: 0; }
+    .fv-search:focus-within { border-color: var(--fv-accent); }
+    .fv-iconbtn { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--fv-ink); position: relative; text-decoration: none; }
+    .fv-iconbtn:hover { background: var(--fv-soft); }
+    .fv-iconbtn .fv-dot { position: absolute; top: 8px; right: 8px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--fv-accent); color: #fff; font-size: 10px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; }
+
+    .fv-layout { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+    .fv-main { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+    .fv-aside { flex: 1 1 290px; display: flex; flex-direction: column; gap: 16px; }
+
+    .fv-tabs { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--fv-line); }
+    .fv-tablist { display: flex; gap: 2px; overflow-x: auto; }
+    .fv-tab { font-size: 15px; font-weight: 700; padding: 12px 14px; border-bottom: 3px solid transparent; color: var(--fv-sub); text-decoration: none; white-space: nowrap; }
+    .fv-tab:hover { color: var(--fv-ink); }
+    .fv-tab.on { color: var(--fv-ink); border-bottom-color: var(--fv-accent); }
+    .fv-sortnote { font-size: 13px; color: var(--fv-sub); padding-bottom: 12px; }
+
+    .fv-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+    .fv-pchip { font-size: 13px; font-weight: 600; height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--fv-line); background: var(--fv-card); color: var(--fv-ink); text-decoration: none; display: inline-flex; align-items: center; }
+    .fv-pchip:hover { border-color: var(--fv-ink); }
+    .fv-pchip.on { background: var(--fv-ink); border-color: var(--fv-ink); color: var(--fv-ground); }
+
+    .fv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+    .fv-card { background: var(--fv-card); border: 1px solid var(--fv-line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; transition: border-color .15s, box-shadow .15s; }
+    .fv-card:hover { border-color: var(--fv-sub); box-shadow: 0 6px 20px rgba(0,0,0,0.07); }
+    .fv-card.oos { opacity: .55; }
+    .fv-img { position: relative; aspect-ratio: 4 / 3; background: #ffffff; display: flex; align-items: center; justify-content: center; }
+    .fv-img img { width: 100%; height: 100%; object-fit: contain; padding: 12px; box-sizing: border-box; }
+    .fv-pct { position: absolute; top: 10px; left: 10px; background: var(--fv-accent); color: #fff; font-weight: 800; font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+    .fv-store { position: absolute; top: 10px; right: 10px; background: #ffffff; color: #15151c; border: 1px solid #e4e4ea; font-weight: 700; font-size: 11px; padding: 4px 8px; border-radius: 6px; }
+    .fv-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .fv-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.35; min-height: 38px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .fv-title a { color: var(--fv-ink); text-decoration: none; }
+    .fv-title a:hover { color: var(--fv-accent); }
+    .fv-price { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .fv-price strong { font-size: 20px; font-weight: 800; color: var(--fv-ink); }
+    .fv-price span { font-size: 12px; color: var(--fv-sub); }
+    .fv-sig { display: flex; gap: 6px; flex-wrap: wrap; }
+    .fv-chip { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 6px; }
+    .fv-chip.low { background: var(--fv-mid-bg); color: var(--fv-mid-fg); }
+    .fv-chip.cheap { background: var(--fv-cheap-bg); color: var(--fv-cheap-fg); }
+    .fv-chip.warn { background: var(--fv-warn-bg); color: var(--fv-warn-fg); }
+    .fv-chip.bad { background: var(--fv-bad-bg); color: var(--fv-bad-fg); }
+    .fv-foot { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--fv-line); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .fv-score { min-width: 40px; height: 32px; padding: 0 8px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; flex: 0 0 auto; }
+    .fv-score.hi { background: var(--fv-hi-bg); color: var(--fv-hi-fg); }
+    .fv-score.mid { background: var(--fv-mid-bg); color: var(--fv-mid-fg); }
+    .fv-score.lo { background: var(--fv-lo-bg); color: var(--fv-lo-fg); }
+    .fv-score.bad { background: var(--fv-bad-bg); color: var(--fv-bad-fg); }
+    .fv-ago { font-size: 12px; color: var(--fv-sub); }
+    .fv-votes { display: flex; gap: 2px; }
+    .fv-vote { width: 36px; height: 36px; border: 1px solid var(--fv-line); background: var(--fv-card); border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+    .fv-vote:hover { border-color: var(--fv-sub); }
+    .fv-vote.on.up { background: var(--fv-mid-bg); border-color: #15803d; }
+    .fv-vote.on.down { background: var(--fv-bad-bg); border-color: #b91c1c; }
+
+    .fv-box { background: var(--fv-card); border: 1px solid var(--fv-line); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+    .fv-box h2 { margin: 0; font-size: 17px; font-weight: 800; color: var(--fv-ink); }
+    .fv-box p { margin: 0; font-size: 13px; color: var(--fv-sub); line-height: 1.5; }
+    .fv-box label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; color: var(--fv-ink); }
+    .fv-box input, .fv-box select { height: 44px; border: 1px solid var(--fv-line); border-radius: 10px; padding: 0 12px; font: inherit; font-size: 14px; background: var(--fv-card); color: var(--fv-ink); }
+    .fv-btn { height: 44px; border: 0; border-radius: 10px; background: var(--fv-ink); color: var(--fv-ground); font: inherit; font-weight: 700; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; padding: 0 16px; }
+    .fv-box.dark { background: var(--fv-strip-bg); border-color: var(--fv-strip-bg); }
+    .fv-box.dark h2 { color: #ffffff; } .fv-box.dark p { color: #c8c8d2; }
+    .fv-box.dark .fv-btn { background: #ffffff; color: #15151c; flex: 1; }
+    .fv-weight { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.45; color: var(--fv-ink); }
+    .fv-weight b { flex: 0 0 34px; text-align: center; color: var(--fv-accent); }
+
+    .fv-empty { background: var(--fv-card); border: 1px solid var(--fv-line); border-radius: 12px; padding: 40px 24px; text-align: center; color: var(--fv-sub); display: flex; flex-direction: column; gap: 12px; align-items: center; }
+    .fv-empty h2 { margin: 0; font-size: 20px; color: var(--fv-ink); }
+    .fv-pager { display: flex; justify-content: center; align-items: center; gap: 8px; margin-top: 8px; }
+    .fv-pager a, .fv-pager span { min-height: 44px; padding: 0 18px; display: inline-flex; align-items: center; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none; }
+    .fv-pager a { background: var(--fv-card); border: 1px solid var(--fv-line); color: var(--fv-ink); }
+    .fv-pager span { color: var(--fv-sub); }
+
+    .fv-bottomnav { display: none; }
+    @media (max-width: 640px) {
+      .fv-strip-in span:first-child { display: none; }
+      .fv-search { order: 10; flex-basis: 100%; max-width: none; }
+      .fv-grid { grid-template-columns: 1fr; gap: 8px; }
+      .fv-card { flex-direction: row; }
+      .fv-img { aspect-ratio: auto; width: 96px; flex: 0 0 96px; }
+      .fv-img img { padding: 6px; }
+      .fv-store { display: none; }
+      .fv-pct { top: 6px; left: 6px; font-size: 11px; padding: 2px 5px; }
+      .fv-body { padding: 10px; gap: 5px; }
+      .fv-title { font-size: 13px; min-height: 0; }
+      .fv-price strong { font-size: 16px; }
+      .fv-foot { padding-top: 6px; }
+      .fv-aside { order: 2; }
+      .fv-bottomnav { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); position: fixed; left: 0; right: 0; bottom: 0; z-index: 200;
+        background: var(--fv-card); border-top: 1px solid var(--fv-line); padding-bottom: env(safe-area-inset-bottom, 0px); }
+      .fv-bottomnav a { height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--fv-sub); text-decoration: none; font-size: 11px; font-weight: 700; }
+      .fv-bottomnav a.on { color: var(--fv-accent); }
+      body { padding-bottom: 64px; }
+    }
   </style>
 
   <!-- Tema: sayfa yüklenmeden önce uygula (flash önleme) -->
@@ -264,24 +385,11 @@
 </head>
 <body>
 
-<!-- TICKER -->
-<div class="ticker-wrap">
-  <div class="ticker-label">🔥 CANLI</div>
-  <div style="overflow:hidden;flex:1;">
-    {% set ticker_deals = [] %}
-    {% if ticker_items is defined and ticker_items %}{% set ticker_deals = ticker_items %}{% endif %}
-    <div class="ticker-track">
-      {% if ticker_deals %}
-        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else ('🟤' if t.platform=='karaca' else ('⚫' if t.platform=='beymen' else '🟡')))) %}
-        <span>{{ emoji }} {{ t.platform|title }}'da -%{{ t.discount_pct|int }} &mdash; {{ (t.title or '')|truncate(38,true,'…') }}</span>
-        {% endfor %}
-        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else ('🟤' if t.platform=='karaca' else ('⚫' if t.platform=='beymen' else '🟡')))) %}
-        <span>{{ emoji }} {{ t.platform|title }}'da -%{{ t.discount_pct|int }} &mdash; {{ (t.title or '')|truncate(38,true,'…') }}</span>
-        {% endfor %}
-      {% else %}
-        <span>🔥 Fırsatlar yükleniyor...</span>
-      {% endif %}
-    </div>
+<!-- BİLGİ ŞERİDİ (yeni tema) -->
+<div class="fv-strip">
+  <div class="fv-strip-in">
+    <span>Fiyat geçmişiyle doğrulanmış indirimler — Amazon, Trendyol, Hepsiburada, N11, Karaca, Beymen</span>
+    <b>16.000+ ürün takipte</b>
   </div>
 </div>
 
@@ -297,16 +405,18 @@
     </a>
 
     <!-- ARAMA -->
-    <div class="nav-search" style="display:none;" id="navSearch">
-      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <form action="/search" method="get" style="display:contents;">
-        <input type="search" name="q" value="{{ q|default('') }}" placeholder="Ürün veya marka ara…">
-      </form>
-    </div>
+    <form class="fv-search" action="/search" method="get" role="search" id="navSearch">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" style="color:var(--fv-sub);flex:0 0 auto;"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input type="search" name="q" value="{{ q|default('') }}" placeholder="Ürün, marka veya mağaza ara" aria-label="Ürün, marka veya mağaza ara">
+    </form>
 
     <div class="nav-links">
-      <a href="/dipte" class="nav-link nav-dipte-link">📉 <span class="nav-dipte-long">Şu An </span>Dipte</a>
-      <a href="/blog" class="nav-link nav-blog-link">📝 Blog</a>
+      <a href="/dipte" class="nav-link nav-blog-link">Şu An Dipte</a>
+      <a href="/blog" class="nav-link nav-blog-link">Blog</a>
+      <a href="/alerts" class="fv-iconbtn" aria-label="Fiyat alarmlarım">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        {% if alert_count is defined and alert_count %}<span class="fv-dot">{{ alert_count }}</span>{% endif %}
+      </a>
       <a href="/submit" class="btn-add">
         <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
         Link Ekle
@@ -420,6 +530,19 @@
   </style>
 </footer>
 
+<!-- MOBİL ALT GEZİNME (yeni tema) -->
+{% set _path = request.url.path %}
+<nav class="fv-bottomnav" aria-label="Alt menü">
+  <a href="/" class="{{ 'on' if _path == '/' else '' }}">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21H3z"/></svg>Fırsatlar</a>
+  <a href="/dipte" class="{{ 'on' if _path == '/dipte' else '' }}">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m3 7 6 6 4-4 8 8"/><path d="M15 17h6v-6"/></svg>Dipte</a>
+  <a href="/alerts" class="{{ 'on' if _path == '/alerts' else '' }}">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>Alarmlar</a>
+  <a href="/submit" class="{{ 'on' if _path == '/submit' else '' }}">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Link Ekle</a>
+</nav>
+
 <script>
 // ── DROPDOWN ────────────────────────────────────────────────
 function toggleDropdown() {
@@ -431,14 +554,6 @@ document.addEventListener('click', function(e) {
     document.getElementById('dropdownMenu').classList.remove('open');
   }
 });
-
-// ── ARAMA GÖSTER/GİZLE ──────────────────────────────────────
-function checkWidth() {
-  const ns = document.getElementById('navSearch');
-  if (ns) ns.style.display = window.innerWidth >= 640 ? 'block' : 'none';
-}
-checkWidth();
-window.addEventListener('resize', checkWidth);
 
 // ── DARK MODE ───────────────────────────────────────────────
 function applyTheme(theme) {

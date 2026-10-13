@@ -1,54 +1,33 @@
 {% extends "base.html" %}
+{% from "_fv_card.html" import fv_card %}
 
 {% block content %}
-<div style="max-width:1400px;margin:0 auto;">
-  <div style="margin:8px 0 24px;">
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,4vw,42px);letter-spacing:1.5px;color:var(--text);margin:0 0 8px;">
-      ŞU AN <span style="color:var(--fire);">DİPTE</span> — EN DÜŞÜK FİYATINDAKİ ÜRÜNLER
-    </h1>
-    <p style="color:var(--muted);font-size:15px;line-height:1.7;max-width:760px;margin:0;font-weight:500;">
-      Bu ürünler şu anda, en az 30 gündür takip ettiğimiz fiyat geçmişindeki <strong style="color:var(--text);">en düşük fiyatında</strong>
-      ve olağan (medyan) fiyatlarının <strong style="color:var(--text);">en az %15 altında</strong>. Önce zam yapılıp "indirim" gibi gösterilen fiyatlar değil;
-      fiyat geçmişine göre gerçekten en ucuz anı. Liste 15 dakikada bir güncellenir.
+<div style="display:flex;flex-direction:column;gap:16px;">
+  <div>
+    <h1 style="margin:0 0 6px;font-size:24px;font-weight:800;color:var(--fv-ink);">Şu an dipte: en düşük fiyatındaki ürünler</h1>
+    <p style="margin:0;font-size:14px;color:var(--fv-sub);line-height:1.6;max-width:760px;">
+      Bu ürünler şu anda takip ettiğimiz fiyat geçmişindeki <strong style="color:var(--fv-ink);">en düşük fiyatında</strong>
+      ve olağan fiyatlarının <strong style="color:var(--fv-ink);">en az %15 altında</strong>.
+      Önce zamlanıp "indirim" gibi gösterilen fiyatlar değil; fiyat geçmişine göre gerçekten en ucuz anları. Liste 15 dakikada bir güncellenir.
     </p>
   </div>
 
-  {% if items %}
-  <div class="deals-grid">
-    {% for d in items %}
-    <a href="/product/{{ d.id }}" style="text-decoration:none;color:inherit;" class="deal-card">
-      <div class="card-glow"></div>
-      <div class="card-img-wrap">
-        {% if d.image_url %}
-        <img src="{{ d.image_url }}" alt="{{ d.title }}" loading="lazy">
-        {% else %}
-        <span style="font-size:52px;">🛍</span>
-        {% endif %}
-        <div class="fire-badge">-%{{ d.pct|int }}</div>
-        <div class="plat-dot {{ d.platform }}">
-          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
-        </div>
-      </div>
-      <div class="card-body">
-        <p class="card-title">{{ d.title }}</p>
-        <div class="card-price">
-          <span class="price-new">{{ d.cur|price_tr }}</span>
-          <span style="font-size:13px;color:var(--muted);font-weight:600;">TL</span>
-          <span class="price-old">{{ d.med|price_tr }} TL</span>
-        </div>
-        <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">
-          <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:5px;background:#dcfce7;color:#16a34a;">📉 Tüm zamanların en düşüğü</span>
-          <span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:5px;background:var(--bg3);color:var(--muted);border:1px solid var(--border);">En yüksek: {{ d.mx|price_tr }} TL</span>
-        </div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px;opacity:.7;">🕐 Bu fiyatta: {{ d.since|time_ago|replace('kontrol edildi','') }}</div>
-      </div>
-    </a>
+  <nav class="fv-chips" aria-label="Mağaza filtresi">
+    <a class="fv-pchip{% if not platform %} on{% endif %}" href="/dipte">Tümü</a>
+    {% for key, name in stores.items() %}
+    <a class="fv-pchip{% if platform == key %} on{% endif %}" href="/dipte?platform={{ key }}">{{ name }}</a>
     {% endfor %}
+  </nav>
+
+  {% if cards %}
+  <div class="fv-grid">
+    {% for c in cards %}{{ fv_card(c) }}{% endfor %}
   </div>
-  <p style="color:var(--muted);font-size:12px;margin-top:20px;">Üstü çizili fiyat, ürünün takip süresindeki medyan (olağan) fiyatıdır.</p>
+  <p style="margin:0;font-size:12px;color:var(--fv-sub);">Üstü çizili fiyat, ürünün son 30 gündeki ortalama fiyatıdır.</p>
   {% else %}
-  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;padding:40px;text-align:center;color:var(--muted);">
-    Şu an en düşük fiyatında olan ürün yok. Fiyatlar düştükçe bu liste dolacak; <a href="/" style="color:var(--fire);font-weight:600;">güncel fırsatlara</a> göz at.
+  <div class="fv-empty">
+    <h2>Şu an dipte ürün yok</h2>
+    <p>Fiyatlar düştükçe bu liste dolacak; bu arada <a href="/">günün fırsatlarına</a> göz at.</p>
   </div>
   {% endif %}
 </div>

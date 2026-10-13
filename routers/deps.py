@@ -55,6 +55,39 @@ templates.env.filters["time_ago"] = _time_ago
 templates.env.filters["hours_since"] = _hours_since
 templates.env.filters["price_tr"] = _price_tr
 
+
+def _price_short(value):
+    """Kart fiyatı: 1599.0 → '1.599', 2549.15 → '2.549,15' (kuruş sadece varsa)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return value
+    if abs(v - round(v)) < 0.005:
+        return f"{int(round(v)):,}".replace(",", ".")
+    return _price_tr(v)
+
+
+def _ago(value):
+    """'2026-10-13 10:00:00' → '2 sa önce' (kartlardaki eklenme zamanı)."""
+    if not value:
+        return ""
+    try:
+        dt = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return ""
+    s = int((datetime.utcnow() - dt).total_seconds())
+    if s < 60:
+        return "az önce"
+    if s < 3600:
+        return f"{s // 60} dk önce"
+    if s < 86400:
+        return f"{s // 3600} sa önce"
+    return f"{s // 86400} gün önce"
+
+
+templates.env.filters["price_s"] = _price_short
+templates.env.filters["ago"] = _ago
+
 # ── Rate limiting (in-memory, IP bazlı) ──────────────────────
 _rate_store: dict = {}
 _RATE_CLEANUP_INTERVAL = 300
