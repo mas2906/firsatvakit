@@ -527,6 +527,13 @@
     @media(max-width:480px){
       footer > div > div:first-child { grid-template-columns: 1fr !important; }
     }
+    /* Mobil: alt bilgi ortalı (logo, açıklama, sosyal butonlar, link sütunları, telif satırı) */
+    @media(max-width:640px){
+      footer { text-align: center; }
+      footer > div > div:first-child > div > div { justify-content: center; align-items: center; }
+      footer p { margin-left: auto !important; margin-right: auto !important; }
+      footer > div > div:last-child { justify-content: center !important; text-align: center; }
+    }
   </style>
 </footer>
 
