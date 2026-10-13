@@ -181,7 +181,15 @@ def get_client_ip(request: Request) -> str:
     set ediyor (proxy_set_header X-Real-IP $remote_addr) — yani istemci bu
     header'ı spoof edemez, nginx her zaman üzerine yazar. Bu header
     okunmadan request.client.host kullanılırsa herkes nginx'in kendi IP'sini
-    paylaşır ve rate-limit/brute-force kilidi fiilen anlamsızlaşır."""
+    paylaşır ve rate-limit/brute-force kilidi fiilen anlamsızlaşır.
+
+    Site Cloudflare arkasında: nginx'in $remote_addr'ı (dolayısıyla X-Real-IP)
+    Cloudflare edge IP'si — aynı bölgedeki TÜM mobil kullanıcılar aynı birkaç
+    edge IP'sini paylaşıyor ve misafir link limiti (günde 3) başkaları
+    tarafından tüketiliyordu. Gerçek istemci IP'si CF-Connecting-IP'de."""
+    cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
+    if cf_ip:
+        return cf_ip
     real_ip = request.headers.get("X-Real-IP", "").strip()
     if real_ip:
         return real_ip

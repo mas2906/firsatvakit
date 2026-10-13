@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block title %}{{ article.title }} — FırsatVakti Blog{% endblock %}
 
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": {{ (article.title or '')[:110] | tojson }},
+  {% if article.summary %}"description": {{ article.summary[:300] | tojson }},{% endif %}
+  {% if article.cover_image %}"image": {{ article.cover_image | tojson }},{% endif %}
+  {% if article.published_at %}"datePublished": {{ (article.published_at|string)[:19]|replace(' ', 'T') | tojson }},{% endif %}
+  {% if article.updated_at %}"dateModified": {{ (article.updated_at|string)[:19]|replace(' ', 'T') | tojson }},{% endif %}
+  "author": {"@type": "Organization", "name": "FırsatVakti", "url": "https://firsatvakti.com/"},
+  "publisher": {"@id": "https://firsatvakti.com/#org"},
+  "mainEntityOfPage": "https://firsatvakti.com/blog/{{ article.slug }}",
+  "inLanguage": "tr-TR"
+}
+</script>
+{% endblock %}
+
 {% block content %}
 <div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
 

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{% if article %}Makale Düzenle{% else %}Yeni Makale{% endif %} — Admin{% endblock %}
+{% block robots %}noindex, follow{% endblock %}
 
 {% block content %}
 <div style="max-width:780px;margin:0 auto;">

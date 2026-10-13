@@ -8,12 +8,14 @@ from scrapers.amazon      import scrape_amazon
 from scrapers.trendyol    import scrape_trendyol
 from scrapers.n11         import scrape_n11
 from scrapers.hepsiburada import scrape_hepsiburada
+from scrapers.karaca      import scrape_karaca
 
 _SCRAPERS = {
     "trendyol":    scrape_trendyol,
     "n11":         scrape_n11,
     "amazon":      scrape_amazon,
     "hepsiburada": scrape_hepsiburada,
+    "karaca":      scrape_karaca,
 }
 
 

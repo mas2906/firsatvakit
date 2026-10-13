@@ -98,6 +98,38 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
     }
 
 
+def _ld_image(img) -> Optional[str]:
+    """schema.org image alanı: str | [str] | ImageObject{contentUrl: str | [str]}"""
+    if isinstance(img, str):
+        return img if img.startswith("http") else None
+    if isinstance(img, list):
+        return next((u for u in (_ld_image(i) for i in img) if u), None)
+    if isinstance(img, dict):
+        return _ld_image(img.get("contentUrl") or img.get("url"))
+    return None
+
+
+_OG_IMAGE_RES = (
+    re.compile(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"'),
+    re.compile(r'<meta[^>]+content="([^"]+)"[^>]+property="og:image"'),
+)
+_DSMCDN_RE = re.compile(r'https://cdn\.dsmcdn\.com/(?:mnresize/\d+/\d+/)?(ty\d+/[^\s"\'<>\\]+?\.(?:jpg|jpeg|png|webp))')
+
+
+def _ty_find_image(html: str) -> Optional[str]:
+    """Sayfadan ana ürün görseli: og:image → ilk dsmcdn ürün görseli.
+    2026-09-30: ld+json / state-blob yolları image_url'i hep None döndürüyordu →
+    Ağustos sonrası eklenen 850 Trendyol ürünü görselsiz kalmıştı."""
+    if not html:
+        return None
+    for rx in _OG_IMAGE_RES:
+        m = rx.search(html)
+        if m and "dsmcdn" in m.group(1):
+            return m.group(1)
+    m = _DSMCDN_RE.search(html)
+    return ("https://cdn.dsmcdn.com/" + m.group(1)) if m else None
+
+
 def _ty_parse_ldjson(html: str) -> Optional[dict]:
     """schema.org Product ld+json'dan temel ürün verisi çıkarır (referans:
     github.com/mas2906/ecom scraper'ı)."""
@@ -124,7 +156,7 @@ def _ty_parse_ldjson(html: str) -> Optional[dict]:
         in_stock = "instock" in str(offers.get("availability") or "").lower()
 
         return {
-            "title": title, "price": price, "image_url": None,
+            "title": title, "price": price, "image_url": _ld_image(data.get("image")),
             "stock": "Stokta Var" if in_stock else "Stok Yok",
             "cart_discount": False, "coupon": None,
             "brand": brand, "barcode": None, "rating": None, "review_count": None,
@@ -133,6 +165,13 @@ def _ty_parse_ldjson(html: str) -> Optional[dict]:
 
 
 def _ty_parse_html(html: str) -> Optional[dict]:
+    data = _ty_parse_html_fields(html)
+    if data and not data.get("image_url"):
+        data["image_url"] = _ty_find_image(html)
+    return data
+
+
+def _ty_parse_html_fields(html: str) -> Optional[dict]:
     # __PRODUCT_DETAIL_APP_INITIAL_STATE__
     m = re.search(r"__PRODUCT_DETAIL_APP_INITIAL_STATE__\s*=\s*\{", html)
     if m:
@@ -274,6 +313,11 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
         product = (body.get("result") or {}).get("product") or body.get("product")
         if product:
             result = _ty_parse_product(product)
+            if result and result.get("price") and not result.get("image_url"):
+                try:
+                    result["image_url"] = _ty_find_image(await page.content())
+                except Exception:
+                    pass
             if result and result.get("price"):
                 log.info(f"[trendyol/pw] ✔(api) price={result.get('price')}")
                 return result

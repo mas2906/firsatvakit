@@ -324,7 +324,8 @@ def _n11_parse_html(html: str, cid: Optional[int] = None) -> Optional[dict]:
         ]:
             el = soup.select_one(sel)
             if el:
-                v = parse_price_tr_clean(el.get_text(strip=True))
+                # Eski ve indirimli fiyat aynı elementte olabilir → en düşüğü güncel fiyat
+                v = parse_price_tr_clean(el.get_text(" ", strip=True), pick="min")
                 if v and v > 0:
                     price = v
                     break

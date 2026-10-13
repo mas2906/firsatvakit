@@ -134,17 +134,42 @@ async def blog_detail_page(request: Request, slug: str):
 
 # ── Sitemap & Robots ──────────────────────────────────────────
 
+_sitemap_cache = {"xml": None, "ts": 0.0}
+
+
 @router.get("/sitemap.xml")
 async def sitemap():
-    return Response(content=generate_sitemap_xml(get_db()), media_type="application/xml")
+    import asyncio, time
+    # ~35k URL'lik sorgu — her bot isteğinde tekrar üretmemek için 30 dk cache
+    if not _sitemap_cache["xml"] or time.time() - _sitemap_cache["ts"] > 1800:
+        _sitemap_cache["xml"] = await asyncio.to_thread(lambda: generate_sitemap_xml(get_db()))
+        _sitemap_cache["ts"] = time.time()
+    return Response(content=_sitemap_cache["xml"], media_type="application/xml")
 
 
 @router.get("/robots.txt")
 async def robots():
     return Response(
-        content="User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: https://firsatvakti.com/sitemap.xml\n",
+        content=(
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /admin\n"
+            "Disallow: /api/\n"
+            "Disallow: /go/\n"          # affiliate yönlendirmeleri — crawl bütçesi israfı
+            "Disallow: /watch/\n"
+            "Disallow: /unwatch/\n"
+            "Disallow: /*?*sort=\n"     # sıralama varyantları — kopya içerik
+            "Disallow: /*?*tab=\n"
+            "\n"
+            "Sitemap: https://firsatvakti.com/sitemap.xml\n"
+        ),
         media_type="text/plain"
     )
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return RedirectResponse("/static/img/favicon.svg", status_code=301)
 
 
 # ── Ayarlar ───────────────────────────────────────────────────

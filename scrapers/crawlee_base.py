@@ -121,7 +121,7 @@ def make_chrome_headers(profile: dict, referer: Optional[str] = None) -> dict:
 
 
 # ── curl_cffi session havuzu (platform başına) ────────────────────────────────
-_SESSIONS: dict[str, list] = {p: [] for p in ("trendyol", "n11", "amazon", "hepsiburada")}
+_SESSIONS: dict[str, list] = {p: [] for p in ("trendyol", "n11", "amazon", "hepsiburada", "karaca")}
 _SESSION_LOCK: dict[str, Optional[asyncio.Lock]] = {p: None for p in _SESSIONS}
 _SESSION_IDX: dict[str, int] = {p: 0 for p in _SESSIONS}
 _POOL_SIZE = 3
@@ -142,6 +142,35 @@ async def get_session(platform: str, impersonate: str = "safari18_0") -> "CurlSe
             log.debug(f"[{platform}] Yeni curl session #{len(pool)}")
         _SESSION_IDX[platform] = (_SESSION_IDX[platform] + 1) % len(pool)
         return pool[_SESSION_IDX[platform]]
+
+
+async def reset_all_sessions(close_delay: float = 90.0) -> int:
+    """Tüm platformların curl_cffi oturum havuzunu sıfırlar → birikmiş tüm
+    çerezler gider (tarama turu başa döndüğünde çağrılır, bkz. local_scraper).
+
+    Sadece `session.cookies.clear()` yetmez: curl tanıtıcısı kendi çerez
+    motorunda da çerez tutabiliyor. Bu yüzden havuz komple yenileniyor. Eski
+    oturumlar HEMEN kapatılmaz — o an onlarla istek atan worker'lar olabilir;
+    close_delay saniye sonra arka planda kapatılır. Kapatılan oturum sayısını döner."""
+    old: list = []
+    for platform in _SESSIONS:
+        async with _lock(platform):
+            old.extend(_SESSIONS[platform])
+            _SESSIONS[platform] = []
+            _SESSION_IDX[platform] = 0
+
+    async def _close_later(sessions: list) -> None:
+        await asyncio.sleep(close_delay)
+        for s in sessions:
+            try:
+                s.cookies.clear()
+                await s.close()
+            except Exception:
+                pass
+
+    if old:
+        asyncio.create_task(_close_later(old))
+    return len(old)
 
 
 def drop_session(platform: str) -> None:
@@ -168,6 +197,8 @@ RL: dict[str, RateLimiter] = {
     "n11":         RateLimiter(8.0, 20.0),
     "amazon":      RateLimiter(8.0, 20.0),
     "hepsiburada": RateLimiter(6.0, 15.0),
+    # Karaca: bot engeli yok, sayfa hafif (curl) — yine de nazik: ~700 ürün günde rahat biter
+    "karaca":      RateLimiter(5.0, 12.0),
 }
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────

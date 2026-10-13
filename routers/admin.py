@@ -122,7 +122,7 @@ async def admin_panel(request: Request, q: str = ""):
         FROM deals d JOIN products p ON d.product_id=p.id
         WHERE d.active=1 GROUP BY p.platform
     """).fetchall()}
-    _platforms = ["amazon", "trendyol", "n11", "hepsiburada"]
+    _platforms = ["amazon", "trendyol", "n11", "hepsiburada", "karaca", "beymen"]
     chart_labels = [p.capitalize() for p in _platforms]
     chart_values = [chart_raw.get(p, 0) for p in _platforms]
     daily_raw = {r["day"]: r["cnt"] for r in db.execute("""

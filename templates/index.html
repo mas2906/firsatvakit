@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% block title %}FırsatVakti — Anlık Fırsatlar{% endblock %}
 
 {% block content %}
 
@@ -20,13 +19,13 @@
 
     <!-- Başlık -->
     <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(22px,3vw,38px);letter-spacing:2px;line-height:1;color:var(--text);margin:0 0 16px;">
-      ANLIK <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">FIRSAT</span> TAKİBİ
+      ANLIK <span style="background:linear-gradient(135deg,var(--fire),var(--fire2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">İNDİRİMLER</span> VE GÜNÜN FIRSATLARI
     </h1>
 
     <!-- Alt yazı -->
-    <p style="color:var(--muted);font-size:16px;margin:0 auto 28px;max-width:480px;line-height:1.7;font-weight:500;">
-      Amazon, Trendyol, N11 ve Hepsiburada'daki fiyat düşüşlerini
-      <strong style="color:var(--text);font-weight:700;">anında</strong> keşfet, fırsatı kaçırma.
+    <p style="color:var(--muted);font-size:16px;margin:0 auto 28px;max-width:520px;line-height:1.7;font-weight:500;">
+      Amazon, Trendyol, Hepsiburada ve N11'deki sıcak fırsatları, kampanyaları ve fiyat düşüşlerini
+      <strong style="color:var(--text);font-weight:700;">anında</strong> keşfet. Fiyat geçmişini gör, en ucuz fiyata al.
     </p>
 
     <!-- CTA butonları -->
@@ -64,7 +63,9 @@
         ('https://www.google.com/s2/favicons?domain=amazon.com.tr&sz=32','Amazon', stats.amazon_count),
         ('https://www.google.com/s2/favicons?domain=trendyol.com&sz=32','Trendyol', stats.trendyol_count),
         ('https://www.google.com/s2/favicons?domain=n11.com&sz=32','N11', stats.n11_count),
-        ('https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada', stats.hepsiburada_count)
+        ('https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada', stats.hepsiburada_count),
+        ('https://www.google.com/s2/favicons?domain=karaca.com&sz=32','Karaca', stats.karaca_count),
+        ('https://www.google.com/s2/favicons?domain=beymen.com&sz=32','Beymen', stats.beymen_count)
       ] %}
       <span style="display:inline-flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);">
         <img src="{{ src }}" width="14" height="14" style="border-radius:3px;object-fit:contain;" alt="{{ label }}">
@@ -123,7 +124,9 @@
     ('amazon','https://www.google.com/s2/favicons?domain=amazon.com.tr&sz=32','Amazon'),
     ('trendyol','https://www.google.com/s2/favicons?domain=trendyol.com&sz=32','Trendyol'),
     ('n11','https://www.google.com/s2/favicons?domain=n11.com&sz=32','N11'),
-    ('hepsiburada','https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada')
+    ('hepsiburada','https://www.google.com/s2/favicons?domain=hepsiburada.com&sz=32','Hepsiburada'),
+    ('karaca','https://www.google.com/s2/favicons?domain=karaca.com&sz=32','Karaca'),
+    ('beymen','https://www.google.com/s2/favicons?domain=beymen.com&sz=32','Beymen')
   ] %}
   <a href="/?platform={{ p }}&sort={{ sort }}&tab={{ tab }}" class="filter-pill {{ 'active' if platform == p else '' }}" style="display:inline-flex;align-items:center;gap:6px;">
     <img src="{{ src }}" width="14" height="14" style="border-radius:3px;object-fit:contain;" alt="{{ label }}">
@@ -170,7 +173,7 @@
       {% endif %}
       <div class="fire-badge">-%{{ d.discount_pct|int }}</div>
       <div class="plat-dot {{ d.platform }}">
-        {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+        {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
       </div>
       {% if d.stock == 'Stok Yok' %}
       <div style="position:absolute;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;">
@@ -254,6 +257,43 @@
 </a>
 
 {% if not q %}
+<!-- ŞU AN DİPTE — tüm zamanların en düşüğündeki ürünler (mobilde de yatay kaydırılır) -->
+{% if dipte_items %}
+<div style="margin-top:48px;padding-top:40px;border-top:1.5px solid var(--border);">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;">
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;color:var(--text);margin:0;display:flex;align-items:center;gap:8px;">
+      <span style="width:32px;height:32px;background:linear-gradient(135deg,#16a34a,#4ade80);border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;">📉</span>
+      ŞU AN DİPTE
+    </h2>
+    <a href="/dipte" style="font-size:12px;font-weight:700;color:var(--fire);text-decoration:none;display:flex;align-items:center;gap:4px;white-space:nowrap;">
+      Tümünü Gör
+      <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    </a>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin:-6px 0 12px;font-weight:500;">Fiyat geçmişindeki en düşük fiyatında ve olağan fiyatının en az %15 altında.</p>
+  <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;">
+    {% for d in dipte_items %}
+    <a href="/product/{{ d.id }}" style="text-decoration:none;color:inherit;flex:0 0 160px;" class="deal-card">
+      <div class="card-img-wrap" style="height:120px;">
+        {% if d.image_url %}<img src="{{ d.image_url }}" alt="{{ d.title }}" loading="lazy">{% else %}<span style="font-size:36px;">🛍</span>{% endif %}
+        <div class="fire-badge" style="font-size:14px;">-%{{ d.pct|int }}</div>
+        <div class="plat-dot {{ d.platform }}" style="width:22px;height:22px;font-size:10px;">
+          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
+        </div>
+      </div>
+      <div class="card-body" style="padding:10px;">
+        <p class="card-title" style="font-size:12px;min-height:34px;margin-bottom:6px;">{{ d.title }}</p>
+        <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:15px;font-weight:800;color:var(--text);">{{ d.cur|price_tr }} TL</span>
+          <span style="font-size:11px;color:var(--muted);text-decoration:line-through;">{{ d.med|price_tr }}</span>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- YENİ EKLENENLER -->
 {% if new_deals %}
 <div style="margin-top:48px;padding-top:40px;border-top:1.5px solid var(--border);">
@@ -279,7 +319,7 @@
         {% endif %}
         <div class="fire-badge" style="font-size:11px;padding:3px 7px;">-%{{ d.discount_pct|int }}</div>
         <div class="plat-dot {{ d.platform }}">
-          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
         </div>
       </div>
       <div class="card-body" style="padding:10px;">
@@ -320,7 +360,7 @@
         {% endif %}
         <div class="fire-badge" style="font-size:11px;padding:3px 7px;">-%{{ d.discount_pct|int }}</div>
         <div class="plat-dot {{ d.platform }}">
-          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+          {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
         </div>
         {% if d.click_count %}
         <div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;">👁 {{ d.click_count }}</div>
@@ -419,6 +459,33 @@
     <span style="font-size:22px;">📢</span>
     <span class="ad-slot-label">Buraya reklam verebilirsiniz — İletişime geçin</span>
   </a>
+
+  {% if page == 1 and not platform and not q %}
+  <!-- SEO tanıtım metni — sadece ana sayfanın ilk sayfasında -->
+  <section style="margin-top:40px;background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px clamp(18px,3vw,36px);color:var(--muted);font-size:14px;line-height:1.8;">
+    <h2 style="font-size:18px;font-weight:700;color:var(--text);margin:0 0 10px;">Anlık indirimler, sıcak fırsatlar ve fiyat takibi</h2>
+    <p style="margin:0 0 12px;">
+      FırsatVakti; <a href="/?platform=amazon" style="color:var(--fire);font-weight:600;">Amazon indirimleri</a>,
+      <a href="/?platform=trendyol" style="color:var(--fire);font-weight:600;">Trendyol kampanyaları</a>,
+      <a href="/?platform=hepsiburada" style="color:var(--fire);font-weight:600;">Hepsiburada fırsatları</a> ve
+      <a href="/?platform=n11" style="color:var(--fire);font-weight:600;">N11 indirimleri</a>
+      gibi popüler e-ticaret sitelerindeki fiyatları sürekli tarayan, bağımsız ve ücretsiz bir fırsat takip platformudur.
+      Her ürünün fiyat geçmişini kaydederiz; böylece "indirim" diye sunulan fiyatın gerçekten en ucuz fiyat olup olmadığını görebilirsin.
+    </p>
+    <p style="margin:0 0 12px;">
+      Günün fırsatları, sepette indirimler ve fiyatı düşen ürünler ana sayfada anlık olarak listelenir.
+      Takip etmek istediğin bir ürün varsa <a href="/submit" style="color:var(--fire);font-weight:600;">linkini ekle</a>;
+      fiyatı düştüğünde sana haber verelim. İndirimleri kaçırmamak için
+      <a href="https://t.me/firsatvakti1" target="_blank" rel="noopener" style="color:var(--fire);font-weight:600;">Telegram</a> ve
+      <a href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" rel="noopener" style="color:var(--fire);font-weight:600;">WhatsApp</a>
+      kanallarımıza ücretsiz katılabilirsin.
+    </p>
+    <p style="margin:0;">
+      Aynı ürünü farklı mağazalarda karşılaştırıp en uygun fiyatı bulmak, alışveriş rehberleri ve indirim ipuçları için
+      <a href="/blog" style="color:var(--fire);font-weight:600;">blogumuza</a> göz at.
+    </p>
+  </section>
+  {% endif %}
 </div>
 
 {% endblock %}

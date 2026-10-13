@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Admin Panel — FırsatVakti{% endblock %}
+{% block robots %}noindex, follow{% endblock %}
 
 {% block content %}
 <div style="max-width:1200px;margin:0 auto;">
@@ -87,6 +88,8 @@
       trendyol:    { label: 'Trendyol',    color: '#ef4444' },
       hepsiburada: { label: 'Hepsiburada', color: '#eab308' },
       n11:         { label: 'N11',         color: '#8b5cf6' },
+      karaca:      { label: 'Karaca',      color: '#8a6a3b' },
+      beymen:      { label: 'Beymen',      color: '#1c1c1c' },
     };
 
     function escapeHtml(s) {
@@ -122,6 +125,51 @@
       return ['ÇALIŞIYOR', '#10b981'];
     }
 
+    function timeUntil(isoStr) {
+      if (!isoStr) return '—';
+      var diff = Math.floor((new Date(isoStr.replace(' ','T')+'Z').getTime() - Date.now()) / 1000);
+      if (isNaN(diff)) return isoStr.slice(11,16);
+      if (diff <= 0) return 'şimdi (bekliyor)';
+      if (diff < 3600) return Math.floor(diff/60) + 'dk sonra';
+      return Math.floor(diff/3600) + 'sa ' + Math.floor((diff%3600)/60) + 'dk sonra';
+    }
+
+    // Günde bir çalışan eşitleme (Karaca keşfi, Beymen eşitleme) — "1 saattir tarama yok
+    // → DURDU?" mantığı bunlar için yanlış alarm verirdi; kendi durumları var.
+    function syncBadge(s) {
+      var st = s.status || {};
+      if (st.state === 'running') return ['EŞİTLENİYOR', '#3b82f6'];
+      if (st.state === 'error')   return ['HATA', '#dc2626'];
+      if (!s.last_run) return ['BEKLİYOR', '#6b7280'];
+      var age = Date.now() - new Date(s.last_run.replace(' ','T')+'Z').getTime();
+      if (age > 26 * 3600 * 1000) return ['GECİKTİ', '#f59e0b'];
+      return ['GÜNCEL', '#10b981'];
+    }
+
+    function syncLines(s) {
+      var st = s.status || {};
+      var html = '🔄 Günlük ' + (s.mode === 'full' ? 'eşitleme' : 'keşif') + ': <b style="color:var(--text);">' + timeAgo(s.last_run) + '</b>'
+        + ' &nbsp;|&nbsp; sonraki: <b style="color:var(--text);">' + timeUntil(s.next_run) + '</b><br>'
+        + '📦 Ürün: <b style="color:var(--text);">' + (s.products || 0).toLocaleString('tr-TR') + '</b>';
+      if (st.state === 'running') {
+        var pct = (st.total ? Math.min(100, Math.round(st.done / st.total * 100)) : 0);
+        html += '<br><span style="color:#3b82f6;font-weight:700;">▶ ' + escapeHtml(st.phase || '') + ': '
+          + (st.done || 0).toLocaleString('tr-TR') + (st.total ? ' / ' + st.total.toLocaleString('tr-TR') : '') + '</span>'
+          + (st.products_found ? ' <span>(' + st.products_found.toLocaleString('tr-TR') + ' ürün bulundu)</span>' : '')
+          + '<div style="height:5px;background:var(--border);border-radius:3px;margin-top:4px;overflow:hidden;">'
+          + '<div style="height:100%;width:' + pct + '%;background:#3b82f6;"></div></div>';
+      } else if (st.state === 'error') {
+        html += '<br><span style="color:#dc2626;">✖ ' + escapeHtml(st.error || 'hata') + '</span>';
+      }
+      var ls = st.last_stats;
+      if (ls && st.state !== 'running') {
+        html += '<br>Son sonuç: ' + (ls.found != null ? ls.found : ls.products) + ' bulundu, <b style="color:#10b981;">' + ls.added + ' yeni</b>'
+          + (ls.failed ? ', <span style="color:#dc2626;">' + ls.failed + ' hata</span>' : '')
+          + (ls.minutes ? ' · ' + ls.minutes + ' dk' : '');
+      }
+      return html;
+    }
+
     function renderMonitor(data) {
       var grid = document.getElementById('monitor-grid');
       var upd  = document.getElementById('monitor-updated');
@@ -146,6 +194,21 @@
         var badge = statusBadge(d);
         var e1h = d.errors_1h || 0;
 
+        // Beymen: Windows scraper'ı yok — kartta sadece günlük eşitleme durumu
+        if (d.daily_sync && d.daily_sync.mode === 'full') {
+          var sb = syncBadge(d.daily_sync);
+          html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
+              + '<span style="font-weight:700;font-size:13px;color:' + pInfo.color + ';">' + pInfo.label + '</span>'
+              + '<span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;background:' + sb[1] + '22;color:' + sb[1] + ';">' + sb[0] + '</span>'
+            + '</div>'
+            + '<div style="font-size:11px;color:var(--muted);line-height:1.8;">' + syncLines(d.daily_sync)
+              + '<br>⚠ Hata (1sa): <b style="color:' + (e1h > 10 ? '#dc2626' : 'var(--text)') + ';">' + e1h + '</b>'
+            + '</div>'
+          + '</div>';
+          return;
+        }
+
         html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;">'
           + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
             + '<span style="font-weight:700;font-size:13px;color:' + pInfo.color + ';">' + pInfo.label + '</span>'
@@ -158,6 +221,7 @@
             + (d.block_errors_30m > 0 ? ' <span style="color:#dc2626;font-weight:700;">(🚫 ' + d.block_errors_30m + ' blok)</span>' : '')
             + '<br>1sa hata: <b style="color:' + (e1h > 10 ? '#dc2626' : 'var(--text)') + ';">' + e1h + '</b>'
             + ' &nbsp;|&nbsp; 📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
+            + (d.daily_sync ? '<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:4px;">' + syncLines(d.daily_sync) + '</div>' : '')
           + '</div>'
         + '</div>';
       });
@@ -421,7 +485,7 @@
         <div style="flex:1;min-width:200px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span class="badge-{{ d.platform }}" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">
-              {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %} {{ d.platform|title }}
+              {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %} {{ d.platform|title }}
             </span>
             <span style="font-size:12px;color:var(--muted);">#{{ d.id }}</span>
           </div>
@@ -511,7 +575,7 @@
             </td>
             <td style="padding:12px 16px;">
               <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;" class="badge-{{ d.platform }}">
-                {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% else %}🟡{% endif %}
+                {% if d.platform=='amazon' %}🟠{% elif d.platform=='trendyol' %}🔴{% elif d.platform=='n11' %}🟣{% elif d.platform=='karaca' %}🟤{% elif d.platform=='beymen' %}⚫{% else %}🟡{% endif %}
                 {{ d.platform|title }}
               </span>
             </td>

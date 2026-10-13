@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ comparison.group.name|truncate(60) }} — Fiyat Karşılaştırma | FırsatVakti{% endblock %}
+{% block title %}{{ meta.title }}{% endblock %}
 
 {% block content %}
 <a href="/" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;transition:color .15s;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">← Ana Sayfa</a>
@@ -7,11 +7,11 @@
 <!-- BAŞLIK -->
 <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px;">
   {% if comparison.group.image_url %}
-  <img src="{{ comparison.group.image_url }}" alt="" style="width:72px;height:72px;border-radius:14px;object-fit:contain;background:var(--bg2);border:1.5px solid var(--border);padding:6px;">
+  <img src="{{ comparison.group.image_url }}" alt="{{ comparison.group.name }}" style="width:72px;height:72px;border-radius:14px;object-fit:contain;background:var(--bg2);border:1.5px solid var(--border);padding:6px;">
   {% endif %}
   <div>
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(24px,3.5vw,38px);letter-spacing:.5px;color:var(--text);margin:0 0 4px;">⚖️ FİYAT KARŞILAŞTIRMA</h1>
-    <p style="color:var(--muted);font-size:14px;font-weight:500;margin:0;">{{ comparison.group.name|truncate(80) }} — {{ comparison.platform_count }} platformda</p>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:clamp(20px,3vw,30px);letter-spacing:.5px;color:var(--text);margin:0 0 4px;">⚖️ FİYAT KARŞILAŞTIRMA</div>
+    <h1 style="color:var(--muted);font-size:14px;font-weight:500;margin:0;">{{ comparison.group.name|truncate(80) }} fiyat karşılaştırması — {{ comparison.platform_count }} platformda</h1>
   </div>
 </div>
 
@@ -45,7 +45,7 @@
     <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;">
       <div style="width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;
         {% if p.platform == 'amazon' %}background:#fff8ee;{% elif p.platform == 'trendyol' %}background:#fff2ee;{% elif p.platform == 'n11' %}background:#f5eeff;{% else %}background:#fff5ee;{% endif %}">
-        {% if p.platform == 'amazon' %}🟠{% elif p.platform == 'trendyol' %}🔴{% elif p.platform == 'n11' %}🟣{% else %}🟡{% endif %}
+        {% if p.platform == 'amazon' %}🟠{% elif p.platform == 'trendyol' %}🔴{% elif p.platform=='n11' %}🟣{% elif p.platform=='karaca' %}🟤{% elif p.platform=='beymen' %}⚫{% else %}🟡{% endif %}
       </div>
       <div style="min-width:0;">
         <div style="font-weight:700;font-size:14px;color:var(--text);">{{ p.platform|title }}</div>

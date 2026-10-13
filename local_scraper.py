@@ -35,6 +35,38 @@ def _reset_crawlee_storage() -> None:
     shutil.rmtree(_PROJECT_STORAGE, ignore_errors=True)
 
 
+# Playwright/Camoufox her taramada TEMP altında yeni bir tarayıcı profili açıyor
+# (içinde cookies.sqlite dahil) ama kapanınca silmiyor — binlerce klasör birikiyordu.
+_BROWSER_PROFILE_PREFIXES = (
+    "apify-playwright-firefox-", "apify-playwright-chrom", "playwright_chromiumdev_profile-",
+    "playwright_firefoxdev_profile-", "playwright-artifacts-", "rust_mozprofile",
+)
+
+
+def _purge_browser_profiles(min_age_s: float = 600) -> int:
+    """TEMP altındaki eski tarayıcı profillerini (ve içlerindeki çerezleri) siler.
+    min_age_s'den yeni klasörlere dokunulmaz — o an çalışan bir tarayıcıya ait
+    olabilir (Windows kullanımdaki dosyaları zaten kilitliyor, ignore_errors)."""
+    removed = 0
+    cutoff = time.time() - min_age_s
+    try:
+        entries = list(os.scandir(_TMP))
+    except OSError:
+        return 0
+    for e in entries:
+        if not e.is_dir(follow_symlinks=False) or not e.name.startswith(_BROWSER_PROFILE_PREFIXES):
+            continue
+        try:
+            if e.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(e.path, ignore_errors=True)
+        if not os.path.exists(e.path):
+            removed += 1
+    return removed
+
+
 import asyncio
 import logging
 import subprocess
@@ -66,6 +98,7 @@ PLATFORM_CONCURRENT = {
     "trendyol":    1,
     "hepsiburada": 2,
     "n11":         2,
+    "karaca":      1,
 }
 
 SCHEDULE = {
@@ -73,6 +106,7 @@ SCHEDULE = {
     "n11":         list(range(0, 24)),
     "amazon":      list(range(0, 24)),
     "hepsiburada": list(range(0, 24)),
+    "karaca":      list(range(0, 24)),
 }
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +129,33 @@ def _calc_concurrent(platform: str) -> int:
 
 from scrapers.router import scrape_product  # noqa: E402
 from scrapers.crawlee_base import RL  # noqa: E402
+
+
+# ── Tarama turu takibi: tur başa döndüğünde çerezleri temizle ─────────────────
+# VPS /api/pending-jobs yanıtında X-Scan-Round başlığıyla mevcut turun kimliğini
+# gönderiyor (scheduler.py → settings.scan_round_started_at).
+_scan_round: Optional[str] = None
+_round_lock: Optional[asyncio.Lock] = None
+
+
+async def _check_scan_round(round_id: Optional[str]) -> None:
+    global _scan_round, _round_lock
+    if not round_id or round_id == _scan_round:
+        return
+    if _round_lock is None:
+        _round_lock = asyncio.Lock()
+    async with _round_lock:
+        if round_id == _scan_round:     # başka bir worker az önce halletti
+            return
+        previous, _scan_round = _scan_round, round_id
+        if previous is None:            # süreç yeni başladı — çerezler zaten boş
+            log.info(f"[cookies] Mevcut tarama turu: {round_id}")
+            return
+        from scrapers.crawlee_base import reset_all_sessions
+        sessions = await reset_all_sessions()
+        profiles = await asyncio.to_thread(_purge_browser_profiles)
+        log.info(f"[cookies] 🔄 Yeni tarama turu ({previous} → {round_id}): "
+                 f"{sessions} curl oturumu sıfırlandı, {profiles} eski tarayıcı profili silindi — tüm çerezler temizlendi")
 
 _last_success: dict[str, float] = {}
 _error_streak_logged: dict[str, bool] = {}
@@ -210,6 +271,7 @@ async def _fetch_one_job(client: httpx.AsyncClient, platform: str, urgent_only: 
                 timeout=10,
             )
             if r.status_code == 200:
+                await _check_scan_round(r.headers.get("X-Scan-Round"))
                 jobs = r.json()
                 if jobs:
                     return jobs[0]

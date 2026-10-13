@@ -10,7 +10,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv()
@@ -35,11 +35,37 @@ app.add_middleware(SessionMiddleware, secret_key=get_secret_key(), max_age=86400
 
 
 @app.middleware("http")
+async def canonical_host_middleware(request, call_next):
+    """http://… ve www.… varyantlarını https://firsatvakti.com'a 301'le.
+    Aksi halde Google aynı sayfanın 4 kopyasını (http/https × www/apex) görüyor.
+    Sadece Cloudflare üzerinden gelen isteklere uygulanır (CF-Visitor başlığı):
+    scraper VPS'e doğrudan http://IP ile bağlanıyor, ona dokunulmamalı."""
+    cf_visitor = request.headers.get("cf-visitor")
+    if cf_visitor and request.method in ("GET", "HEAD"):
+        host = request.headers.get("host", "").lower()
+        is_http = '"http"' in cf_visitor.replace(" ", "")
+        if host == "www.firsatvakti.com" or (is_http and host == "firsatvakti.com"):
+            target = "https://firsatvakti.com" + request.url.path
+            if request.url.query:
+                target += "?" + request.url.query
+            return RedirectResponse(target, status_code=301)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def csrf_cookie_middleware(request, call_next):
-    response = await call_next(request)
-    if "csrftoken" not in request.cookies:
+    # Token'ı yanıt üretilmeden ÖNCE belirle ve request.state'e koy: şablonlar
+    # formlara sunucu tarafında basabilsin. Sadece JS'in cookie'den okumasına
+    # güvenmek bazı mobil/uygulama-içi tarayıcılarda boş token → "Geçersiz istek"
+    # hatasına yol açıyordu.
+    token = request.cookies.get("csrftoken")
+    is_new = not token
+    if is_new:
         token = secrets.token_hex(32)
-        response.set_cookie("csrftoken", token, samesite="lax", httponly=False, max_age=86400 * 7)
+    request.state.csrf_token = token
+    response = await call_next(request)
+    if is_new:
+        response.set_cookie("csrftoken", token, samesite="lax", httponly=False, max_age=86400 * 30)
     return response
 
 

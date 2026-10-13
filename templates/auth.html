@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{% if mode == 'login' %}Giriş Yap{% else %}Üye Ol{% endif %} — FırsatVakti{% endblock %}
+{% block robots %}noindex, follow{% endblock %}
 
 {% block content %}
 <div style="max-width:440px;margin:48px auto;">

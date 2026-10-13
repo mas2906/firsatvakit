@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ (product.title or 'Ürün')[:60] }} Fiyat Takibi | FırsatVakti{% endblock %}
+{% block title %}{{ meta.title }}{% endblock %}
 
 {% block extra_head %}
 <script type="application/ld+json">
@@ -8,13 +8,18 @@
   "@type": "Product",
   "name": {{ product.title | tojson }},
   {% if product.image_url %}"image": {{ product.image_url | tojson }},{% endif %}
-  "description": "{{ product.platform|title }}'da {{ (product.title or '')|replace('"','') }} fiyat takibi ve indirim bildirimi.",
-  {% if product.rating %}"aggregateRating": {"@type":"AggregateRating","ratingValue":"{{ '%.1f'|format(product.rating) }}"{% if product.review_count %},"reviewCount":"{{ product.review_count }}"{% endif %}},{% endif %}
+  "description": {{ meta.description | tojson }},
+  {% if product.asin_or_id %}"sku": {{ product.asin_or_id | string | tojson }},{% endif %}
+  {% if product.rating and product.review_count %}"aggregateRating": {"@type":"AggregateRating","ratingValue":"{{ '%.1f'|format(product.rating) }}","reviewCount":"{{ product.review_count }}"},{% endif %}
+  {%- set _last_price = history[-1].price_value if history else None %}
   "offers": {
-    "@type": "AggregateOffer",
+    "@type": "Offer",
+    "url": "https://firsatvakti.com/product/{{ product.id }}",
     "priceCurrency": "TRY",
-    "offerCount": "1",
-    "url": "https://firsatvakti.com/product/{{ product.id }}"
+    {% if _last_price %}"price": "{{ '%.2f'|format(_last_price) }}",{% endif %}
+    "itemCondition": "https://schema.org/NewCondition",
+    "availability": "{% if product.stock and ('tüken' in product.stock|lower or 'yok' in product.stock|lower or product.stock == 'out_of_stock') %}https://schema.org/OutOfStock{% else %}https://schema.org/InStock{% endif %}",
+    "seller": {"@type": "Organization", "name": {{ product.platform|title | tojson }}}
   }
 }
 </script>
@@ -44,7 +49,7 @@
 
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
         <span class="badge-{{ product.platform }}" style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px;">
-          {% if product.platform=='amazon' %}🟠{% elif product.platform=='trendyol' %}🔴{% elif product.platform=='n11' %}🟣{% else %}🟡{% endif %}
+          {% if product.platform=='amazon' %}🟠{% elif product.platform=='trendyol' %}🔴{% elif product.platform=='n11' %}🟣{% elif product.platform=='karaca' %}🟤{% elif product.platform=='beymen' %}⚫{% else %}🟡{% endif %}
           {{ product.platform|title }}
         </span>
         <span style="background:#fef3c7;color:#d97706;border:1.5px solid #fde68a;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">⏳ Taranıyor...</span>
@@ -66,9 +71,11 @@
       <div style="background:linear-gradient(135deg,#fffbeb,#fff);border:1.5px solid #fde68a;border-radius:14px;padding:18px 20px;margin-bottom:20px;">
         <div style="font-size:14px;font-weight:700;color:#92400e;margin-bottom:6px;">📊 Fiyatı Takip Ediyoruz</div>
         <div style="font-size:13px;color:#b45309;line-height:1.6;font-weight:500;">
-          Ürün fiyatı izleniyor. Fiyat <strong>%5 veya daha fazla</strong> düştüğünde otomatik olarak fırsat oluşturulur ve bu sayfaya yönlendirilirsin.
+          Ürün fiyatı izleniyor. Fiyat <strong>son 30 günün en düşük seviyesinin altına inip</strong> 30 günlük ortalamasından <strong>en az %10 ucuzladığında</strong> fırsat oluşturulur ve bu sayfaya yönlendirilirsin.
         </div>
       </div>
+
+      {% include "_pump_warning.html" %}
 
       <!-- Orijinal linke git -->
       <a href="{{ product.source_url }}" target="_blank" rel="nofollow"
@@ -112,6 +119,7 @@
           {% if p.platform=='amazon' %}🟠
           {% elif p.platform=='trendyol' %}🔴
           {% elif p.platform=='n11' %}🟣
+          {% elif p.platform=='karaca' %}🟤{% elif p.platform=='beymen' %}⚫
           {% else %}🟡{% endif %}
         </span>
         <div>

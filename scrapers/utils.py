@@ -24,14 +24,31 @@ def normalize_image_url(url: Optional[str]) -> Optional[str]:
     return None
 
 
-def parse_price_tr_clean(text: Optional[str]) -> Optional[float]:
+def parse_price_tr_clean(text: Optional[str], pick: str = "first") -> Optional[float]:
     """
     Türkçe fiyat string'ini float'a çevirir.
-    Desteklenen formatlar: '1.299,99 TL', '1299.99', '1.299', '1,299.99'
+    Desteklenen formatlar: '1.299,99 TL', '1299.99', '1.299', '1,299.99', '1 299,99 TL'
+
+    Metinde birden fazla fiyat varsa (ör. eski+yeni fiyat aynı elementte:
+    "17999TL17700TL") her biri ayrı okunur ve `pick`e göre biri seçilir
+    ("first" | "min"). ESKİDEN tüm rakamlar birleşiyordu → n11'de 1.799.917.700 TL
+    gibi milyarlık fiyatlar kaydediliyordu (2026-09-30 analizi, 188 ürün).
     """
     if not text:
         return None
-    t = re.sub(r"[^\d.,]", "", str(text).strip())
+    # Harf / para birimi sembolü fiyatları birbirinden ayırır; boşluk ayırmaz
+    # ("1 299,99" tek fiyat — binlik ayraç olarak boşluk).
+    chunks = [re.sub(r"[^\d.,]", "", c) for c in re.split(r"[^\d.,\s]+", str(text))]
+    chunks = [c.strip(".,") for c in chunks if re.search(r"\d", c)]
+    if len(chunks) > 1:
+        vals = [v for v in (_parse_single_price(c) for c in chunks) if v]
+        if not vals:
+            return None
+        return min(vals) if pick == "min" else vals[0]
+    return _parse_single_price(chunks[0]) if chunks else None
+
+
+def _parse_single_price(t: str) -> Optional[float]:
     if not t:
         return None
 

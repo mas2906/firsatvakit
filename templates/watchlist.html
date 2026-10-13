@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Takip Listem — FırsatVakti{% endblock %}
+{% block robots %}noindex, follow{% endblock %}
 
 {% block content %}
 <div style="max-width:900px;margin:0 auto;">
@@ -44,7 +45,7 @@
       <div style="flex:1;min-width:200px;">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
           <span class="badge-{{ item.platform }}" style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;">
-            {% if item.platform=='amazon' %}🟠{% elif item.platform=='trendyol' %}🔴{% elif item.platform=='n11' %}🟣{% else %}🟡{% endif %}
+            {% if item.platform=='amazon' %}🟠{% elif item.platform=='trendyol' %}🔴{% elif item.platform=='n11' %}🟣{% elif item.platform=='karaca' %}🟤{% elif item.platform=='beymen' %}⚫{% else %}🟡{% endif %}
             {{ item.platform|title }}
           </span>
           {% if item.deal_active %}

@@ -3,19 +3,33 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{% block title %}FırsatVakti — En İyi Fırsatlar{% endblock %}</title>
-  <meta name="description" content="{% block description %}Amazon, Trendyol, N11 ve Hepsiburada'daki fiyat düşüşlerini anlık takip et. Ücretsiz fiyat karşılaştırma ve indirim bildirimi servisi.{% endblock %}">
-  <meta property="og:title" content="{% block og_title %}FırsatVakti — Anlık Fırsat Takibi{% endblock %}">
-  <meta property="og:description" content="{% block og_description %}Amazon, Trendyol, N11 ve Hepsiburada'daki en iyi fırsatları kaçırma.{% endblock %}">
+  <title>{% block title %}{{ meta.title if meta and meta.title else 'FırsatVakti — Amazon, Trendyol, Hepsiburada, N11 İndirim ve Fiyat Takibi' }}{% endblock %}</title>
+  <meta name="description" content="{% block description %}{{ meta.description if meta and meta.description else "Amazon, Trendyol, N11 ve Hepsiburada'daki fiyat düşüşlerini anlık takip et. Ücretsiz fiyat karşılaştırma ve indirim bildirimi servisi." }}{% endblock %}">
+  <meta name="robots" content="{% block robots %}{{ meta.robots if meta and meta.robots else 'index, follow, max-image-preview:large, max-snippet:-1' }}{% endblock %}">
+  <link rel="canonical" href="{% block canonical %}https://firsatvakti.com{{ meta.canonical if meta and meta.canonical else request.url.path }}{% endblock %}">
+  <meta property="og:locale" content="tr_TR">
+  <meta property="og:title" content="{% block og_title %}{{ self.title() | trim }}{% endblock %}">
+  <meta property="og:description" content="{% block og_description %}{{ self.description() | trim }}{% endblock %}">
   <meta property="og:type" content="{{ meta.og_type if meta and meta.og_type else 'website' }}">
   <meta property="og:site_name" content="FırsatVakti">
-  <meta property="og:url" content="https://firsatvakti.com{{ request.url.path }}">
+  <meta property="og:url" content="{{ self.canonical() | trim }}">
   {% if meta and meta.og_image %}<meta property="og:image" content="{{ meta.og_image }}">{% endif %}
   <meta name="twitter:card" content="{{ 'summary_large_image' if meta and meta.og_image else 'summary' }}">
-  <meta name="twitter:title" content="{% block twitter_title %}{{ meta.title if meta and meta.title else 'FırsatVakti' }}{% endblock %}">
-  <meta name="twitter:description" content="{{ meta.description if meta and meta.description else '' }}">
+  <meta name="twitter:title" content="{% block twitter_title %}{{ self.title() | trim }}{% endblock %}">
+  <meta name="twitter:description" content="{{ self.description() | trim }}">
   {% if meta and meta.og_image %}<meta name="twitter:image" content="{{ meta.og_image }}">{% endif %}
-  <link rel="canonical" href="https://firsatvakti.com{{ request.url.path }}">
+  <link rel="icon" type="image/svg+xml" href="/static/img/favicon.svg">
+  <meta name="theme-color" content="#f4501c">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@graph":[
+    {"@type":"Organization","@id":"https://firsatvakti.com/#org","name":"FırsatVakti","url":"https://firsatvakti.com/",
+     "logo":"https://firsatvakti.com/static/img/logo.svg"},
+    {"@type":"WebSite","@id":"https://firsatvakti.com/#website","name":"FırsatVakti","url":"https://firsatvakti.com/",
+     "inLanguage":"tr-TR","publisher":{"@id":"https://firsatvakti.com/#org"},
+     "potentialAction":{"@type":"SearchAction","target":"https://firsatvakti.com/search?q={search_term_string}",
+                        "query-input":"required name=search_term_string"}}
+  ]}
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
@@ -35,6 +49,8 @@
       --trendyol:#e85c28;
       --n11:    #7c2db8;
       --hb:     #e85500;
+      --karaca: #8a6a3b;
+      --beymen: #1c1c1c;
       --nav-bg: rgba(255,255,255,0.94);
       --shadow: rgba(0,0,0,0.05);
     }
@@ -116,10 +132,14 @@
     .badge-trendyol    { background:#fff2ee; color:#b83810; border:1.5px solid #ffc4b0; }
     .badge-n11         { background:#f5eeff; color:#5e1da0; border:1.5px solid #d5a8f8; }
     .badge-hepsiburada { background:#fff5ee; color:#b84000; border:1.5px solid #ffc890; }
+    .badge-karaca      { background:#f8f3ea; color:#6b4f24; border:1.5px solid #dcc59b; }
+    .badge-beymen      { background:#f2f2f2; color:#1c1c1c; border:1.5px solid #c9c9c9; }
     [data-theme="dark"] .badge-amazon      { background:#2a1f0a; color:#ffb84d; border-color:#5a3a0a; }
     [data-theme="dark"] .badge-trendyol    { background:#2a100a; color:#ff8060; border-color:#5a1a0a; }
     [data-theme="dark"] .badge-n11         { background:#1e0a30; color:#c080ff; border-color:#4a1a70; }
     [data-theme="dark"] .badge-hepsiburada { background:#2a1200; color:#ff9040; border-color:#5a2800; }
+    [data-theme="dark"] .badge-karaca      { background:#241c10; color:#d9b77a; border-color:#4d3a1c; }
+    [data-theme="dark"] .badge-beymen      { background:#1e1e1e; color:#e6e6e6; border-color:#444; }
 
     /* FILTER PILLS */
     .filter-pill { border: 1.5px solid var(--border); background: var(--bg2); color: var(--muted); border-radius: 99px; padding: 7px 18px; font-size: 13px; font-weight: 600; transition: all .18s; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -140,6 +160,8 @@
     .plat-dot.trendyol { background:var(--trendyol); }
     .plat-dot.n11 { background:var(--n11); }
     .plat-dot.hepsiburada { background:var(--hb); }
+    .plat-dot.karaca { background:var(--karaca); }
+    .plat-dot.beymen { background:var(--beymen); }
     .card-body { padding:14px; flex:1; display:flex; flex-direction:column; position:relative; z-index:1; }
     .card-title { font-size:13px; font-weight:500; color:var(--text); line-height:1.45; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:10px; min-height:38px; }
     .card-rating { display:flex; align-items:center; gap:5px; margin-bottom:10px; }
@@ -202,6 +224,9 @@
     /* MOBİL NAVBAR */
     @media(max-width:640px) {
       .nav-blog-link { display: none !important; }
+      /* "Şu An Dipte" mobilde de görünür, kısa haliyle */
+      .nav-dipte-long { display: none; }
+      .nav-dipte-link { padding: 7px 8px !important; white-space: nowrap; }
       .nav-links { gap: 4px; }
       .btn-add { padding: 8px 12px; font-size: 13px; }
       .nav-link { padding: 7px 10px; font-size: 13px; }
@@ -247,10 +272,10 @@
     {% if ticker_items is defined and ticker_items %}{% set ticker_deals = ticker_items %}{% endif %}
     <div class="ticker-track">
       {% if ticker_deals %}
-        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else '🟡')) %}
+        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else ('🟤' if t.platform=='karaca' else ('⚫' if t.platform=='beymen' else '🟡')))) %}
         <span>{{ emoji }} {{ t.platform|title }}'da -%{{ t.discount_pct|int }} &mdash; {{ (t.title or '')|truncate(38,true,'…') }}</span>
         {% endfor %}
-        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else '🟡')) %}
+        {% for t in ticker_deals %}{% set emoji = '🟠' if t.platform=='amazon' else ('🔴' if t.platform=='trendyol' else ('🟣' if t.platform=='n11' else ('🟤' if t.platform=='karaca' else ('⚫' if t.platform=='beymen' else '🟡')))) %}
         <span>{{ emoji }} {{ t.platform|title }}'da -%{{ t.discount_pct|int }} &mdash; {{ (t.title or '')|truncate(38,true,'…') }}</span>
         {% endfor %}
       {% else %}
@@ -280,6 +305,7 @@
     </div>
 
     <div class="nav-links">
+      <a href="/dipte" class="nav-link nav-dipte-link">📉 <span class="nav-dipte-long">Şu An </span>Dipte</a>
       <a href="/blog" class="nav-link nav-blog-link">📝 Blog</a>
       <a href="/submit" class="btn-add">
         <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -340,6 +366,7 @@
         <div style="display:flex;flex-direction:column;gap:10px;">
           <a href="/" style="font-size:13px;color:var(--text);text-decoration:none;font-weight:500;opacity:.7;transition:opacity .15s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.7'">Ana Sayfa</a>
           <a href="/deals" style="font-size:13px;color:var(--text);text-decoration:none;font-weight:500;opacity:.7;transition:opacity .15s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.7'">Fırsatlar</a>
+          <a href="/dipte" style="font-size:13px;color:var(--text);text-decoration:none;font-weight:500;opacity:.7;transition:opacity .15s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.7'">Şu An Dipte</a>
           <a href="/blog" style="font-size:13px;color:var(--text);text-decoration:none;font-weight:500;opacity:.7;transition:opacity .15s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.7'">Blog</a>
           <a href="/faq" style="font-size:13px;color:var(--text);text-decoration:none;font-weight:500;opacity:.7;transition:opacity .15s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='.7'">SSS</a>
         </div>
@@ -364,6 +391,8 @@
           <span style="font-size:13px;color:var(--muted);font-weight:500;">🔴 Trendyol</span>
           <span style="font-size:13px;color:var(--muted);font-weight:500;">🟣 N11</span>
           <span style="font-size:13px;color:var(--muted);font-weight:500;">🟡 Hepsiburada</span>
+          <span style="font-size:13px;color:var(--muted);font-weight:500;">🟤 Karaca</span>
+          <span style="font-size:13px;color:var(--muted);font-weight:500;">⚫ Beymen</span>
         </div>
       </div>
 

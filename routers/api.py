@@ -1,8 +1,10 @@
 """Scraper API: pending-jobs, webhook, dispatch mantığı, public API, health."""
+import asyncio
 import json
 import logging
 import os
 import time
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +13,8 @@ from pydantic import BaseModel
 from affiliate import make_short_slug
 from db import get_db
 from email_utils import send_price_alert
+from price_rules import (YOYO_CONFIRM_HOURS, DealDecision, evaluate_drop, is_price_sane, is_yoyo,
+                         min_discount_for)
 from telegram_pub import notify_pending_approval, notify_approved_deal_update
 
 from .deps import now_str, require_admin
@@ -92,7 +96,69 @@ async def scrape_and_save(product_id: int, url: str, platform: str):
     db.commit()
 
 
+def _price_points(db, product_id: int, days: int = 75) -> list:
+    """Son `days` günün fiyat değişimleri + o pencereden önceki son fiyat
+    (price_history sadece değişimleri tutar; pencere başındaki fiyat için gerekli)."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    before = db.execute(
+        "SELECT scraped_at, price_value FROM price_history WHERE product_id=? AND scraped_at<? "
+        "ORDER BY scraped_at DESC LIMIT 1", (product_id, cutoff)
+    ).fetchall()
+    rows = db.execute(
+        "SELECT scraped_at, price_value FROM price_history WHERE product_id=? AND scraped_at>=? "
+        "ORDER BY scraped_at ASC", (product_id, cutoff)
+    ).fetchall()
+    return [(r["scraped_at"], r["price_value"]) for r in list(before) + list(rows)]
+
+
+def _product_platform(db, product_id: int) -> str | None:
+    row = db.execute("SELECT platform FROM products WHERE id=?", (product_id,)).fetchone()
+    return row["platform"] if row else None
+
+
+def _to_dt(s: str) -> datetime:
+    return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+
+
+# Fiyat doğrulama: şüpheli fiyat kaydedilmez, ürün hemen yeniden taranır; aynı fiyat
+# ikinci kez gelirse gerçek kabul edilir. {product_id: (şüpheli_fiyat, deneme_sayısı)}
+_PRICE_SUSPECTS: dict = {}
+_MAX_SUSPECT_RETRIES = 3
+
+
+def _check_price_sanity(db, product_id: int, price: float, now: str) -> bool:
+    """False → fiyat kaydedilmemeli (yeniden tarama kuyruğa alındı ya da vazgeçildi)."""
+    ok, med = is_price_sane(_price_points(db, product_id, 30), price, _to_dt(now))
+    if ok:
+        _PRICE_SUSPECTS.pop(product_id, None)
+        return True
+    prev = _PRICE_SUSPECTS.get(product_id)
+    if prev and abs(prev[0] - price) / max(price, 1) < 0.05:
+        log.warning(f"[webhook] ✔ #{product_id} şüpheli fiyat {price} tekrar okundu — gerçek kabul edildi (medyan={med:.2f})")
+        _PRICE_SUSPECTS.pop(product_id, None)
+        return True
+    tries = (prev[1] + 1) if prev else 1
+    if tries > _MAX_SUSPECT_RETRIES:
+        log.warning(f"[webhook] ✖ #{product_id} {tries-1} kez tutarsız şüpheli fiyat — bu tur atlandı")
+        _PRICE_SUSPECTS.pop(product_id, None)
+        return False
+    _PRICE_SUSPECTS[product_id] = (price, tries)
+    log.warning(f"[webhook] ⚠ #{product_id} şüpheli fiyat {price} (30g medyan={med:.2f}) — kaydedilmedi, yeniden taranacak")
+    prod = db.execute("SELECT source_url, platform FROM products WHERE id=?", (product_id,)).fetchone()
+    db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
+    # Beymen'i Windows scraper taramaz (beymen_sync.py liste sayfasından günde bir) —
+    # yeniden tarama kuyruğu yerine ertesi günkü eşitleme fiyatı teyit eder
+    if prod and prod["platform"] != "beymen":
+        db.execute(
+            "INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',-1,?)",
+            (product_id, prod["source_url"], prod["platform"], now)
+        )
+    db.commit()
+    return False
+
+
 def _smart_price_analysis(db, product_id: int, price: float, prev_price: float):
+    # KULLANILMIYOR (2026-09-30): yerini price_rules.evaluate_drop aldı (30 gün kuralı).
     rows = db.execute(
         "SELECT price_value, scraped_at FROM price_history "
         "WHERE product_id=? AND scraped_at::timestamp >= NOW() - INTERVAL '90 days' "
@@ -213,14 +279,30 @@ def _close_expired_deals(db, product_id: int, price: float, now: str):
 
 
 async def _process_deal(db, product_id: int, price: float, prev_price_stable: float,
-                        data: dict, now: str) -> bool:
-    """Deal oluşturma/güncelleme mantığı. False döndürürse caller erken çıkmalı."""
-    is_deal, old_price, reason = _smart_price_analysis(db, product_id, price, prev_price_stable)
-    if not is_deal:
-        log.info(f"[webhook] ⏭ #{product_id} deal degil: {reason}")
+                        data: dict, now: str, decision: DealDecision = None) -> bool:
+    """Deal oluşturma/güncelleme mantığı. False döndürürse caller erken çıkmalı.
+
+    Fırsat kuralı (price_rules.evaluate_drop): fiyat son 30 günün en düşük fiyatının
+    altına inmeli ve 30 günlük (süre ağırlıklı) medyana göre en az %10 ucuz olmalı
+    (platforma özel eşik: price_rules.PLATFORM_MIN_DISCOUNT_PCT — Karaca %3).
+    old_price = 30 günlük medyan → gösterilen indirim oranı gerçek indirim.
+    Yo-yo ürünlerde fırsat hemen açılmaz; fiyat YOYO_CONFIRM_HOURS sabit kalınca
+    _maybe_confirm_yoyo_deal açar."""
+    platform = _product_platform(db, product_id)
+    min_pct = min_discount_for(platform)   # Karaca %3, diğerleri %10
+    if decision is None:
+        points = _price_points(db, product_id)
+        decision = evaluate_drop(points, price, _to_dt(now), min_pct)
+        if decision.is_deal and is_yoyo(points, _to_dt(now)):
+            log.info(f"[webhook] ⏳ #{product_id} yo-yo ürün — %{decision.pct:.1f} düşüş "
+                     f"{YOYO_CONFIRM_HOURS} saat sabit kalırsa fırsat olacak")
+            return False
+    if not decision.is_deal:
+        log.info(f"[webhook] ⏭ #{product_id} deal degil: {decision.reason}")
         return False
 
-    pct = (old_price - price) / old_price * 100
+    old_price = round(decision.ref_price, 2)
+    pct = decision.pct
     stock = data.get("stock", "")
 
     if pct > 90:
@@ -229,7 +311,7 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
     if stock != "Stokta Var" and pct > 75:
         log.warning(f"[webhook] ⚠ #{product_id} %{pct:.0f} indirim + stok={stock!r} şüpheli, atlandı")
         return True
-    if pct < 5:
+    if pct < min(5, min_pct):
         return True
 
     already_published = db.execute("""
@@ -351,6 +433,33 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
     return True
 
 
+async def _maybe_confirm_yoyo_deal(db, product_id: int, price: float, since: str,
+                                   data: dict, now: str) -> None:
+    """Yo-yo ürün: düşük fiyat `since`'ten beri YOYO_CONFIRM_HOURS sabit kaldıysa fırsatı
+    şimdi aç. Pencere, fiyatın ilk göründüğü andan ÖNCEKİ 30 gün (kendi kaydı hariç)."""
+    try:
+        first_seen = _to_dt(since)
+        now_dt = _to_dt(now)
+        if now_dt - first_seen < timedelta(hours=YOYO_CONFIRM_HOURS):
+            return
+        points = _price_points(db, product_id)
+        if not is_yoyo(points, first_seen):
+            return   # yo-yo değilse fırsat kararı zaten fiyat ilk geldiğinde verildi
+        already = db.execute(
+            "SELECT 1 FROM deals WHERE product_id=? AND new_price=? AND created_at>=? LIMIT 1",
+            (product_id, price, since)
+        ).fetchone()
+        if already:
+            return
+        decision = evaluate_drop(points, price, first_seen, min_discount_for(_product_platform(db, product_id)))
+        if not decision.is_deal:
+            return
+        log.info(f"[webhook] ✔ #{product_id} yo-yo fiyatı {YOYO_CONFIRM_HOURS}+ saat sabit kaldı — fırsat açılıyor")
+        await _process_deal(db, product_id, price, None, data, now, decision=decision)
+    except Exception as e:
+        log.warning(f"[webhook] yo-yo onay hatası #{product_id}: {e}")
+
+
 async def _save_scraped_data(product_id: int, data: dict):
     """Scraping sonucunu işle: fiyat geçmişi, deal yönetimi, Telegram + email bildirimleri."""
     db = get_db()
@@ -379,13 +488,19 @@ async def _save_scraped_data(product_id: int, data: dict):
     db.execute("UPDATE products SET oos_count=0 WHERE id=? AND oos_count>0", (product_id,))
 
     recent_rows = db.execute(
-        "SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 3",
+        "SELECT price_value, scraped_at FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 3",
         (product_id,)
     ).fetchall()
 
     if recent_rows and recent_rows[0]["price_value"] == price:
+        _PRICE_SUSPECTS.pop(product_id, None)
+        await _maybe_confirm_yoyo_deal(db, product_id, price, recent_rows[0]["scraped_at"], data, now)
         db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
         db.commit()
+        return
+
+    # Fiyat doğrulama: 30 günlük medyanın 4 katı dışı → kaydetme, yeniden tara
+    if not _check_price_sanity(db, product_id, price, now):
         return
 
     db.execute(
@@ -445,6 +560,11 @@ async def _save_scraped_data_async(product_id, data, url, platform):
         # Hata varsa scraper_errors tablosuna kaydet + 100 eşiği kontrolü
         # OOS (stok yok) durumu hata DEĞİL — error field yoksa loglanmaz
         err = data.get("error")
+        # Boş sonuç (fiyat da hata da yok — çoğunlukla captcha/blok): eskiden sessizce
+        # yutuluyordu; hata olarak kaydet ki izlenebilsin ve scheduler (adım 2) hiç
+        # fiyatı alınamamış ürünü öncelikle yeniden denesin.
+        if not err and not (data.get("price") and data.get("price") > 0) and not _is_oos(data.get("stock")):
+            err = "bos_yanit: fiyat alinamadi (captcha/blok olabilir)"
         if err and not _is_oos(data.get("stock")):
             try:
                 db = get_db()
@@ -525,7 +645,7 @@ async def pending_jobs(request: Request):
             extra_vals.append(int(priority_param))
         except (ValueError, TypeError):
             pass
-    _KNOWN = {"amazon", "trendyol", "hepsiburada", "n11"}
+    _KNOWN = {"amazon", "trendyol", "hepsiburada", "n11", "karaca"}
     platform_param = request.query_params.get("platform", "")
     if platform_param in _KNOWN:
         extra_conds.append("p.platform = ?")
@@ -550,6 +670,11 @@ async def pending_jobs(request: Request):
             [now_str()] + sq_ids
         )
         db.commit()
+    # Mevcut tarama turunun kimliği (scheduler.py yeni tur başlatınca değişir).
+    # Scraper bunu izleyip tur başa döndüğünde çerezlerini temizliyor. Gövde
+    # yerine başlıkta: eski scraper sürümleri liste formatını bekliyor.
+    round_row = db.execute("SELECT value FROM settings WHERE key='scan_round_started_at'").fetchone()
+    headers = {"X-Scan-Round": round_row["value"]} if round_row and round_row["value"] else None
     return JSONResponse([{
         "product_id": r["product_id"],
         "url": r["source_url"],
@@ -558,7 +683,7 @@ async def pending_jobs(request: Request):
         "last_seen_at": r["last_seen_at"],
         "price_only": r["priority"] == 1 or r["has_metadata"] == 1,
         "cached_image": r["cached_image"] or "",
-    } for r in rows])
+    } for r in rows], headers=headers)
 
 
 @router.post("/api/reset-stale-jobs")
@@ -629,7 +754,9 @@ async def scraper_monitor(request: Request):
     """Scraper sağlık durumu: son tarama zamanı, hata oranı, IP blok tespiti."""
     require_admin(request)
     db = get_db()
-    platforms = ["amazon", "trendyol", "hepsiburada", "n11"]
+    platforms = ["amazon", "trendyol", "hepsiburada", "n11", "karaca", "beymen"]
+    # Günde bir çalışan eşitleme işleri: (platform → settings'teki son çalışma anahtarı)
+    daily_jobs = {"karaca": "karaca_discovery_at", "beymen": "beymen_sync_at"}
     result = {}
 
     for p in platforms:
@@ -738,6 +865,26 @@ async def scraper_monitor(request: Request):
 
     for p in platforms:
         result[p]["errors_1h"] = errors_1h.get(p, 0)
+
+    import sync_status
+    for p, key in daily_jobs.items():
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        last_run = row["value"] if row else None
+        next_run = None
+        if last_run:
+            try:
+                next_run = (_to_dt(last_run) + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+        result[p]["daily_sync"] = {
+            "last_run": last_run,
+            "next_run": next_run,
+            "products": db.execute("SELECT COUNT(*) FROM products WHERE platform=?", (p,)).fetchone()[0],
+            # Beymen tamamen eşitlemeyle güncellenir (Windows scraper'ı yok); Karaca'nın
+            # fiyatları Windows scraper'ından, eşitleme sadece yeni ürün keşfi
+            "mode": "full" if p == "beymen" else "discovery",
+            "status": sync_status.get_status(p),
+        }
 
     result["_meta"] = {
         "alive": (any_alive["cnt"] > 0) if any_alive else False,
