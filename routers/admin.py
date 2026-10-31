@@ -27,7 +27,23 @@ router = APIRouter(dependencies=[Depends(require_csrf)])
 BULK_ADD_LIMIT = 200
 
 
-def _delete_product_cascade(db, product_id: int) -> None:
+DELETE_REASONS = {
+    "stok_yok": "Stok yok", "kaldirildi": "Satıştan kaldırıldı", "olu_link": "Ölü link",
+    "cok_hata": "Çok hata", "hatali_link": "Hatalı link (toplu)", "manuel": "Manuel",
+}
+
+
+def _delete_product_cascade(db, product_id: int, reason: str = "manuel") -> None:
+    # Silmeden önce iz bırak (admin "Silinen (24s)" kartı). Kayıt atılamazsa
+    # (ör. migration henüz çalışmamış) db sarmalayıcısı işlemi geri alır; silme
+    # yine de yapılır — ürün zaten silineceği için kaybolan önceki adım önemsiz.
+    try:
+        db.execute(
+            "INSERT INTO deleted_products(product_id, platform, title, source_url, reason, deleted_at) "
+            "SELECT id, platform, title, source_url, ?, ? FROM products WHERE id=?",
+            (reason, now_str(), product_id))
+    except Exception as e:
+        log.warning(f"[delete] silme kaydı atılamadı #{product_id}: {e}")
     db.execute("DELETE FROM short_links WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
     db.execute("DELETE FROM clicks WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
     db.execute("DELETE FROM deal_publish_log WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
@@ -60,9 +76,20 @@ async def admin_panel(request: Request, q: str = ""):
         (SELECT COUNT(*) FROM articles) as articles,
         (SELECT COUNT(*) FROM product_groups) as groups,
         (SELECT COUNT(*) FROM link_queue WHERE status='pending') as pending_links,
-        (SELECT COUNT(*) FROM scan_queue WHERE status='dead') as dead_queue,
         (SELECT COUNT(*) FROM scraper_errors WHERE occurred_at::timestamp > NOW() - INTERVAL '24 hours') as errors_24h
     """).fetchone()
+    # "Dead URL" kartı yerine (ölü linkler anında silindiği için hep 0'dı):
+    # son 24 saatte silinen ürünler ve neden dağılımı.
+    deleted_24h, deleted_reasons = 0, []
+    try:
+        for r in db.execute(
+            "SELECT reason, COUNT(*) AS c FROM deleted_products "
+            "WHERE deleted_at::timestamp > NOW() - INTERVAL '24 hours' GROUP BY reason ORDER BY c DESC"
+        ).fetchall():
+            deleted_24h += r["c"]
+            deleted_reasons.append((DELETE_REASONS.get(r["reason"], r["reason"]), r["c"]))
+    except Exception:
+        pass
     pending_links = db.execute("""
         SELECT lq.*, u.username FROM link_queue lq
         LEFT JOIN users u ON lq.user_id = u.id
@@ -143,6 +170,7 @@ async def admin_panel(request: Request, q: str = ""):
         "daily_labels": daily_labels, "daily_values": daily_values,
         "search_q": q, "pending_links": pending_links,
         "scraper_errors": scraper_errors, "bulk_result": bulk_result,
+        "deleted_24h": deleted_24h, "deleted_reasons": deleted_reasons,
     })
 
 
@@ -298,7 +326,7 @@ async def admin_remove_from_group(group_id: int, product_id: int, request: Reque
 async def admin_delete_product(product_id: int, request: Request):
     require_admin(request)
     db = get_db()
-    _delete_product_cascade(db, product_id)
+    _delete_product_cascade(db, product_id, "manuel")
     return RedirectResponse("/admin", status_code=302)
 
 
@@ -338,7 +366,7 @@ async def admin_delete_errored_products(request: Request):
 
     all_ids = list(set(dead_ids + error_ids))
     for pid in all_ids:
-        _delete_product_cascade(db, pid)
+        _delete_product_cascade(db, pid, "hatali_link")
 
     return JSONResponse({"deleted": len(all_ids)})
 

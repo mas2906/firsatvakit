@@ -271,7 +271,7 @@ def _handle_out_of_stock(db, product_id: int, price: float, now: str):
     if oos >= limit:
         log.info(f"[webhook] 🗑 Ürün #{product_id} {oos} kez stok yok — siliniyor")
         from .admin import _delete_product_cascade
-        _delete_product_cascade(db, product_id)
+        _delete_product_cascade(db, product_id, "stok_yok")
     else:
         db.execute("UPDATE products SET oos_count=? WHERE id=?", (oos, product_id))
         db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
@@ -548,7 +548,7 @@ def _auto_delete_if_over_limit(db, product_id: int, platform: str, threshold: in
         if count >= threshold:
             log.warning(f"[webhook] 🗑 Ürün #{product_id} ({platform}) {count} hata — otomatik siliniyor")
             from .admin import _delete_product_cascade
-            _delete_product_cascade(db, product_id)
+            _delete_product_cascade(db, product_id, "cok_hata")
             return True
     except Exception as ex:
         log.error(f"[webhook] auto-delete kontrol hatası #{product_id}: {ex}")
@@ -567,7 +567,7 @@ def _delete_if_removed(db, product_id: int, platform: str, confirmations: int = 
         if row and row["cnt"] >= confirmations:
             log.warning(f"[webhook] 🗑 Ürün #{product_id} ({platform}) satıştan kaldırılmış ({row['cnt']} teyit) — siliniyor")
             from .admin import _delete_product_cascade
-            _delete_product_cascade(db, product_id)
+            _delete_product_cascade(db, product_id, "kaldirildi")
             return True
     except Exception as ex:
         log.error(f"[webhook] kaldırıldı kontrol hatası #{product_id}: {ex}")
@@ -581,7 +581,7 @@ async def _save_scraped_data_async(product_id, data, url, platform):
             db = get_db()
             log.warning(f"[webhook] ☠ Ürün #{product_id} ({platform}) dead_url — anında siliniyor")
             from .admin import _delete_product_cascade
-            _delete_product_cascade(db, product_id)
+            _delete_product_cascade(db, product_id, "olu_link")
         except Exception as e:
             log.error(f"[webhook-bg] dead_url sil hatası #{product_id}: {e}")
         return
