@@ -21,7 +21,7 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, _warmup_navigation
+from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, already_on
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.amazon")
@@ -97,28 +97,54 @@ def _parse_price_soup(soup: BeautifulSoup) -> Optional[float]:
         "#corePriceDisplay_mobile_feature_div .a-offscreen",
         "#priceblock_ourprice",
         "#priceblock_dealprice",
+        # Varyantı (beden/ölçü) seçilmemiş sayfa: satın alma kutusu "Satın almak için
+        # Ölçü seçin" diyor, fiyat sadece #apex_desktop'ta (ve a-text-price sınıflı).
+        # Fiyat ARALIĞI ise (1.699 TL - 2.399 TL) alınmaz — hangi varyant belli değil.
+        "#apex_desktop .apexPriceToPay .a-offscreen",
+        "#apex_desktop .priceToPay .a-offscreen",
     ]:
         el = soup.select_one(sel)
         if el:
+            if sel.startswith("#apex_desktop") and _az_is_range(soup.select_one("#apex_desktop")):
+                continue
             v = parse_price_tr_clean(el.get_text(strip=True))
             if v:
                 return v
 
-    # Whole + fraction (bazı sayfalar .a-offscreen kullanmaz)
-    container = soup.select_one(
-        "#corePriceDisplay_desktop_feature_div, #corePriceDisplay_mobile_feature_div, "
-        "#corePrice_feature_div, #apex_offerDisplay_desktop, #mobile-buybox, #buybox"
-    )
-    if container:
-        whole = container.select_one("span.a-price-whole")
-        frac  = container.select_one("span.a-price-fraction")
-        if whole:
-            w = whole.get_text(strip=True).replace(".", "").replace(",", "")
-            f = (frac.get_text(strip=True) if frac else "00").strip()
-            if w.isdigit():
-                return parse_price_tr_clean(f"{w},{f} TL")
+    # Whole + fraction: Amazon'un yeni ("reinvent") fiyat düzeninde .a-offscreen boş
+    # geliyor, fiyat sadece a-price-whole + a-price-fraction'da. Kutular öncelik
+    # sırasıyla TEK TEK denenir — eskiden virgüllü tek seçici sayfada ilk çıkan
+    # #buybox'ı alıyor, asıl fiyat kutusuna hiç bakmıyordu (2026-10-31, #48570).
+    for cid in ("#corePriceDisplay_desktop_feature_div", "#corePriceDisplay_mobile_feature_div",
+                "#corePrice_feature_div", "#apex_offerDisplay_desktop", "#apex_desktop",
+                "#mobile-buybox", "#buybox"):
+        container = soup.select_one(cid)
+        if not container or _az_is_range(container):
+            continue
+        price_el = (container.select_one(".apexPriceToPay, .priceToPay")
+                    or container.select_one(".a-price:not(.a-text-price)")
+                    or container)
+        whole = price_el.select_one("span.a-price-whole")
+        if not whole:
+            continue
+        frac = price_el.select_one("span.a-price-fraction")
+        w = whole.get_text(strip=True).replace(".", "").replace(",", "")
+        f = (frac.get_text(strip=True) if frac else "00").strip()
+        if w.isdigit():
+            v = parse_price_tr_clean(f"{w},{f} TL")
+            if v:
+                return v
 
     return None
+
+
+def _az_is_range(el) -> bool:
+    """Varyant seçilmemiş sayfalardaki '1.699,00 TL - 2.399,00 TL' fiyat aralığı."""
+    if el is None:
+        return False
+    if el.select_one(".a-price-range"):
+        return True
+    return bool(re.search(r"\d\s*TL\s*[-–]\s*\d", el.get_text(" ", strip=True)))
 
 
 def _parse_was_price_soup(soup: BeautifulSoup) -> Optional[float]:
@@ -395,6 +421,13 @@ def _az_parse(html: str) -> Optional[dict]:
             except Exception:
                 pass
 
+    # Sadece "İkinci El" (Amazon Depo vb.) teklif var, yeni ürün satılmıyor: fiyat
+    # kutusundaki tutar kullanılmış ürünün fiyatı — yeni ürün fiyatı diye kaydedilirse
+    # sahte "indirim" üretir (2026-10-31, #48570 Apple Watch: 13.774 TL ikinci el).
+    if (soup.select_one("#usedBuySection")
+            and not soup.select_one("#newAccordionRow, #newAccordionRow_0, #buyNew_noncbb, #add-to-cart-button")):
+        stock = "Stok Yok"
+
     # ── 3) Fiyat (stok yoksa atla — referans mantığı) ────────────────────
     price = None
     if stock != "Stok Yok":
@@ -551,11 +584,14 @@ def _az_parse(html: str) -> Optional[dict]:
 
 # ── Katman 0: Playwright ───────────────────────────────────────────────────────
 async def _az_pw_handler(page, url: str) -> Optional[dict]:
-    await _warmup_navigation(page, "https://www.amazon.com.tr")
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        pass
+    # crawlee ürün sayfasını zaten açtı. Eskiden burada ana sayfaya "ısınma"
+    # gidip ürünü YENİDEN açıyordu — 3 navigasyon, ürün başı ~50sn; yük altında
+    # 65sn sınırını aşıp "veri yok" dönüyordu (2026-10-31 log analizi).
+    if not already_on(page, url):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
     try:
         await page.wait_for_selector(
             "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
