@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Optional
 
-from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, _warmup_navigation
+from scrapers.crawlee_base import price_filter, crawlee_pw_scrape
 from scrapers.utils import parse_price_tr_clean
 
 log = logging.getLogger("scraper.trendyol")
@@ -278,10 +278,9 @@ async def _ty_via_api(url: str) -> Optional[dict]:
 
 
 async def _ty_pw_handler(page, url: str) -> Optional[dict]:
-    # XHR intercept listener'ı takmadan önce ısınma navigasyonu yap — aksi
-    # halde ana sayfadaki alakasız istekler _on_response'a düşüp gürültü yapar.
-    await _warmup_navigation(page, "https://www.trendyol.com")
-
+    # Ana sayfa "ısınma" navigasyonu kaldırıldı (2026-10-31): crawlee ürünü zaten
+    # önce açtığı için ısınma hep üründen SONRA oluyordu, ürün başı ~15-20sn boşa.
+    # Aşağıdaki goto XHR intercept için gerekli (listener açılıştan önce takılmalı).
     _api_json: list = []
 
     async def _on_response(resp):
@@ -296,10 +295,27 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
 
     page.on("response", _on_response)
 
+    resp = None
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=38000)
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=38000)
     except Exception:
         pass
+
+    # Kaldırılmış ürün: yalnızca SUNUCU sinyali (HTTP 404/410 ya da sunucu tarafı
+    # yönlendirmeyle ürün kodu olmayan sayfaya gidiş). Eskiden Trendyol'da hiç
+    # tespit yoktu, kaldırılan ürün her taramada "veri yok" kalıyordu. "removed"
+    # olarak bildirilir → VPS ikinci teyitte siler (tek sinyalle değil; istemci
+    # tarafı page.url kontrolü bir kez canlı ürünleri sildirmişti).
+    if resp is not None:
+        if resp.status in (404, 410):
+            log.info(f"[trendyol/pw] HTTP {resp.status} → kaldırılmış ürün: {url[:70]}")
+            return {"removed": True, "final_url": f"HTTP {resp.status}"}
+        cid = re.search(r"-p-(\d+)", url)
+        if (cid and resp.request.redirected_from is not None
+                and f"-p-{cid.group(1)}" not in (resp.url or "")):
+            log.info(f"[trendyol/pw] yönlendirme → kaldırılmış ürün: {resp.url[:70]}")
+            return {"removed": True, "final_url": resp.url}
+
     try:
         await page.wait_for_selector(
             ".prc-dsc, [data-testid='current-price'], [class*='product-price']",
@@ -331,7 +347,30 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
     data = _ty_parse_html(html)
     if data and data.get("price"):
         log.info(f"[trendyol/pw] ✔(html) price={data.get('price')}")
+        return data
+
+    # Tükenmiş ürün: sayfa "Tükendi / Gelince Haber Ver" gösteriyor ama fiyat
+    # okunamadığı için "veri yok" dönüyordu, ürün hiç silinmiyordu. Sunucunun
+    # gömülü ürün verisindeki inStock alanı kesin sinyal ("Tükendi" metinleri ise
+    # arayüz çeviri sözlüğünden geliyor, her sayfada var — onlara bakılmaz).
+    shared = _ty_shared_product(html)
+    if shared and shared.get("inStock") is False:
+        log.info(f"[trendyol/pw] inStock=false → Stok Yok: {url[:70]}")
+        return {"price": None, "stock": "Stok Yok", "title": shared.get("name")}
     return data
+
+
+def _ty_shared_product(html: str) -> Optional[dict]:
+    """window["__envoy__SHARED_PROPS"] = {"product": {...}} — ana ürünün sunucu verisi."""
+    m = re.search(r'window\["__envoy__SHARED_PROPS"\]\s*=\s*', html or "")
+    if not m:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(html[m.end():])
+    except Exception:
+        return None
+    p = obj.get("product") if isinstance(obj, dict) else None
+    return p if isinstance(p, dict) else None
 
 
 async def scrape_trendyol(url: str, price_only: bool = False,

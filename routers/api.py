@@ -238,6 +238,14 @@ def _is_oos(stock: str) -> bool:
     return stock == "Stok Yok" or any(kw in stock.lower() for kw in _OOS_KEYWORDS)
 
 
+# Varsayılan 1: ilk "stok yok"ta sil. İstisnalar:
+#  amazon 2      — ayrıştırıcı stok bilgisi bulamazsa "Stok Yok" varsayıyor
+#  hepsiburada 3 — aynı ürün dakikalar içinde satıcısız/satıcılı gidip geliyor
+#                  (#2322: 20:27 stok yok, 20:28 29.999 TL); fiyat gelince sayaç sıfırlanır
+#  beymen 3      — beymen_sync'in tasarımı; günlük liste eşitlemesi silineni geri ekliyor
+OOS_DELETE_AFTER = {"amazon": 2, "hepsiburada": 3, "beymen": 3}
+
+
 def _handle_out_of_stock(db, product_id: int, price: float, now: str):
     prev_s = db.execute(
         "SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
@@ -254,10 +262,14 @@ def _handle_out_of_stock(db, product_id: int, price: float, now: str):
         db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?", (now, d["id"]))
         log.info(f"[webhook] ⏹ Deal #{d['id']} kapatıldı — stok yok")
 
-    row = db.execute("SELECT oos_count FROM products WHERE id=?", (product_id,)).fetchone()
+    row = db.execute("SELECT oos_count, platform FROM products WHERE id=?", (product_id,)).fetchone()
     oos = (row["oos_count"] or 0) + 1 if row else 1
-    if oos >= 3:
-        log.info(f"[webhook] 🗑 Ürün #{product_id} üst üste 3 kez stok yok — siliniyor")
+    # 2026-10-31 kullanıcı isteği: stoğu olmayan ürün silinsin (eskiden 3 teyit).
+    # Amazon'un ayrıştırıcısı stok bilgisini bulamazsa "Stok Yok" varsayıyor —
+    # tek bir bozuk sayfa canlı ürünü sildirmesin diye orada 2 teyit.
+    limit = OOS_DELETE_AFTER.get(row["platform"] if row else "", 1)
+    if oos >= limit:
+        log.info(f"[webhook] 🗑 Ürün #{product_id} {oos} kez stok yok — siliniyor")
         from .admin import _delete_product_cascade
         _delete_product_cascade(db, product_id)
     else:
@@ -543,6 +555,25 @@ def _auto_delete_if_over_limit(db, product_id: int, platform: str, threshold: in
     return False
 
 
+def _delete_if_removed(db, product_id: int, platform: str, confirmations: int = 2) -> bool:
+    """Scraper ürünün satıştan kaldırıldığını (HTTP yönlendirmesiyle kategori/arama
+    sayfasına gidiyor) son 14 günde en az iki kez gördüyse cascade sil. Tek sinyalle
+    silinmez — bkz. eski yanlış-pozitif dead_url vakası."""
+    try:
+        row = db.execute(
+            "SELECT COUNT(*) as cnt FROM scraper_errors WHERE product_id=? AND error_msg LIKE 'kaldirildi%' "
+            "AND occurred_at::timestamp > now() - interval '14 days'", (product_id,)
+        ).fetchone()
+        if row and row["cnt"] >= confirmations:
+            log.warning(f"[webhook] 🗑 Ürün #{product_id} ({platform}) satıştan kaldırılmış ({row['cnt']} teyit) — siliniyor")
+            from .admin import _delete_product_cascade
+            _delete_product_cascade(db, product_id)
+            return True
+    except Exception as ex:
+        log.error(f"[webhook] kaldırıldı kontrol hatası #{product_id}: {ex}")
+    return False
+
+
 async def _save_scraped_data_async(product_id, data, url, platform):
     # dead_url → ürün kalıcı olarak ölmüş, anında sil
     if data.get("error") == "dead_url":
@@ -564,7 +595,7 @@ async def _save_scraped_data_async(product_id, data, url, platform):
         # yutuluyordu; hata olarak kaydet ki izlenebilsin ve scheduler (adım 2) hiç
         # fiyatı alınamamış ürünü öncelikle yeniden denesin.
         if not err and not (data.get("price") and data.get("price") > 0) and not _is_oos(data.get("stock")):
-            err = "bos_yanit: fiyat alinamadi (captcha/blok olabilir)"
+            err = "bos_yanit: fiyat okunamadi"
         if err and not _is_oos(data.get("stock")):
             try:
                 db = get_db()
@@ -573,6 +604,8 @@ async def _save_scraped_data_async(product_id, data, url, platform):
                     (product_id, platform, url, str(err), now_str())
                 )
                 db.commit()
+                if str(err).startswith("kaldirildi") and _delete_if_removed(db, product_id, platform):
+                    return
                 _auto_delete_if_over_limit(db, product_id, platform)
             except Exception:
                 pass
@@ -775,10 +808,14 @@ async def scraper_monitor(request: Request):
             (p,)
         ).fetchone()
 
-        # CAPTCHA/block özelinde sayı
+        # CAPTCHA/block özelinde sayı. bos_yanit (fiyat okunamadı) ve kaldirildi
+        # hariç: eskiden bos_yanit mesajı "(captcha/blok olabilir)" içerdiği için
+        # tükenmiş/kaldırılmış her ürün "blok" sayılıyor, panel yanlışlıkla
+        # "IP BLOK" gösteriyordu (2026-10-31).
         block_30m = db.execute(
             "SELECT COUNT(*) as cnt FROM scraper_errors WHERE platform=? "
             "AND occurred_at::timestamp >= NOW() - INTERVAL '30 minutes' "
+            "AND error_msg NOT LIKE 'bos_yanit%' AND error_msg NOT LIKE 'kaldirildi%' "
             "AND (LOWER(error_msg) LIKE '%captcha%' OR LOWER(error_msg) LIKE '%block%' "
             "OR LOWER(error_msg) LIKE '%429%' OR LOWER(error_msg) LIKE '%forbidden%')",
             (p,)
@@ -823,16 +860,23 @@ async def scraper_monitor(request: Request):
     # bir sort'a yol açıyordu) değil, en yeni 3000 satıra uygulanır. 3000,
     # en düşük hacimli platformun (trendyol) derinliğinin (~230) kat kat
     # üzerinde güvenli bir marj.
+    # 2026-10-31: price_history yerine products.last_seen_at — price_history'e
+    # yalnızca fiyat DEĞİŞİNCE satır yazılıyor, fiyatı aynı kalan başarılı
+    # taramalar listede hiç görünmüyordu. last_seen_at her başarılı taramada
+    # güncellenir; fiyat o ürünün son bilinen fiyatı.
     recent_ok = db.execute("""
-        SELECT scraped_at, price_value, title, platform, product_id
+        SELECT r.scraped_at, r.title, r.platform, r.product_id,
+               (SELECT h.price_value FROM price_history h WHERE h.product_id = r.product_id
+                ORDER BY h.id DESC LIMIT 1) AS price_value
         FROM (
-            SELECT ph.scraped_at, ph.price_value, p.title, p.platform, p.id as product_id,
-                   ROW_NUMBER() OVER (PARTITION BY p.platform ORDER BY ph.id DESC) as rn
-            FROM (SELECT * FROM price_history ORDER BY id DESC LIMIT 3000) ph
-            JOIN products p ON p.id = ph.product_id
-        ) ranked
-        WHERE rn <= 5
-        ORDER BY scraped_at DESC LIMIT 20
+            SELECT p.last_seen_at AS scraped_at, p.title, p.platform, p.id AS product_id,
+                   ROW_NUMBER() OVER (PARTITION BY p.platform ORDER BY p.last_seen_at DESC) AS rn
+            FROM (SELECT id, title, platform, last_seen_at FROM products
+                  WHERE last_seen_at IS NOT NULL AND platform <> 'beymen'
+                  ORDER BY last_seen_at DESC LIMIT 400) p
+        ) r
+        WHERE r.rn <= 5
+        ORDER BY r.scraped_at DESC LIMIT 20
     """).fetchall()
 
     # Son 20 hata (aktivite akışı)
