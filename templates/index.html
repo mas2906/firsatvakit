@@ -1,120 +1,166 @@
 {% extends "base.html" %}
 
-{% from "_fv_card.html" import fv_card %}
+{% from "_fv_card.html" import fv_card, fv_hero_slide %}
 
 {% block content %}
-<div class="fv-layout">
-
-  <div class="fv-main">
-    {% if q %}
-    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-      <h1 style="margin:0;font-size:22px;font-weight:800;color:var(--fv-ink);">“{{ q }}” için {{ total_cards }} ürün</h1>
-      <a href="/" style="font-size:14px;font-weight:600;color:var(--fv-sub);">Aramayı temizle</a>
-    </div>
-    {% else %}
-    <h1 style="margin:0;font-size:22px;font-weight:800;color:var(--fv-ink);">
-      {% if platform %}{{ stores[platform] }} indirimleri ve günün fırsatları{% else %}Anlık indirimler ve günün fırsatları{% endif %}
-    </h1>
-    <div class="fv-tabs">
-      <div class="fv-tablist" role="tablist">
-        {% for key, label in tabs %}
-        <a role="tab" aria-selected="{{ 'true' if tab == key else 'false' }}" class="fv-tab{% if tab == key %} on{% endif %}"
-           href="/?tab={{ key }}{% if platform %}&platform={{ platform }}{% endif %}">{{ label }}</a>
-        {% endfor %}
+{% if hero_cards %}
+<section class="fv-hero" aria-label="Öne çıkan fırsatlar">
+  <div class="fv-hero-grid">
+    <div class="fv-hero-text">
+      {% if latest_at %}<p class="fv-live"><i aria-hidden="true"></i>Son fırsat {{ latest_at|ago }} onaylandı</p>{% endif %}
+      <h1>Gerçek indirimler, <em>fiyat geçmişiyle</em></h1>
+      <p class="fv-hero-desc">Amazon, Trendyol, Hepsiburada, N11, Karaca ve Beymen'deki fiyatları sürekli takip ediyoruz. Her indirimi ürünün kendi geçmişine göre puanlıyor, önce zamlanıp sonra "indirilen" ürünleri ayıklıyoruz.</p>
+      <form class="fv-hsearch" action="/search" method="get" role="search">
+        <label for="fv-hq" class="fv-sr">Ürün ara</label>
+        <input id="fv-hq" type="search" name="q" placeholder="Ürün, marka veya mağaza ara" minlength="2">
+        <button type="submit">Ara</button>
+      </form>
+      <div class="fv-stats">
+        {% if tracked_count %}<div><b>{{ "{:,}".format(tracked_count).replace(",", ".") }}</b><span>ürün takipte</span></div>{% endif %}
+        <div><b>{{ stores|length }}</b><span>mağaza</span></div>
+        <div><b>{{ total_all }}</b><span>yayındaki fırsat</span></div>
       </div>
-      <span class="fv-sortnote">{% if tab == 'populer' %}Sıralama: en çok tıklanan{% else %}Sıralama: FırsatVakti Puanı{% endif %}</span>
+      <div class="fv-channels">
+        <p>Yeni fırsatlar ücretsiz ve anında cebine gelsin</p>
+        <div>
+          <a class="fv-ch" href="https://t.me/firsatvakti1" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="#229ED9" aria-hidden="true"><path d="M21.9 4.3 18.6 19.8c-.2 1.1-.9 1.4-1.8.9l-5-3.7-2.4 2.3c-.3.3-.5.5-1 .5l.4-5.1 9.2-8.3c.4-.4-.1-.6-.6-.2L5.9 13.4l-4.9-1.5c-1.1-.3-1.1-1.1.2-1.6L20.4 2.9c.9-.3 1.7.2 1.5 1.4z"/></svg>Telegram</a>
+          <a class="fv-ch" href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" fill="#25D366" aria-hidden="true"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm5.3 14.1c-.2.6-1.3 1.2-1.8 1.3-.5.1-1 .1-3.3-.8-2.8-1.1-4.5-4-4.7-4.2-.1-.2-1.1-1.5-1.1-2.9s.7-2 1-2.3c.3-.3.6-.3.8-.3h.6c.2 0 .4 0 .6.5l.9 2.1c.1.2.1.4 0 .5l-.3.5-.4.5c-.2.2-.3.3-.1.6.2.3.8 1.3 1.7 2.1 1.1 1 2.1 1.3 2.4 1.5.3.1.5.1.6-.1l.9-1.1c.2-.3.4-.2.7-.1l2 1c.3.1.5.2.5.3.1.2.1.6-.1 1.3z"/></svg>WhatsApp</a>
+          <a class="fv-ch" href="/alerts">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg>Fiyat alarmı{% if alert_count %} <small>{{ alert_count }}</small>{% endif %}</a>
+        </div>
+      </div>
     </div>
-    {% endif %}
+    <section class="fv-hdeal" aria-label="Bugünün en iyi fırsatları">
+      {% for c in hero_cards %}{{ fv_hero_slide(c, loop.index0) }}{% endfor %}
+      <div class="fv-hnav">
+        <div class="fv-dots" aria-label="Fırsat seç">
+          {% for c in hero_cards %}<button type="button" data-go="{{ loop.index0 }}" aria-label="{{ loop.index }}. fırsat" aria-current="{{ 'true' if loop.first else 'false' }}"></button>{% endfor %}
+        </div>
+        <a href="#firsatlar">Tüm fırsatlar →</a>
+      </div>
+    </section>
+  </div>
+</section>
+{% endif %}
 
-    <div class="fv-chips" role="navigation" aria-label="Mağaza filtresi">
-      {% set base_url = '/search?q=' ~ (q|urlencode) ~ '&' if q else '/?tab=' ~ tab ~ '&' %}
-      <a class="fv-pchip{% if not platform %} on{% endif %}" href="{{ base_url[:-1] }}">Tümü</a>
-      {% for key, name in stores.items() %}
-      <a class="fv-pchip{% if platform == key %} on{% endif %}" href="{{ base_url }}platform={{ key }}">{{ name }}</a>
+<section class="fv-section" id="firsatlar">
+  {% if q %}
+  <div class="fv-sechead">
+    <h1>“{{ q }}” için {{ total_cards }} ürün</h1>
+    <a href="/" class="fv-link">Aramayı temizle</a>
+  </div>
+  {% else %}
+  <div class="fv-sechead">
+    <div>
+      {% if hero_cards %}<h2>İndirime giren ürünler</h2>{% else %}
+      <h1>{% if platform %}{{ stores[platform] }} indirimleri ve günün fırsatları{% else %}Anlık indirimler ve günün fırsatları{% endif %}</h1>{% endif %}
+      <p>{% if tab == 'populer' %}En çok tıklanan fırsatlar.{% else %}FırsatVakti Puanı'na göre sıralı: 30 günlük ortalamaya göre indirim, tüm zamanların en düşüğü, diğer mağazalardaki fiyat ve temiz fiyat geçmişi.{% endif %}</p>
+    </div>
+    <div class="fv-seg" role="tablist" aria-label="Sıralama">
+      {% for key, label in tabs %}
+      <a role="tab" aria-selected="{{ 'true' if tab == key else 'false' }}" class="{% if tab == key %}on{% endif %}"
+         href="/?tab={{ key }}{% if platform %}&platform={{ platform }}{% endif %}#firsatlar">{{ label }}</a>
       {% endfor %}
     </div>
+  </div>
+  {% endif %}
 
-    {% if cards %}
-    <div class="fv-grid">
-      {% for c in cards %}{{ fv_card(c) }}{% endfor %}
-    </div>
-
-    {% if total_pages > 1 %}
-    {% set pq = ('/search?q=' ~ (q|urlencode) ~ '&') if q else ('/?tab=' ~ tab ~ '&') %}
-    <div class="fv-pager" role="navigation" aria-label="Sayfalar">
-      {% if page > 1 %}<a href="{{ pq }}{% if platform %}platform={{ platform }}&{% endif %}page={{ page - 1 }}">← Önceki</a>{% endif %}
-      <span>{{ page }} / {{ total_pages }}</span>
-      {% if page < total_pages %}<a href="{{ pq }}{% if platform %}platform={{ platform }}&{% endif %}page={{ page + 1 }}">Sonraki →</a>{% endif %}
-    </div>
+  <div class="fv-chips" role="navigation" aria-label="Mağaza filtresi">
+    {% set base_url = '/search?q=' ~ (q|urlencode) ~ '&' if q else '/?tab=' ~ tab ~ '&' %}
+    {% set sc = store_counts|default({}) %}
+    <a class="fv-pchip{% if not platform %} on{% endif %}" href="{{ base_url[:-1] }}">Tümü{% if not q and total_all is defined %} <span>{{ total_all }}</span>{% endif %}</a>
+    {% for key, name in stores.items() %}
+    {% if q or sc.get(key) or platform == key %}
+    <a class="fv-pchip{% if platform == key %} on{% endif %}" href="{{ base_url }}platform={{ key }}">{{ name }}{% if sc.get(key) %} <span>{{ sc.get(key) }}</span>{% endif %}</a>
     {% endif %}
-
-    {% else %}
-    <div class="fv-empty">
-      {% if q %}
-        <h2>Sonuç bulunamadı</h2>
-        <p>“{{ q }}” için takip ettiğimiz bir ürün yok. Linkini ekle, fiyatını takip etmeye başlayalım.</p>
-        <a class="fv-btn" href="/submit">Link ekle</a>
-      {% elif tab == 'sana-ozel' and not user %}
-        <h2>Sana özel fırsatlar</h2>
-        <p>Takip ettiğin ürünler ve fiyat alarmlarına uyan fırsatlar burada görünür. Görmek için giriş yap.</p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
-          <a class="fv-btn" href="/login">Giriş yap</a>
-          <a class="fv-btn" href="/register" style="background:var(--fv-soft);color:var(--fv-ink);">Ücretsiz üye ol</a>
-        </div>
-      {% elif tab == 'sana-ozel' %}
-        <h2>Şu an sana uygun fırsat yok</h2>
-        <p>Takip listendeki ürünlerden veya fiyat alarmlarındaki kelimelerden biri indirime girince burada göreceksin.</p>
-        <a class="fv-btn" href="/alerts">Fiyat alarmı kur</a>
-      {% elif tab == 'dipte' %}
-        <h2>Şu an dipte ürün yok</h2>
-        <p>Tüm zamanların en düşük fiyatına inen ürünler burada listelenir.</p>
-      {% else %}
-        <h2>Şu an yayında fırsat yok</h2>
-        <p>Yeni bir indirim onaylandığında burada olacak. Bu arada en düşük fiyatındaki ürünlere göz at.</p>
-        <a class="fv-btn" href="/?tab=dipte">Şu an dipte olanlar</a>
-      {% endif %}
-    </div>
-    {% endif %}
+    {% endfor %}
   </div>
 
-  <aside class="fv-aside">
-    <section class="fv-box">
-      <h2>Fiyat alarmı kur</h2>
-      <p>Aradığın ürün, marka veya mağaza indirime girince Telegram ya da e-postayla haber verelim.</p>
-      <form method="post" action="/alerts" style="display:flex;flex-direction:column;gap:12px;">
-        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token or request.cookies.get('csrftoken', '') }}">
-        <label for="fv-alert-kw">Ne arıyorsun?
-          <input id="fv-alert-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Karaca">
-        </label>
-        <label for="fv-alert-pct">En az indirim
-          <select id="fv-alert-pct" name="min_pct">
-            <option value="10">%10 ve üzeri</option><option value="20">%20 ve üzeri</option><option value="30">%30 ve üzeri</option>
-          </select>
-        </label>
-        <button class="fv-btn" type="submit">{% if user %}Alarm kur{% else %}Giriş yap ve alarm kur{% endif %}</button>
-      </form>
-      {% if user and alert_count %}<a href="/alerts" style="font-size:13px;font-weight:600;">{{ alert_count }} alarmını yönet →</a>{% endif %}
-    </section>
+  {% if cards %}
+  <div class="fv-grid">
+    {% for c in cards %}{{ fv_card(c) }}{% endfor %}
+  </div>
 
-    <section class="fv-box">
-      <h2>FırsatVakti Puanı nedir?</h2>
-      <p>Her indirimi ürünün kendi fiyat geçmişine göre 0–100 arası puanlıyoruz.</p>
-      <div class="fv-weight"><b>40</b><span>30 günlük ortalamaya göre indirim oranı</span></div>
-      <div class="fv-weight"><b>25</b><span>Tüm zamanların en düşük fiyatı mı?</span></div>
-      <div class="fv-weight"><b>20</b><span>Diğer platformlarda daha ucuzu var mı?</span></div>
-      <div class="fv-weight"><b>15</b><span>İndirim öncesi zam yapılmış mı, sık tekrarlanıyor mu?</span></div>
-    </section>
+  {% if total_pages > 1 %}
+  {% set pq = ('/search?q=' ~ (q|urlencode) ~ '&') if q else ('/?tab=' ~ tab ~ '&') %}
+  <div class="fv-pager" role="navigation" aria-label="Sayfalar">
+    {% if page > 1 %}<a href="{{ pq }}{% if platform %}platform={{ platform }}&{% endif %}page={{ page - 1 }}">← Önceki</a>{% endif %}
+    <span>{{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}<a href="{{ pq }}{% if platform %}platform={{ platform }}&{% endif %}page={{ page + 1 }}">Daha fazlasını göster →</a>{% endif %}
+  </div>
+  {% endif %}
+  <p class="fv-note">Üstü çizili fiyat, ürünün son 30 gündeki ortalama fiyatıdır.</p>
 
-    <section class="fv-box dark">
-      <h2>Fırsatlar cebine gelsin</h2>
-      <p>Onaylanan fırsatlar anında kanallarımızda.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <a class="fv-btn" href="https://t.me/firsatvakti1" target="_blank" rel="noopener">Telegram</a>
-        <a class="fv-btn" href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" rel="noopener">WhatsApp</a>
+  {% else %}
+  <div class="fv-empty">
+    {% if q %}
+      <h2>Sonuç bulunamadı</h2>
+      <p>“{{ q }}” için takip ettiğimiz bir ürün yok. Linkini ekle, fiyatını takip etmeye başlayalım.</p>
+      <a class="fv-btn" href="/submit">Link ekle</a>
+    {% elif tab == 'sana-ozel' and not user %}
+      <h2>Sana özel fırsatlar</h2>
+      <p>Takip ettiğin ürünler ve fiyat alarmlarına uyan fırsatlar burada görünür. Görmek için giriş yap.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+        <a class="fv-btn" href="/login">Giriş yap</a>
+        <a class="fv-btn" href="/register" style="background:var(--fv-soft);color:var(--fv-ink);">Ücretsiz üye ol</a>
       </div>
-    </section>
-  </aside>
-</div>
+    {% elif tab == 'sana-ozel' %}
+      <h2>Şu an sana uygun fırsat yok</h2>
+      <p>Takip listendeki ürünlerden veya fiyat alarmlarındaki kelimelerden biri indirime girince burada göreceksin.</p>
+      <a class="fv-btn" href="/alerts">Fiyat alarmı kur</a>
+    {% elif tab == 'dipte' %}
+      <h2>Şu an dipte ürün yok</h2>
+      <p>Tüm zamanların en düşük fiyatına inen ürünler burada listelenir.</p>
+    {% else %}
+      <h2>Şu an yayında fırsat yok</h2>
+      <p>Yeni bir indirim onaylandığında burada olacak. Bu arada en düşük fiyatındaki ürünlere göz at.</p>
+      <a class="fv-btn" href="/?tab=dipte">Şu an dipte olanlar</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+
+{% if not q %}
+<section class="fv-boxes" aria-label="Fiyat alarmı ve puan">
+  <section class="fv-box">
+    <h2>Fiyat alarmı kur</h2>
+    <p>Aradığın ürün, marka veya mağaza indirime girince Telegram ya da e-postayla haber verelim.</p>
+    <form method="post" action="/alerts" style="display:flex;flex-direction:column;gap:12px;">
+      <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token or request.cookies.get('csrftoken', '') }}">
+      <label for="fv-alert-kw">Ne arıyorsun?
+        <input id="fv-alert-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Karaca">
+      </label>
+      <label for="fv-alert-pct">En az indirim
+        <select id="fv-alert-pct" name="min_pct">
+          <option value="10">%10 ve üzeri</option><option value="20">%20 ve üzeri</option><option value="30">%30 ve üzeri</option>
+        </select>
+      </label>
+      <button class="fv-btn" type="submit">{% if user %}Alarm kur{% else %}Giriş yap ve alarm kur{% endif %}</button>
+    </form>
+    {% if user and alert_count %}<a href="/alerts" style="font-size:13px;font-weight:600;">{{ alert_count }} alarmını yönet →</a>{% endif %}
+  </section>
+
+  <section class="fv-box">
+    <h2>FırsatVakti Puanı nedir?</h2>
+    <p>Her indirimi ürünün kendi fiyat geçmişine göre 0–100 arası puanlıyoruz.</p>
+    <div class="fv-weight"><b>40</b><span>30 günlük ortalamaya göre indirim oranı</span></div>
+    <div class="fv-weight"><b>25</b><span>Tüm zamanların en düşük fiyatı mı?</span></div>
+    <div class="fv-weight"><b>20</b><span>Diğer platformlarda daha ucuzu var mı?</span></div>
+    <div class="fv-weight"><b>15</b><span>İndirim öncesi zam yapılmış mı, sık tekrarlanıyor mu?</span></div>
+  </section>
+
+  <section class="fv-box dark">
+    <h2>Fırsatlar cebine gelsin</h2>
+    <p>Onaylanan fırsatlar anında kanallarımızda.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <a class="fv-btn" href="https://t.me/firsatvakti1" target="_blank" rel="noopener">Telegram</a>
+      <a class="fv-btn" href="https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B" target="_blank" rel="noopener">WhatsApp</a>
+    </div>
+  </section>
+</section>
+{% endif %}
 
 {% if not q and not platform and page == 1 and tab == 'one-cikanlar' %}
 <!-- SEO tanıtım metni — sadece ana sayfanın ilk sayfasında -->
@@ -140,6 +186,29 @@
 {% endif %}
 
 <script>
+// Hero slaytları: noktalarla seç, 6 sn'de bir kendiliğinden ilerle (hareket azaltma tercihinde durur)
+(function () {
+  var slides = document.querySelectorAll('.fv-hslide'), dots = document.querySelectorAll('.fv-dots button');
+  if (!slides.length) return;
+  var cur = 0, timer = null;
+  function show(i) {
+    cur = i;
+    slides.forEach(function (s, k) { s.hidden = k !== i; });
+    dots.forEach(function (d, k) { d.setAttribute('aria-current', k === i ? 'true' : 'false'); });
+  }
+  function start() {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    timer = setInterval(function () { show((cur + 1) % slides.length); }, 6000);
+  }
+  dots.forEach(function (d) {
+    d.addEventListener('click', function () { clearInterval(timer); show(+d.dataset.go); start(); });
+  });
+  var box = document.querySelector('.fv-hdeal');
+  box.addEventListener('mouseenter', function () { clearInterval(timer); });
+  box.addEventListener('mouseleave', start);
+  start();
+})();
+
 // Fırsat oyları — oy sayısı gösterilmiyor; seçimin bu tarayıcıda hatırlanır.
 (function () {
   function getCookie(n) { var m = document.cookie.match('(?:^|; )' + n + '=([^;]*)'); return m ? decodeURIComponent(m[1]) : ''; }

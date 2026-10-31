@@ -193,7 +193,18 @@ FEED_TABS = [("one-cikanlar", "Öne Çıkanlar"), ("populer", "Popüler"),
              ("sana-ozel", "Sana Özel"), ("dipte", "Şu An Dipte")]
 _TAB_ALIASES = {"all": "one-cikanlar", "top_discount": "one-cikanlar", "cheapest": "one-cikanlar",
                 "today": "one-cikanlar", "most_clicked": "populer"}
-_FEED_PER_PAGE = 24
+_FEED_PER_PAGE = 30  # 2026-10-31: 24→30 — 5/3/2 sütunlu ızgaraya tam bölünür
+_HERO_COUNT = 5
+_tracked_cache = {"at": 0.0, "n": 0}
+
+
+def _tracked_count(db) -> int:
+    """Ana sayfa hero'sundaki 'ürün takipte' sayısı — 10 dk önbellek."""
+    import time
+    if time.time() - _tracked_cache["at"] > 600:
+        _tracked_cache["n"] = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        _tracked_cache["at"] = time.time()
+    return _tracked_cache["n"]
 
 
 def _load_points(db, product_ids) -> dict:
@@ -335,6 +346,14 @@ async def index(request: Request, platform: str = "", page: int = 1, tab: str = 
         alert_count = db.execute("SELECT COUNT(*) FROM price_alerts WHERE user_id=?",
                                  (user["id"],)).fetchone()[0]
 
+    # Mağaza filtresindeki adetler her zaman filtresiz akıştan (akış 60sn önbellekli)
+    all_cards = cards if not platform else await _feed(db, tab, "", user)
+    store_counts: dict = {}
+    for c in all_cards:
+        store_counts[c["platform"]] = store_counts.get(c["platform"], 0) + 1
+    show_hero = tab == "one-cikanlar" and not platform and page == 1
+    latest_at = max((str(c.get("created_at") or "") for c in all_cards), default="")
+
     meta = build_meta_tags("index", {"platform": platform, "page": page})
     # Sekme varyantları aynı içeriğin farklı sıralaması → canonical platform + sayfa
     qs = "&".join(p for p in (f"platform={platform}" if platform else "",
@@ -347,6 +366,9 @@ async def index(request: Request, platform: str = "", page: int = 1, tab: str = 
         "cards": page_cards, "tab": tab, "tabs": FEED_TABS, "platform": platform,
         "stores": STORE_NAMES, "page": page, "total_pages": total_pages,
         "alert_count": alert_count, "total_cards": len(cards),
+        "store_counts": store_counts, "total_all": len(all_cards),
+        "hero_cards": cards[:_HERO_COUNT] if show_hero else [],
+        "latest_at": latest_at, "tracked_count": _tracked_count(db) if show_hero else 0,
     })
 
 
