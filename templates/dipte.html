@@ -3,13 +3,13 @@
 
 {% block content %}
 <div style="display:flex;flex-direction:column;gap:16px;">
-  <div>
-    <h1 style="margin:0 0 6px;font-size:24px;font-weight:800;color:var(--fv-ink);">Şu an dipte: en düşük fiyatındaki ürünler</h1>
-    <p style="margin:0;font-size:14px;color:var(--fv-sub);line-height:1.6;max-width:760px;">
-      Bu ürünler şu anda takip ettiğimiz fiyat geçmişindeki <strong style="color:var(--fv-ink);">en düşük fiyatında</strong>
-      ve olağan fiyatlarının <strong style="color:var(--fv-ink);">en az %15 altında</strong>.
-      Önce zamlanıp "indirim" gibi gösterilen fiyatlar değil; fiyat geçmişine göre gerçekten en ucuz anları. Liste 15 dakikada bir güncellenir.
-    </p>
+  <div class="fv-head" style="margin-bottom:0;">
+    <div>
+      <h1>Şu an dipte: en düşük fiyatındaki ürünler</h1>
+      <p>Bu ürünler takip ettiğimiz fiyat geçmişindeki <strong style="color:var(--fv-ink);">en düşük fiyatında</strong>
+        ve olağan fiyatlarının <strong style="color:var(--fv-ink);">en az %15 altında</strong>. Önce zamlanıp "indirim" gibi
+        gösterilen fiyatlar değil; fiyat geçmişine göre gerçekten en ucuz anları. Liste 15 dakikada bir güncellenir.</p>
+    </div>
   </div>
 
   <div class="fv-chips" role="navigation" aria-label="Mağaza filtresi">

@@ -3,18 +3,18 @@
 
 {% block content %}
 <div style="max-width:720px;margin:8px auto 0;display:flex;flex-direction:column;gap:16px;">
-  <div>
-    <h1 style="margin:0 0 6px;font-size:24px;font-weight:800;color:var(--fv-ink);">Fiyat alarmlarım</h1>
-    <p style="margin:0;font-size:14px;color:var(--fv-sub);line-height:1.6;">
-      Başlığında yazdığın kelime geçen bir ürün, seçtiğin oranda indirimle yayınlanınca haber veririz.
-      {% if alerts %}Telegram bağlantın <a href="/settings">Ayarlar</a>'da tanımlıysa oradan, değilse e-postayla.{% endif %}
-    </p>
+  <div class="fv-head" style="margin-bottom:0;">
+    <div>
+      <h1>Fiyat alarmlarım</h1>
+      <p>Başlığında yazdığın kelime geçen bir ürün, seçtiğin oranda indirimle yayınlanınca haber veririz.
+        {% if alerts %}Telegram bağlantın <a class="fv-link" href="/settings">Ayarlar</a>'da tanımlıysa oradan, değilse e-postayla.{% endif %}</p>
+    </div>
   </div>
 
-  {% if ok %}<div role="status" style="background:var(--fv-mid-bg);color:var(--fv-mid-fg);border-radius:10px;padding:12px 14px;font-size:14px;font-weight:600;">Alarm kuruldu.</div>{% endif %}
-  {% if err %}<div role="alert" style="background:var(--fv-bad-bg);color:var(--fv-bad-fg);border-radius:10px;padding:12px 14px;font-size:14px;font-weight:600;">
+  {% if ok %}<p class="fv-alert ok" role="status"><span>Alarm kuruldu.</span></p>{% endif %}
+  {% if err %}<p class="fv-alert err" role="alert"><span>
     {% if err == 'kelime' %}En az 2 harflik bir kelime yaz.{% elif err == 'limit' %}En fazla {{ max_alerts }} alarm kurabilirsin; yenisi için birini sil.{% else %}İstek doğrulanamadı, sayfayı yenileyip tekrar dene.{% endif %}
-  </div>{% endif %}
+  </span></p>{% endif %}
 
   <section class="fv-box">
     <h2>Yeni alarm</h2>

@@ -5,46 +5,30 @@
 {% set avg_p = (prices|sum) / (prices|length) %}
 {% set current_p = prices[-1] %}
 {% set recent = history[::-1][:8] %}
-<div class="ph-card" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px;">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
-    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">📊 FİYAT GEÇMİŞİ</h2>
-    <span style="font-size:11px;color:var(--muted);font-weight:600;">{{ history|length }} fiyat ölçümü</span>
-  </div>
+<section class="fv-panel ph-card">
+  <h2>Fiyat geçmişi <small>{{ history|length }} fiyat ölçümü</small></h2>
 
-  <!-- Özet rakamlar -->
-  <div class="ph-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px;">
-    <div style="text-align:center;background:var(--bg3);border-radius:10px;padding:10px 6px;">
-      <div style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.3px;">GÜNCEL</div>
-      <div style="font-size:14px;font-weight:700;color:var(--fire);">{{ current_p|price_tr }} TL</div>
-    </div>
-    <div style="text-align:center;background:var(--bg3);border-radius:10px;padding:10px 6px;">
-      <div style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.3px;">EN DÜŞÜK</div>
-      <div style="font-size:14px;font-weight:700;color:#16a34a;">{{ min_p|price_tr }} TL</div>
-    </div>
-    <div style="text-align:center;background:var(--bg3);border-radius:10px;padding:10px 6px;">
-      <div style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.3px;">ORTALAMA</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text);">{{ avg_p|price_tr }} TL</div>
-    </div>
-    <div style="text-align:center;background:var(--bg3);border-radius:10px;padding:10px 6px;">
-      <div style="font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.3px;">EN YÜKSEK</div>
-      <div style="font-size:14px;font-weight:700;color:#dc2626;">{{ max_p|price_tr }} TL</div>
-    </div>
-  </div>
+  <dl class="fv-kv ph-stats" style="grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px;">
+    <div><dt>Güncel</dt><dd style="color:var(--fv-accent);">{{ current_p|price_tr }} TL</dd></div>
+    <div><dt>En düşük</dt><dd class="good">{{ min_p|price_tr }} TL</dd></div>
+    <div><dt>Ortalama</dt><dd>{{ avg_p|price_tr }} TL</dd></div>
+    <div><dt>En yüksek</dt><dd class="bad">{{ max_p|price_tr }} TL</dd></div>
+  </dl>
 
   <div class="ph-grid" style="display:grid;grid-template-columns:1fr 150px;gap:16px;">
     <!-- Grafik -->
-    <div style="position:relative;height:240px;background:var(--bg3);border-radius:14px;" id="ph-wrap">
+    <div style="position:relative;height:240px;background:var(--fv-soft);border-radius:10px;" id="ph-wrap">
       <svg id="ph-svg" width="100%" height="100%" role="img"
            aria-label="Fiyat geçmişi: güncel {{ current_p|price_tr }} TL, en düşük {{ min_p|price_tr }} TL, en yüksek {{ max_p|price_tr }} TL"></svg>
-      <div id="ph-tip" style="display:none;position:absolute;background:var(--text);color:var(--bg2);font-size:12px;padding:6px 10px;border-radius:8px;pointer-events:none;white-space:nowrap;z-index:10;box-shadow:0 4px 14px rgba(0,0,0,.22);"></div>
+      <div id="ph-tip" style="display:none;position:absolute;background:var(--fv-ink);color:var(--fv-card);font-size:12px;padding:6px 10px;border-radius:8px;pointer-events:none;white-space:nowrap;z-index:10;box-shadow:0 4px 14px rgba(0,0,0,.22);"></div>
     </div>
 
     <!-- Son fiyatlar listesi -->
     <div style="display:flex;flex-direction:column;">
       {% for h in recent %}
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:6px 0;{% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}font-size:11px;">
-        <span style="color:var(--muted);white-space:nowrap;">{{ h.scraped_at[8:10] }}.{{ h.scraped_at[5:7] }}</span>
-        <span style="font-weight:700;color:var(--text);display:inline-flex;align-items:center;gap:3px;white-space:nowrap;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:6px 0;{% if not loop.last %}border-bottom:1px solid var(--fv-line);{% endif %}font-size:11px;">
+        <span style="color:var(--fv-sub);white-space:nowrap;">{{ h.scraped_at[8:10] }}.{{ h.scraped_at[5:7] }}</span>
+        <span style="font-weight:700;color:var(--fv-ink);display:inline-flex;align-items:center;gap:3px;white-space:nowrap;">
           {% if not loop.last %}
             {% set older = recent[loop.index] %}
             {% if h.price_value < older.price_value %}<span style="color:#16a34a;">↓</span>
@@ -56,12 +40,12 @@
       {% endfor %}
     </div>
   </div>
-</div>
+</section>
 
 <style>
 @media (max-width: 700px) {
   .ph-grid { grid-template-columns: 1fr !important; }
-  .ph-stats { grid-template-columns: repeat(2,1fr) !important; }
+  .ph-stats { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
 }
 </style>
 
@@ -121,8 +105,8 @@
     // 3 referans y-çizgisi: en yüksek / orta / en düşük
     var yTicks = [maxP, minP + g.pRange/2, minP].map(function(v, i){
       var y = padTop + (1 - (v - (minP - g.yPad)) / (g.pRange + g.yPad*2)) * g.plotH;
-      return '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(g.W-padR)+'" y2="'+y.toFixed(1)+'" stroke="var(--border)" stroke-width="1"/>' +
-             '<text x="'+(g.W-padR+8)+'" y="'+(y+3.5).toFixed(1)+'" font-size="10" fill="var(--muted)" font-family="DM Sans,sans-serif">'+fmtPrice(v)+'</text>';
+      return '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(g.W-padR)+'" y2="'+y.toFixed(1)+'" stroke="var(--fv-line)" stroke-width="1"/>' +
+             '<text x="'+(g.W-padR+8)+'" y="'+(y+3.5).toFixed(1)+'" font-size="10" fill="var(--fv-sub)" font-family="DM Sans,sans-serif">'+fmtPrice(v)+'</text>';
     }).join('');
 
     // X ekseni: 4 eşit aralıklı tarih etiketi
@@ -132,28 +116,28 @@
       var idx = Math.round(k * (lastIdx) / Math.max(1, xTickCount - 1));
       var p = pts[idx];
       var anchor = idx === 0 ? 'start' : (idx === lastIdx ? 'end' : 'middle');
-      xTicks += '<text x="'+p.x.toFixed(1)+'" y="'+(g.H-6)+'" text-anchor="'+anchor+'" font-size="10" fill="var(--muted)" font-family="DM Sans,sans-serif">'+fmtDate(raw[idx].t)+'</text>';
+      xTicks += '<text x="'+p.x.toFixed(1)+'" y="'+(g.H-6)+'" text-anchor="'+anchor+'" font-size="10" fill="var(--fv-sub)" font-family="DM Sans,sans-serif">'+fmtDate(raw[idx].t)+'</text>';
     }
 
     function marker(idx, color, r){
       var p = pts[idx];
-      return '<circle cx="'+p.x.toFixed(1)+'" cy="'+p.y.toFixed(1)+'" r="'+r+'" fill="'+color+'" stroke="var(--bg3)" stroke-width="2"/>';
+      return '<circle cx="'+p.x.toFixed(1)+'" cy="'+p.y.toFixed(1)+'" r="'+r+'" fill="'+color+'" stroke="var(--fv-soft)" stroke-width="2"/>';
     }
     var markers = marker(minIdx, '#16a34a', 4) + marker(maxIdx, '#dc2626', 4);
-    if (lastIdx !== minIdx && lastIdx !== maxIdx) markers += marker(lastIdx, 'var(--fire)', 4);
+    if (lastIdx !== minIdx && lastIdx !== maxIdx) markers += marker(lastIdx, 'var(--fv-accent)', 4);
 
-    var endLabel = '<text x="'+(pts[lastIdx].x-6).toFixed(1)+'" y="'+(pts[lastIdx].y-10).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="var(--text)" font-family="DM Sans,sans-serif">'+fmtPrice(pts[lastIdx].p)+'</text>';
+    var endLabel = '<text x="'+(pts[lastIdx].x-6).toFixed(1)+'" y="'+(pts[lastIdx].y-10).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="var(--fv-ink)" font-family="DM Sans,sans-serif">'+fmtPrice(pts[lastIdx].p)+'</text>';
 
     svg.innerHTML =
       '<defs><linearGradient id="ph-grad" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0%" stop-color="var(--fire)" stop-opacity=".12"/>' +
-        '<stop offset="100%" stop-color="var(--fire)" stop-opacity="0"/>' +
+        '<stop offset="0%" stop-color="var(--fv-accent)" stop-opacity=".12"/>' +
+        '<stop offset="100%" stop-color="var(--fv-accent)" stop-opacity="0"/>' +
       '</linearGradient></defs>' +
       yTicks +
       '<path d="'+areaPath+'" fill="url(#ph-grad)"/>' +
-      '<path d="'+linePath+'" fill="none" stroke="var(--fire)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<path d="'+linePath+'" fill="none" stroke="var(--fv-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
       markers + endLabel + xTicks +
-      '<line id="ph-cross" x1="0" y1="'+padTop+'" x2="0" y2="'+(g.H-padBottom)+'" stroke="var(--muted)" stroke-width="1" opacity="0" pointer-events="none"/>' +
+      '<line id="ph-cross" x1="0" y1="'+padTop+'" x2="0" y2="'+(g.H-padBottom)+'" stroke="var(--fv-sub)" stroke-width="1" opacity="0" pointer-events="none"/>' +
       '<rect id="ph-hit" x="'+padL+'" y="0" width="'+g.plotW+'" height="'+g.H+'" fill="transparent"/>';
 
     var hit = svg.querySelector('#ph-hit');

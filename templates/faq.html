@@ -1,87 +1,63 @@
 {% extends "base.html" %}
 {% block title %}SSS — FırsatVakti{% endblock %}
 {% block content %}
-<div style="max-width:780px;margin:0 auto;padding-bottom:48px;">
-
-  <!-- Hero -->
-  <div style="text-align:center;padding:52px 0 44px;">
-    <div style="display:inline-flex;align-items:center;gap:8px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:99px;padding:6px 16px;margin-bottom:18px;">
-      <span style="font-size:14px;">❓</span>
-      <span style="font-size:12px;font-weight:700;color:#f59e0b;letter-spacing:.8px;">SIKÇA SORULAN SORULAR</span>
-    </div>
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:clamp(28px,5vw,46px);letter-spacing:1px;color:var(--text);margin:0 0 12px;">HER ŞEYİ MERAK EDİYOR MUSUN?</h1>
-    <p style="font-size:14px;color:var(--muted);font-weight:500;max-width:400px;margin:0 auto;line-height:1.7;">Aklına takılan soruların cevabı burada. Bulamazsan bize yaz.</p>
-  </div>
-
-  <!-- Kategoriler -->
-  <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:32px;">
-    {% for cat in ['Tümü','Genel','Bildirimler','Teknik','Affiliate'] %}
-    <button onclick="filterFaq(this,'{{ cat }}')"
-            style="padding:7px 16px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid var(--border);background:{% if loop.first %}var(--fire){% else %}var(--bg3){% endif %};color:{% if loop.first %}#fff{% else %}var(--muted){% endif %};transition:all .15s;"
-            class="faq-cat-btn" data-cat="{{ cat }}">{{ cat }}</button>
-    {% endfor %}
-  </div>
-
-  <!-- Sorular -->
-  <div style="display:flex;flex-direction:column;gap:10px;" id="faq-list">
-    {% for cat, q, a in [
-      ('Genel','FırsatVakti ücretsiz mi?','Evet, tamamen ücretsizdir. Üye olman bile gerekmiyor — misafir olarak da link ekleyebilirsin.'),
-      ('Genel','Fiyatlar ne sıklıkla güncellenir?','Ürün fiyatları düzenli aralıklarla otomatik olarak kontrol edilmektedir. Fiyat değişikliklerini mümkün olan en kısa sürede tespit edip bildiriyoruz.'),
-      ('Genel','Hangi platformları destekliyorsunuz?','Şu an Amazon Türkiye, Trendyol, N11 ve Hepsiburada desteklenmektedir. Yeni platformlar eklenmeye devam edecektir.'),
-      ('Genel','Kaç ürün ekleyebilirim?','Misafir kullanıcılar günde sınırlı sayıda ürün ekleyebilir. Üye olarak daha fazla ürün takip edebilirsin.'),
-      ('Bildirimler','Telegram bildirimi nasıl alırım?','Telegram\'da @userinfobot\'a /start yazarak chat ID\'ni öğren. Ardından Ayarlar sayfasına bu ID\'yi girerek bildirimleri aktifleştir. Ayrıca @firsat_vaktibot\'a /start yazman gerekiyor.'),
-      ('Bildirimler','WhatsApp\'tan nasıl takip ederim?','WhatsApp kanalımızı (firsatvakti) takip ederek tüm fırsatlardan haberdar olabilirsin. Kişisel bildirim için şimdilik Telegram önerilir.'),
-      ('Teknik','Ürünümü nasıl silerim?','Şu an ürün silme işlemi yalnızca admin tarafından yapılabilmektedir. Silme talebini iletişim sayfasından iletebilirsin.'),
-      ('Teknik','Fiyat yanlış görünüyor, ne yapmalıyım?','Fiyat bilgisi ilgili platformdan otomatik çekilmektedir. Farklılık varsa lütfen iletişim sayfasından bildirin.'),
-      ('Affiliate','Affiliate link nedir?','Fırsata tıkladığında yönlendirildiğin link bir affiliate linktir. Bu link üzerinden alışveriş yaparsan FırsatVakti küçük bir komisyon kazanır — senin için herhangi bir ek maliyet oluşmaz.'),
-      ('Affiliate','Fiyat affiliate linkten daha pahalı mı?','Hayır. Affiliate linkler fiyatı etkilemez, aynı ürünü aynı fiyata alırsın. Sadece satıştan küçük bir komisyon kazanılır.')
-    ] %}
-    <div class="faq-item" data-cat="{{ cat }}" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:16px;overflow:hidden;transition:border-color .2s;">
-      <details>
-        <summary style="padding:18px 20px;font-size:14px;font-weight:700;color:var(--text);list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;user-select:none;">
-          <span style="display:flex;align-items:center;gap:10px;">
-            <span style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--bg3);color:var(--muted);white-space:nowrap;">{{ cat }}</span>
-            {{ q }}
-          </span>
-          <svg class="faq-arrow" width="16" height="16" fill="none" stroke="var(--fire)" stroke-width="2.5" viewBox="0 0 24 24" style="flex-shrink:0;transition:transform .2s;"><path d="M6 9l6 6 6-6"/></svg>
-        </summary>
-        <div style="padding:0 20px 18px;font-size:13px;color:var(--muted);line-height:1.8;font-weight:500;border-top:1px solid var(--border);">
-          <div style="padding-top:14px;">{{ a }}</div>
-        </div>
-      </details>
-    </div>
-    {% endfor %}
-  </div>
-
-  <!-- Alt CTA -->
-  <div style="margin-top:36px;background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px;">
+{% set faqs = [
+  ('Genel','FırsatVakti ücretsiz mi?','Evet, tamamen ücretsizdir. Üye olman bile gerekmiyor; misafir olarak da link ekleyebilirsin.'),
+  ('Genel','Fiyatlar ne sıklıkla güncellenir?','Ürün fiyatları gün boyunca otomatik olarak kontrol edilir. Aktif fırsatlar ve takip listesindeki ürünler daha sık taranır.'),
+  ('Genel','Hangi mağazaları destekliyorsunuz?','Amazon Türkiye, Trendyol, Hepsiburada, N11, Karaca ve Beymen. Yeni mağazalar eklenmeye devam edecek.'),
+  ('Genel','Kaç ürün ekleyebilirim?','Misafir kullanıcılar günde 3, üyeler günde 20 link ekleyebilir.'),
+  ('Genel','FırsatVakti Puanı nedir?','Her indirimi ürünün kendi fiyat geçmişine göre 0–100 arası puanlıyoruz: 30 günlük ortalamaya göre indirim oranı, tüm zamanların en düşüğü olup olmadığı, diğer mağazalardaki fiyat ve indirim öncesi zam yapılıp yapılmadığı.'),
+  ('Bildirimler','Telegram bildirimi nasıl alırım?','Telegram\'da @userinfobot\'a /start yazarak chat ID\'ni öğren, ardından Ayarlar sayfasına bu ID\'yi girip bildirimleri aç. Ayrıca @firsat_vaktibot\'a /start yazman gerekiyor.'),
+  ('Bildirimler','WhatsApp\'tan nasıl takip ederim?','WhatsApp kanalımızı takip ederek onaylanan tüm fırsatlardan haberdar olabilirsin. Kişisel bildirim için şimdilik Telegram öneriyoruz.'),
+  ('Bildirimler','Fiyat alarmı nedir?','Bir kelime (ör. airfryer, Dyson, Karaca) ve en az indirim oranı seçersin; başlığında bu kelime geçen bir ürün o oranda indirimle yayınlanınca sana haber veririz.'),
+  ('Teknik','Ürünümü nasıl silerim?','Ürün silme şu an yalnızca yönetici tarafından yapılabiliyor. Silme talebini iletişim sayfasından iletebilirsin.'),
+  ('Teknik','Fiyat yanlış görünüyor, ne yapmalıyım?','Fiyat bilgisi mağazadan otomatik çekilir ve tarama zamanına aittir. Farklılık görürsen iletişim sayfasından bildir.'),
+  ('Affiliate','Affiliate link nedir?','Fırsata tıkladığında yönlendirildiğin link bir affiliate linktir. Bu linkten alışveriş yaparsan FırsatVakti küçük bir komisyon kazanır; senin için ek maliyet oluşmaz.'),
+  ('Affiliate','Affiliate link fiyatı artırır mı?','Hayır. Aynı ürünü aynı fiyata alırsın; komisyon satıcı tarafından ödenir.')
+] %}
+<div class="fv-w-md">
+  <div class="fv-head">
     <div>
-      <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px;">Cevabını bulamadın mı?</div>
-      <div style="font-size:13px;color:var(--muted);font-weight:500;">Bize doğrudan yazabilirsin, en kısa sürede dönüş yaparız.</div>
+      <h1>Sıkça sorulan sorular</h1>
+      <p>Aklına takılan soruların cevabı burada. Bulamazsan bize yaz.</p>
     </div>
-    <a href="/contact" class="btn-add" style="text-decoration:none;display:inline-flex;padding:11px 24px;font-size:14px;border-radius:12px;">✉️ Bize Yaz</a>
   </div>
 
+  <div class="fv-chips" role="toolbar" aria-label="Kategori" style="margin-bottom:16px;">
+    {% for cat in ['Tümü','Genel','Bildirimler','Teknik','Affiliate'] %}
+    <button type="button" class="fv-pchip{% if loop.first %} on{% endif %}" data-cat="{{ cat }}" aria-pressed="{{ 'true' if loop.first else 'false' }}">{{ cat }}</button>
+    {% endfor %}
+  </div>
+
+  <div class="fv-stack" style="gap:10px;" id="faq-list">
+    {% for cat, q, a in faqs %}
+    <details class="fv-faq" data-cat="{{ cat }}">
+      <summary>{{ q }}</summary>
+      <div>{{ a }}</div>
+    </details>
+    {% endfor %}
+  </div>
+
+  <section class="fv-panel" style="margin-top:24px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+    <div>
+      <strong style="font-size:15px;color:var(--fv-ink);">Cevabını bulamadın mı?</strong>
+      <p class="fv-muted" style="margin-top:2px;">Bize doğrudan yazabilirsin, en kısa sürede dönüş yaparız.</p>
+    </div>
+    <a href="/contact" class="fv-btn accent">Bize yaz</a>
+  </section>
 </div>
 
 <script>
-document.querySelectorAll('details').forEach(function(d){
-  d.addEventListener('toggle',function(){
-    var arrow = d.querySelector('.faq-arrow');
-    if(arrow) arrow.style.transform = d.open ? 'rotate(180deg)' : 'rotate(0)';
-    var item = d.closest('.faq-item');
-    if(item) item.style.borderColor = d.open ? 'var(--fire)' : 'var(--border)';
+document.querySelectorAll('[data-cat].fv-pchip').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var cat = btn.dataset.cat;
+    document.querySelectorAll('[data-cat].fv-pchip').forEach(function (b) {
+      var on = b === btn; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.fv-faq').forEach(function (item) {
+      item.hidden = !(cat === 'Tümü' || item.dataset.cat === cat);
+    });
   });
 });
-
-function filterFaq(btn, cat) {
-  document.querySelectorAll('.faq-cat-btn').forEach(function(b){
-    b.style.background = 'var(--bg3)'; b.style.color = 'var(--muted)'; b.style.borderColor = 'var(--border)';
-  });
-  btn.style.background = 'var(--fire)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--fire)';
-  document.querySelectorAll('.faq-item').forEach(function(item){
-    item.style.display = (cat === 'Tümü' || item.dataset.cat === cat) ? '' : 'none';
-  });
-}
 </script>
 {% endblock %}

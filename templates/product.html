@@ -26,141 +26,71 @@
 {% endblock %}
 
 {% block content %}
+{% set store = product.platform|title %}
+{% set last_price = history[-1].price_value if history else None %}
+<div class="fv-crumbs" role="navigation" aria-label="Sayfa yolu">
+  <a href="/">Anasayfa</a><span aria-hidden="true">›</span>
+  <a href="/?platform={{ product.platform }}">{{ store }}</a><span aria-hidden="true">›</span>
+  <span aria-current="page">{{ (product.title or 'Ürün')[:60] }}</span>
+</div>
 
-<a href="/" style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--muted);text-decoration:none;margin-bottom:20px;transition:color .15s;" onmouseover="this.style.color='var(--fire)'" onmouseout="this.style.color='var(--muted)'">
-  ← Tüm Fırsatlar
-</a>
-
-<div style="display:grid;grid-template-columns:1fr 1.6fr;gap:20px;align-items:start;">
-
-  <!-- Resim -->
-  <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;display:flex;align-items:center;justify-content:center;padding:32px;min-height:280px;">
-    {% if product.image_url %}
-    <img src="{{ product.image_url }}" alt="{{ product.title }}" style="max-width:100%;max-height:280px;object-fit:contain;">
-    {% else %}
-    <span style="font-size:80px;">⏳</span>
-    {% endif %}
+<div class="fv-detail">
+  <div class="fv-detail-img">
+    {% if product.image_url %}<img src="{{ product.image_url }}" alt="{{ product.title }}">{% else %}<span class="fv-muted">Görsel hazırlanıyor</span>{% endif %}
   </div>
 
-  <!-- Detay -->
-  <div style="display:flex;flex-direction:column;gap:16px;">
-
-    <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:28px;">
-
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
-        <span class="badge-{{ product.platform }}" style="font-size:12px;font-weight:700;padding:5px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px;">
-          {% if product.platform=='amazon' %}🟠{% elif product.platform=='trendyol' %}🔴{% elif product.platform=='n11' %}🟣{% elif product.platform=='karaca' %}🟤{% elif product.platform=='beymen' %}⚫{% else %}🟡{% endif %}
-          {{ product.platform|title }}
-        </span>
-        <span style="background:#fef3c7;color:#d97706;border:1.5px solid #fde68a;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">⏳ Taranıyor...</span>
+  <div class="fv-stack">
+    <section class="fv-panel fv-stack" style="gap:14px;">
+      <div>
+        <div class="fv-meta">
+          <span class="fv-store">{{ store }}</span>
+          <span class="fv-chip warn">Fiyatı takip ediliyor</span>
+          {% if product.stock == 'Stok Yok' %}<span class="fv-chip bad">Stokta yok</span>{% endif %}
+        </div>
+        <h1>{{ product.title or 'Ürün bilgileri yükleniyor...' }}</h1>
       </div>
-
-      <h1 style="font-size:clamp(16px,2.5vw,22px);font-weight:700;color:var(--text);line-height:1.4;margin:0 0 16px;">
-        {{ product.title or 'Ürün bilgileri yükleniyor...' }}
-      </h1>
 
       {% if product.rating %}
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;">
-        <span style="color:var(--fire3);font-size:14px;">{% for i in range(product.rating|int) %}★{% endfor %}</span>
-        <span style="font-size:14px;font-weight:700;">{{ "%.1f"|format(product.rating) }}</span>
-        {% if product.review_count %}<span style="font-size:13px;color:var(--muted);">({{ "{:,}".format(product.review_count) }} yorum)</span>{% endif %}
-      </div>
+      <div class="fv-rating"><span aria-hidden="true">{% for i in range(product.rating|int) %}★{% endfor %}</span>{{ "%.1f"|format(product.rating) }}
+        {% if product.review_count %}<small>({{ "{:,}".format(product.review_count).replace(",", ".") }} değerlendirme)</small>{% endif %}</div>
       {% endif %}
 
-      <!-- Takip durumu -->
-      <div style="background:linear-gradient(135deg,#fffbeb,#fff);border:1.5px solid #fde68a;border-radius:14px;padding:18px 20px;margin-bottom:20px;">
-        <div style="font-size:14px;font-weight:700;color:#92400e;margin-bottom:6px;">📊 Fiyatı Takip Ediyoruz</div>
-        <div style="font-size:13px;color:#b45309;line-height:1.6;font-weight:500;">
-          Ürün fiyatı izleniyor. Fiyat <strong>son 30 günün en düşük seviyesinin altına inip</strong> 30 günlük ortalamasından <strong>en az %10 ucuzladığında</strong> fırsat oluşturulur ve bu sayfaya yönlendirilirsin.
-        </div>
-      </div>
+      {% if last_price %}
+      <div class="fv-bigprice"><strong>{{ last_price|price_tr }} TL</strong></div>
+      <p class="fv-muted">Son taranan fiyat</p>
+      {% endif %}
+
+      <p class="fv-alert info" style="font-weight:500;"><span>Bu ürünün fiyatını izliyoruz. Fiyat <strong>son 30 günün en düşüğüne inip</strong> 30 günlük ortalamasından <strong>en az %10 ucuzladığında</strong> fırsat olarak yayınlanır.</span></p>
 
       {% include "_pump_warning.html" %}
 
-      <!-- Orijinal linke git -->
-      <a href="{{ product.source_url }}" target="_blank" rel="nofollow"
-         style="display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--bg3);border:1.5px solid var(--border);color:var(--text);font-family:'DM Sans',sans-serif;font-size:15px;font-weight:700;padding:14px;border-radius:14px;text-decoration:none;transition:all .2s;margin-bottom:12px;box-sizing:border-box;"
-         onmouseover="this.style.borderColor='var(--fire)';this.style.color='var(--fire)'"
-         onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text)'">
-        {{ product.platform|title }}'da Görüntüle
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>
-      </a>
+      <a class="fv-btn block lg ghost" href="{{ product.source_url }}" target="_blank" rel="nofollow">{{ store }}'da görüntüle
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24" aria-hidden="true" style="margin-left:6px;"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg></a>
 
-      <div style="font-size:12px;color:var(--muted);font-weight:500;text-align:center;">
-        📅 Eklenme: {{ product.first_seen_at[:10] if product.first_seen_at else '—' }}
-      </div>
-    </div>
+      <div class="fv-meta-line"><span>Takibe alınma: {{ product.first_seen_at[:10] if product.first_seen_at else '—' }}</span></div>
+    </section>
 
-    <!-- Fiyat geçmişi grafiği -->
     {% include "_price_history_chart.html" %}
 
-  </div>
-</div>
-
-<!-- ── Platformlar Arası Fiyat Karşılaştırma ──────────────── -->
-{% if comparison and comparison.products and comparison.products|length > 1 %}
-<div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:20px;padding:24px 28px;margin-top:20px;">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
-    <span style="font-size:22px;">⚖️</span>
-    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">DİĞER PLATFORMLARDA FİYAT</h2>
-    {% if comparison.savings %}
-    <span style="background:linear-gradient(135deg,#16a34a,#22c55e);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:8px;">
-      En ucuz: {{ comparison.savings.cheapest_platform|title }}
-    </span>
+    {% if comparison and comparison.products and comparison.products|length > 1 %}
+    <section class="fv-panel">
+      <h2>Diğer mağazalarda fiyat {% if comparison.savings %}<span class="fv-chip low">En ucuz: {{ comparison.savings.cheapest_platform|title }}</span>{% endif %}</h2>
+      <div class="fv-rows">
+        {% for p in comparison.products %}
+        {% set cheapest = comparison.cheapest and p.id == comparison.cheapest.id %}
+        <div class="fv-rowi{% if cheapest %} hl{% endif %}">
+          <span class="fv-store">{{ p.platform|title }}</span>
+          <span class="fv-grow"><span class="fv-muted" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{{ (p.title or '')[:70] }}</span></span>
+          <span class="fv-rprice"><strong>{% if p.current_price %}{{ p.current_price|price_tr }} TL{% else %}—{% endif %}</strong>{% if cheapest %}<small>En ucuz</small>{% endif %}</span>
+          <a class="fv-btn sm {{ 'accent' if cheapest else 'ghost' }}" href="{{ p.source_url }}" target="_blank" rel="nofollow noopener">Git →</a>
+        </div>
+        {% endfor %}
+      </div>
+      {% if comparison.savings %}
+      <p class="fv-alert ok" style="margin-top:12px;"><span>En ucuz mağazada {{ comparison.savings.amount|price_tr }} TL (%{{ comparison.savings.percent|int }}) tasarruf edebilirsin.</span></p>
+      {% endif %}
+    </section>
     {% endif %}
   </div>
-
-  <div style="display:flex;flex-direction:column;gap:10px;">
-    {% for p in comparison.products %}
-    {% set is_cheapest = comparison.cheapest and p.id == comparison.cheapest.id %}
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;background:{% if is_cheapest %}rgba(22,163,74,.08){% else %}var(--bg3){% endif %};border:1.5px solid {% if is_cheapest %}#16a34a{% else %}var(--border){% endif %};border-radius:14px;padding:14px 18px;flex-wrap:wrap;">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span style="font-size:18px;">
-          {% if p.platform=='amazon' %}🟠
-          {% elif p.platform=='trendyol' %}🔴
-          {% elif p.platform=='n11' %}🟣
-          {% elif p.platform=='karaca' %}🟤{% elif p.platform=='beymen' %}⚫
-          {% else %}🟡{% endif %}
-        </span>
-        <div>
-          <div style="font-weight:700;font-size:14px;color:var(--text);">{{ p.platform|title }}</div>
-          {% if p.title %}
-          <div style="font-size:11px;color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ p.title[:60] }}</div>
-          {% endif %}
-        </div>
-        {% if is_cheapest %}
-        <span style="background:#dcfce7;color:#16a34a;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;">EN UCUZ</span>
-        {% endif %}
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;">
-        {% if p.current_price %}
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:{% if is_cheapest %}#16a34a{% else %}var(--fire){% endif %};">
-          {{ "{:,.0f}".format(p.current_price).replace(",",".") }} TL
-        </div>
-        {% else %}
-        <div style="font-size:13px;color:var(--muted);font-weight:600;">Fiyat bekleniyor...</div>
-        {% endif %}
-        <a href="{{ p.source_url }}" target="_blank" rel="nofollow noopener"
-           style="background:var(--fire);color:#fff;font-size:12px;font-weight:700;padding:8px 16px;border-radius:10px;text-decoration:none;white-space:nowrap;">
-          Git →
-        </a>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-
-  {% if comparison.savings %}
-  <div style="margin-top:14px;padding:12px 16px;background:rgba(22,163,74,.06);border:1.5px solid #bbf7d0;border-radius:12px;font-size:13px;color:#16a34a;font-weight:700;text-align:center;">
-    💰 En ucuz platformda {{ "{:,.0f}".format(comparison.savings.amount).replace(",",".") }} TL tasarruf edebilirsiniz (%{{ comparison.savings.percent|int }})
-  </div>
-  {% endif %}
 </div>
-{% endif %}
-
-<style>
-@media (max-width: 700px) {
-  div[style*="grid-template-columns:1fr 1.6fr"] { grid-template-columns: 1fr !important; }
-}
-</style>
-
 {% endblock %}
