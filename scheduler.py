@@ -19,19 +19,21 @@ log = logging.getLogger("scheduler")
 
 
 # ── Tazelik hedefleri (saat) — 2026-10-13 revizyonu, bkz. _requeue_worker 3-4 ──────
-# 2026-11-01: 4/6/12 → 3/4/8 — scraper kuyruğu sürekli boş bekliyordu (darboğaz
-# tarayıcı değil bu aralıklardı). Amazon (engel ara sayfası) ve Karaca (günde 2
-# tarama kararı) standartta 12 saatte kalır.
-ACTIVE_DEAL_HOURS = 3    # aktif fırsatlı ürün
-IMPORTANT_HOURS   = 4    # şu an dipte, takip listesi, fırsat karşılaştırma eşleri
-STANDARD_HOURS    = 12   # tarama turu kimliği (çerez sıfırlama) ve aşağıdaki varsayılan dışı platformlar
-_STANDARD_HOURS_DEFAULT = 8
-_STANDARD_HOURS_BY_PLATFORM = {"amazon": 12, "karaca": 12}
+# 2026-11-01: 4/6/12 → 1/2/2 (kullanıcı kararı, "sonra yükseltiriz") — scraper
+# kuyruğu sürekli boş bekliyordu; darboğaz tarayıcı değil bu aralıklardı. Bu,
+# scraper kapasitesinin sınırı (2-4sn → platform başına saatte ~1.000-1.200
+# istek): Trendyol/Hepsiburada'da engel riski artar, panelde izlenmeli.
+# Amazon engel ara sayfası nedeniyle 12 saatte kalır.
+ACTIVE_DEAL_HOURS = 1    # aktif fırsatlı ürün
+IMPORTANT_HOURS   = 2    # şu an dipte, takip listesi, fırsat karşılaştırma eşleri
+STANDARD_HOURS    = 12   # tarama turu kimliği (çerez sıfırlama) — tarama aralığı değil
+_STANDARD_HOURS_DEFAULT = 2
+_STANDARD_HOURS_BY_PLATFORM = {"amazon": 12}
+PACE_MAX_BURST    = 20   # platform başına tek seferde kuyruğa en fazla bu kadar standart ürün
 
 
 def _standard_hours(platform: str) -> int:
     return _STANDARD_HOURS_BY_PLATFORM.get(platform, _STANDARD_HOURS_DEFAULT)
-PACE_MAX_BURST    = 20   # platform başına tek seferde kuyruğa en fazla bu kadar standart ürün
 
 _BASE_SQL = "p.platform IS NOT NULL AND p.platform <> 'beymen' AND p.source_url IS NOT NULL"
 _pace_state = {"last": _time.monotonic(), "credit": {}}
