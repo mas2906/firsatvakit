@@ -620,7 +620,9 @@ async def _az_pw_handler(page, url: str) -> Optional[dict]:
     if _az_is_notfound(html):
         return {"not_found": True}
     if _az_is_blocked(html):
-        return None
+        # Ayrı işaretle: eskiden "veri yok"la karışıyor, hatanın hızdan (engel)
+        # mi sayfadan (fiyat okunamadı) mı geldiği anlaşılmıyordu.
+        return {"blocked": "amazon engel ara sayfasi"}
     return await asyncio.to_thread(_az_parse, html)
 
 

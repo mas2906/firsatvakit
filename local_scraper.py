@@ -214,6 +214,12 @@ async def process_job(job: dict, client: httpx.AsyncClient) -> None:
             await send_webhook(client, pid, url, platform, {"error": "dead_url"})
             return
 
+        if data and data.get("blocked"):
+            # Mesajda "captcha" geçiyor → panelde blok olarak sayılır.
+            log.warning(f"[{platform}] 🚫 #{pid} engel sayfası (captcha) — {url[:60]}")
+            await send_webhook(client, pid, url, platform, {"error": f"captcha: {data['blocked']}"})
+            return
+
         if data and data.get("removed"):
             log.warning(f"[{platform}] 🗑 #{pid} satıştan kaldırılmış → {data.get('final_url', '')[-60:]}")
             await send_webhook(client, pid, url, platform,

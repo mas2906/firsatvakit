@@ -213,7 +213,9 @@ RL: dict[str, RateLimiter] = {
     # Amazon istisna (2026-11-01): 2-4sn'de birkaç saat sonra IP'ye engel ara
     # sayfası gösterip 9 saat bırakmadı. İhtiyaç saatte ~40 ürün; 15-30sn ile
     # saatte ~150'ye kadar çıkılabiliyor (ihtiyacın 3-4 katı).
-    "amazon":      RateLimiter(15.0, 30.0),
+    # 2026-11-01 akşam: kullanıcı isteğiyle 15-30 → 8-15sn (16 Eki'de 8-20sn'de
+    # %92 başarı vardı). Engel gelirse amazon_pw 15dk askıya alınır.
+    "amazon":      RateLimiter(8.0, 15.0),
     "hepsiburada": RateLimiter(2.0, 4.0),
     "karaca":      RateLimiter(2.0, 4.0),
 }
@@ -275,7 +277,7 @@ def redirected_away(platform: str, orig_url: str, final_url: str) -> bool:
 def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[str]) -> Optional[dict]:
     if not data or not price_only:
         return data
-    if data.get("dead_url") or data.get("removed") or data.get("error"):
+    if data.get("dead_url") or data.get("removed") or data.get("blocked") or data.get("error"):
         return data
     out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
     if cached_image:
@@ -620,6 +622,13 @@ async def crawlee_pw_scrape(
 
 
 def _pw_finish(platform: str, cb_key: str, result: dict) -> Optional[dict]:
+    # Engel sayfası: sonuç döner (neden loglansın diye) ama başarı sayılmaz —
+    # devre kesici ve hız sınırlayıcı için hata.
+    if result and result.get("blocked"):
+        cb_fail(cb_key)
+        if platform in RL:
+            RL[platform].record_failure()
+        return result
     if result:
         cb_reset(cb_key)
         if platform in RL:
