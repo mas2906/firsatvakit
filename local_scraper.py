@@ -83,6 +83,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("local_scraper")
+# httpx her poll'u (saniyede birkaç istek) ve crawlee her tek-URL çalıştırmasının
+# istatistik tablosunu INFO'da basıyordu — logun ~%75'i buydu, gerçek hatalar
+# kayboluyordu.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("crawlee").setLevel(logging.WARNING)
 
 BASE_URL      = os.getenv("BASE_URL", "https://firsatvakti.com")
 API_KEY       = os.getenv("SCRAPER_SERVICE_KEY", "firsatvakti-scraper-key")
@@ -94,11 +99,11 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 # Trendyol kataloğu küçük olduğu için (bkz. /admin) daha da düşük — daha önce
 # yüksek concurrency + kısa gecikmeyle blok yemişti.
 PLATFORM_CONCURRENT = {
-    "amazon":      2,
-    "trendyol":    1,
-    "hepsiburada": 2,
-    "n11":         2,
-    "karaca":      1,
+    "amazon":      1,   # 2026-11-01: 3→1 — engel ara sayfası (bkz. crawlee_base RL notu)
+    "trendyol":    4,   # 2026-10-16: 1→4 — sayfa süresi beklemeyle üst üste binsin; istek aralığını RL (6-15sn) belirler
+    "hepsiburada": 3,   # 2026-10-31: 2→3
+    "n11":         3,   # 2026-10-31: 2→3
+    "karaca":      2,   # 2026-10-31: 1→2 (curl, hafif)
 }
 
 SCHEDULE = {
@@ -121,14 +126,17 @@ def _is_night() -> bool:
 
 
 def _calc_concurrent(platform: str) -> int:
-    base = PLATFORM_CONCURRENT.get(platform, 1)
-    if platform == "amazon" and _is_night():
-        return base * 2
-    return base
+    # Amazon'un gece iki katına çıkması 2026-11-01'de kaldırıldı: engel ara
+    # sayfası tam gece yüksek hızın ardından başlıyordu.
+    return PLATFORM_CONCURRENT.get(platform, 1)
 
 
 from scrapers.router import scrape_product  # noqa: E402
-from scrapers.crawlee_base import RL  # noqa: E402
+from scrapers.crawlee_base import RL, cb_remaining  # noqa: E402
+
+# Yalnızca tarayıcıyla taranan platformlar (curl ön denemesi yok): devre kesici
+# askıdayken bunlar için kuyruktan iş çekilmez.
+_BROWSER_ONLY = {"amazon", "trendyol"}
 
 
 # ── Tarama turu takibi: tur başa döndüğünde çerezleri temizle ─────────────────
@@ -194,6 +202,7 @@ async def process_job(job: dict, client: httpx.AsyncClient) -> None:
                 80 if platform == "amazon"       else  # PW 65s (isinma dahil, curl yok)
                 90 if platform == "n11"          else  # curl 20s + PW 55s
                 90)                                    # hepsiburada: curl 20s + PW 55s
+
     try:
         data = await asyncio.wait_for(
             scrape_product(url, platform, price_only=price_only, cached_image=cached_image),
@@ -205,10 +214,20 @@ async def process_job(job: dict, client: httpx.AsyncClient) -> None:
             await send_webhook(client, pid, url, platform, {"error": "dead_url"})
             return
 
+        if data and data.get("removed"):
+            log.warning(f"[{platform}] 🗑 #{pid} satıştan kaldırılmış → {data.get('final_url', '')[-60:]}")
+            await send_webhook(client, pid, url, platform,
+                               {"error": f"kaldirildi: {data.get('final_url', '')[:200]}"})
+            return
+
         if data and data.get("price"):
             log.info(f"[{platform}] ✔ #{pid} fiyat={data['price']} stok={data.get('stock','-')}")
             _last_success[platform] = time.time()
             _error_streak_logged[platform] = False
+        elif data and data.get("stock") == "Stok Yok":
+            # Hata değil: VPS bunu stok-yok olarak işliyor (eskiden "veri yok" diye
+            # loglanıp ban sanılıyordu).
+            log.info(f"[{platform}] ○ #{pid} stok yok")
         else:
             log.warning(f"[{platform}] ✘ #{pid} veri yok — {url[:60]}")
 
@@ -221,19 +240,32 @@ async def process_job(job: dict, client: httpx.AsyncClient) -> None:
         await send_webhook(client, pid, url, platform, {"error": str(e)})
 
 
+WEBHOOK_RETRY_DELAYS = (3, 10, 30, 60)
+
+
 async def send_webhook(client: httpx.AsyncClient, product_id: int, url: str,
                         platform: str, data: dict) -> None:
+    # Kesinti anında webhook kaybolursa taranan fiyat çöpe gidiyor ve iş VPS'te
+    # "processing" olarak takılı kalıyordu — kısa geri çekilmelerle tekrar dene.
     payload = {"product_id": product_id, "url": url, "platform": platform, "data": data}
-    try:
-        r = await client.post(
-            f"{BASE_URL}/api/scraper-webhook",
-            json=payload,
-            headers={"X-Webhook-Key": WEBHOOK_KEY},
-            timeout=10,
-        )
-        log.info(f"[{platform}] webhook {r.status_code} #{product_id}")
-    except Exception as e:
-        log.error(f"[{platform}] webhook failed #{product_id}: {e}")
+    for attempt, delay in enumerate((0, *WEBHOOK_RETRY_DELAYS)):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            r = await client.post(
+                f"{BASE_URL}/api/scraper-webhook",
+                json=payload,
+                headers={"X-Webhook-Key": WEBHOOK_KEY},
+                timeout=10,
+            )
+            if r.status_code < 500:
+                log.info(f"[{platform}] webhook {r.status_code} #{product_id}")
+                return
+            err = f"HTTP {r.status_code}"
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+        log.warning(f"[{platform}] webhook deneme {attempt + 1} başarısız #{product_id}: {err}")
+    log.error(f"[{platform}] webhook failed #{product_id}: {len(WEBHOOK_RETRY_DELAYS) + 1} deneme tükendi")
 
 
 async def reset_stale_jobs(client: httpx.AsyncClient) -> None:
@@ -314,6 +346,15 @@ async def _worker(platform: str, worker_id: int, client: httpx.AsyncClient) -> N
             if worker_id >= _calc_concurrent(platform):
                 await asyncio.sleep(60)
                 continue
+
+            # Tarayıcıyla taranan platform askıdaysa kuyruktan iş ÇEKME: eskiden
+            # askı süresince çekilen her iş denenmeden "veri yok" sayılıyordu
+            # (Amazon'da 101 hata böyle oluştu) ve ürün 2 saat atlanıyordu.
+            if platform in _BROWSER_ONLY:
+                wait = cb_remaining(f"{platform}_pw")
+                if wait > 0:
+                    await asyncio.sleep(min(wait, 60))
+                    continue
 
             job = await _fetch_one_job(client, platform)
             if not job:

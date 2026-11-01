@@ -13,11 +13,19 @@ Sağladığı özellikler:
 
 import asyncio
 import logging
+import os
 import random
+import re
 import time as _time
+from datetime import timedelta
 from typing import Optional
+from urllib.parse import urlsplit
 
 from scrapers.utils import RateLimiter
+
+# crawlee varsayılan olarak RAM'in %25'ini (24GB makinede ~6GB) tavan sayıyor ve
+# "Memory is critically overloaded" deyip kendi autoscaler'ını kısıyordu.
+os.environ.setdefault("CRAWLEE_MEMORY_MBYTES", "12288")
 
 log = logging.getLogger("scraper")
 
@@ -192,13 +200,22 @@ def drop_session(platform: str) -> None:
 # yemişti; 8-20sn + concurrency=1 o olaydaki değerin hâlâ belirgin şekilde
 # üzerinde, ama eski 15-40sn'ye göre daha hızlı — adaptif backoff (record_failure)
 # blok sinyali gelirse aralığı otomatik genişletir.
+# 2026-10-16: ~%25 hızlandırıldı (8-20 → 6-15 vb.). Ban testinde captcha/engel
+# görülmedi; asıl yavaşlatan şey kaldırılmış HB ürünlerinin kategori sayfasının
+# "blok" sayılmasıydı (bkz. redirected_away). Trendyol'un ban yediği 2-5.5sn'nin
+# hâlâ belirgin şekilde üzerinde.
+# 2026-10-31 (kullanıcı isteği): tüm platformlarda istekler arası en fazla 4sn.
+# DİKKAT: Trendyol geçmişte 2-5.5sn + concurrency=6'da ban vermişti; engel
+# gelirse record_failure() aralığı yine 4 katına kadar genişletir (güvenlik ağı).
 RL: dict[str, RateLimiter] = {
-    "trendyol":    RateLimiter(8.0, 20.0),
-    "n11":         RateLimiter(8.0, 20.0),
-    "amazon":      RateLimiter(8.0, 20.0),
-    "hepsiburada": RateLimiter(6.0, 15.0),
-    # Karaca: bot engeli yok, sayfa hafif (curl) — yine de nazik: ~700 ürün günde rahat biter
-    "karaca":      RateLimiter(5.0, 12.0),
+    "trendyol":    RateLimiter(2.0, 4.0),
+    "n11":         RateLimiter(2.0, 4.0),
+    # Amazon istisna (2026-11-01): 2-4sn'de birkaç saat sonra IP'ye engel ara
+    # sayfası gösterip 9 saat bırakmadı. İhtiyaç saatte ~40 ürün; 15-30sn ile
+    # saatte ~150'ye kadar çıkılabiliyor (ihtiyacın 3-4 katı).
+    "amazon":      RateLimiter(15.0, 30.0),
+    "hepsiburada": RateLimiter(2.0, 4.0),
+    "karaca":      RateLimiter(2.0, 4.0),
 }
 
 # ── Circuit breaker ───────────────────────────────────────────────────────────
@@ -206,29 +223,59 @@ _STREAK: dict[str, int] = {}
 _DISABLED: dict[str, float] = {}
 _STREAK_LIMIT = 4
 _COOLDOWN_S = 120
+# Amazon engel ara sayfası ("Alışverişe devam etmek için tıklayın") gösterince
+# 2 dk sonra aynı hızla dönmek engeli saatlerce uzatıyordu (2026-11-01: 03-12
+# arası saatte 1-16 başarı). Engel gelince uzun süre geri çekil.
+_COOLDOWN_BY_KEY = {"amazon_pw": 15 * 60}
 
 
 def cb_ok(key: str) -> bool:
     return _time.time() > _DISABLED.get(key, 0.0)
 
 
+def cb_remaining(key: str) -> float:
+    """Devre kesicinin açılmasına kalan saniye (askıda değilse 0)."""
+    return max(0.0, _DISABLED.get(key, 0.0) - _time.time())
+
+
 def cb_fail(key: str) -> None:
     _STREAK[key] = _STREAK.get(key, 0) + 1
     if _STREAK[key] >= _STREAK_LIMIT:
-        _DISABLED[key] = _time.time() + _COOLDOWN_S
+        cooldown = _COOLDOWN_BY_KEY.get(key, _COOLDOWN_S)
+        _DISABLED[key] = _time.time() + cooldown
         _STREAK[key] = 0
-        log.warning(f"[{key}] {_STREAK_LIMIT} ardışık hata → {_COOLDOWN_S}s askı")
+        log.warning(f"[{key}] {_STREAK_LIMIT} ardışık hata → {cooldown}s askı")
 
 
 def cb_reset(key: str) -> None:
     _STREAK[key] = 0
 
 
+# ── Satıştan kaldırılmış ürün tespiti ─────────────────────────────────────────
+# HB ve N11 kaldırılan ürünü HTTP 301/302 ile kategori ya da arama sayfasına
+# yönlendiriyor. Yalnızca curl'ün SUNUCU tarafı yönlendirme sonrası URL'sine
+# bakılır (Playwright'ın istemci tarafı page.url'i değil — o yanlış-pozitif
+# üretmişti). Tek sinyalle silinmez: VPS ikinci tekrarda siler.
+_HB_CODE_RE = re.compile(r"-pm?-([a-z0-9]{8,})", re.I)
+
+
+def redirected_away(platform: str, orig_url: str, final_url: str) -> bool:
+    if not final_url or final_url.rstrip("/") == orig_url.rstrip("/"):
+        return False
+    final_l = final_url.lower()
+    if platform == "hepsiburada":
+        m = _HB_CODE_RE.search(orig_url)
+        return bool(m) and "hepsiburada.com" in final_l and m.group(1).lower() not in final_l
+    if platform == "n11":
+        return "/urun/" in orig_url and "n11.com" in final_l and "/urun/" not in final_l
+    return False
+
+
 # ── price_filter yardımcısı ───────────────────────────────────────────────────
 def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[str]) -> Optional[dict]:
     if not data or not price_only:
         return data
-    if data.get("dead_url") or data.get("error"):
+    if data.get("dead_url") or data.get("removed") or data.get("error"):
         return data
     out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
     if cached_image:
@@ -327,6 +374,16 @@ async def _human_interact(page) -> None:
         pass
 
 
+def already_on(page, url: str) -> bool:
+    """crawlee handler'a sayfayı zaten açmış olarak verir — HTML'den okuyan
+    handler'lar aynı URL'yi ikinci kez açmasın (sorgu/fragman yok sayılır)."""
+    try:
+        cur, want = urlsplit(page.url or ""), urlsplit(url)
+        return cur.netloc == want.netloc and cur.path.rstrip("/") == want.path.rstrip("/")
+    except Exception:
+        return False
+
+
 async def _warmup_navigation(page, base_url: str) -> None:
     """Asıl hedefe gitmeden önce platformun ana sayfasını ziyaret eder —
     gerçek kullanıcı izlenimi + çerez/oturum ısınması sağlar (referans:
@@ -374,7 +431,99 @@ if _CAMOUFOX_OK:
 # en fazla bu kadar gerçek tarayıcı instance açık olabilir. Platform başına
 # concurrent ayarları bu sınırı aşabilir (poll+express çakışması dahil) — asıl
 # CPU/RAM tavanını burada garanti ediyoruz.
-_GLOBAL_PW_SEM = asyncio.Semaphore(4)
+# 2026-10-31: 4→6 — Trendyol 4 worker + Amazon 2 + HB/N11 fallback'leri 4 slot
+# için kuyruğa giriyor, Trendyol işleri ortalama ~165sn sürüyordu. Makine 24GB.
+_GLOBAL_PW_SEM = asyncio.Semaphore(8)  # 2026-10-31: 6→8 (kalıcı tarayıcı havuzu, açılış maliyeti yok)
+
+
+# ── Kalıcı Camoufox tarayıcıları (platform başına) ────────────────────────────
+# crawlee her run()'da tarayıcı havuzunu açıp kapatıyor (havuz paylaşılamıyor):
+# ürün başı ~9sn sadece Camoufox açılışı (2026-10-31 ölçüm: 33sn'nin 9sn'si).
+# Burada platform başına bir tarayıcı açık tutulur; her ürün yine kendi temiz
+# context'inde (çerezsiz) açılır. _PW_RETIRE_AFTER sayfada bir tarayıcı
+# yenilenir — Camoufox parmak izi tarayıcı açılışında üretildiği için böylece
+# parmak izi de dönüşümlü değişir.
+_PW_RETIRE_AFTER = 40
+_SELF_NAVIGATING = {"trendyol", "n11"}
+
+
+class _BrowserSlot:
+    def __init__(self, browser) -> None:
+        self.browser = browser
+        self.pages = 0
+        self.inflight = 0
+        self.retired = False
+
+
+# Platform başına tarayıcı HAVUZU, her tarayıcıda aynı anda tek sayfa: tek
+# tarayıcıyı birkaç işle paylaşınca (Trendyol 4 worker) sonraki sayfalar ~50sn
+# takılıp boş dönüyordu (2026-10-31 test). Boşta tarayıcı yoksa yenisi açılır;
+# havuz büyüklüğü doğal olarak o platformun eşzamanlı iş sayısını geçmez.
+_PERSIST: dict[str, list[_BrowserSlot]] = {}
+_PERSIST_LOCKS: dict[str, asyncio.Lock] = {}
+_PW_START_LOCK = asyncio.Lock()
+_PLAYWRIGHT = None
+
+
+async def _close_quietly(obj) -> None:
+    try:
+        await asyncio.wait_for(obj.close(), timeout=15)
+    except Exception:
+        pass
+
+
+async def _acquire_browser(platform: str) -> _BrowserSlot:
+    global _PLAYWRIGHT
+    async with _PW_START_LOCK:
+        if _PLAYWRIGHT is None:
+            from playwright.async_api import async_playwright
+            _PLAYWRIGHT = await async_playwright().start()
+    async with _PERSIST_LOCKS.setdefault(platform, asyncio.Lock()):
+        pool = _PERSIST.setdefault(platform, [])
+        for s in list(pool):
+            if s.inflight == 0 and (not s.browser.is_connected() or s.pages >= _PW_RETIRE_AFTER):
+                pool.remove(s)
+                s.retired = True
+                asyncio.create_task(_close_quietly(s.browser))
+        slot = next((s for s in pool if s.inflight == 0), None)
+        if slot is None:
+            browser = await _camoufox_new_browser(
+                _PLAYWRIGHT, headless=True, os=["windows"], locale="tr-TR",
+                humanize=True, block_webrtc=True,
+            )
+            slot = _BrowserSlot(browser)
+            pool.append(slot)
+            log.info(f"[pw/{platform}] yeni Camoufox tarayıcısı açıldı (havuz={len(pool)})")
+        slot.pages += 1
+        slot.inflight += 1
+        return slot
+
+
+def _release_browser(slot: _BrowserSlot) -> None:
+    slot.inflight -= 1
+
+
+async def _persistent_pw_scrape(url: str, platform: str, page_handler) -> dict:
+    slot = await _acquire_browser(platform)
+    ctx = None
+    try:
+        ctx = await slot.browser.new_context()
+        page = await ctx.new_page()
+        await page.route("**/*", _block_route)
+        # Trendyol/N11 handler'ları XHR dinleyicisini takıp sayfayı KENDİLERİ
+        # açıyor — burada önceden açmak sayfayı iki kez yükletirdi.
+        if platform not in _SELF_NAVIGATING:
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log.debug(f"[pw/{platform}] goto hata: {e}")
+                return {}
+            await _human_interact(page)
+        return await page_handler(page, url) or {}
+    finally:
+        if ctx is not None:
+            await _close_quietly(ctx)
+        _release_browser(slot)
 
 
 async def crawlee_pw_scrape(
@@ -402,6 +551,17 @@ async def crawlee_pw_scrape(
 
     result: dict = {}
 
+    if _CAMOUFOX_OK and _PROXY_CONFIG is None:
+        async with _GLOBAL_PW_SEM:
+            try:
+                result.update(await asyncio.wait_for(
+                    _persistent_pw_scrape(url, platform, page_handler), timeout=timeout))
+            except asyncio.TimeoutError:
+                log.warning(f"[pw/{platform}] timeout: {url[:60]}")
+            except Exception as e:
+                log.debug(f"[pw/{platform}] hata: {e}")
+        return _pw_finish(platform, cb_key, result)
+
     async with _GLOBAL_PW_SEM:
         # Her çağrıda StorageInstanceManager sıfırla: önceki çağrının cached queue'sunu devralmasın
         try:
@@ -411,6 +571,9 @@ async def crawlee_pw_scrape(
 
         crawler_kwargs = dict(
             max_requests_per_crawl=1,
+            # Varsayılan 3 tekrar, tek bir timeout bütçesi içinde (DNS hatasında
+            # her biri anında) boşa yanıyordu; asıl tekrar scheduler'da yapılıyor.
+            max_request_retries=1,
             storage_client=MemoryStorageClient(),
             proxy_configuration=_PROXY_CONFIG,
             concurrency_settings=ConcurrencySettings(
@@ -427,12 +590,20 @@ async def crawlee_pw_scrape(
 
         # MemoryStorageClient: disk queue birikimini önler — her çağrı izole
         # min_concurrency=1: CPU yükünde autoscaler concurrency'yi 0'a indirmesin
+        # İlk navigasyon: varsayılan "load" (tüm resimler) yerine HTML hazır olunca
+        # dön — engelleme de navigasyondan ÖNCE takılsın (eskiden handler içinde,
+        # yani ilk yüklemede resim/CSS zaten inmiş oluyordu).
+        crawler_kwargs["goto_options"] = {"wait_until": "domcontentloaded"}
+        crawler_kwargs["navigation_timeout"] = timedelta(seconds=30)
         crawler = PlaywrightCrawler(**crawler_kwargs)
+
+        @crawler.pre_navigation_hook
+        async def _pre_nav(ctx) -> None:
+            await ctx.page.route("**/*", _block_route)
 
         @crawler.router.default_handler
         async def _handler(ctx: PlaywrightCrawlingContext):
             page = ctx.page
-            await page.route("**/*", _block_route)
             await _human_interact(page)
             data = await page_handler(page, ctx.request.url)
             if data:
@@ -445,6 +616,10 @@ async def crawlee_pw_scrape(
         except Exception as e:
             log.debug(f"[crawlee/{platform}] PW hata: {e}")
 
+    return _pw_finish(platform, cb_key, result)
+
+
+def _pw_finish(platform: str, cb_key: str, result: dict) -> Optional[dict]:
     if result:
         cb_reset(cb_key)
         if platform in RL:
