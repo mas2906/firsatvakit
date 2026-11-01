@@ -19,9 +19,18 @@ log = logging.getLogger("scheduler")
 
 
 # ── Tazelik hedefleri (saat) — 2026-10-13 revizyonu, bkz. _requeue_worker 3-4 ──────
-ACTIVE_DEAL_HOURS = 4    # aktif fırsatlı ürün
-IMPORTANT_HOURS   = 6    # şu an dipte, takip listesi, fırsat karşılaştırma eşleri
-STANDARD_HOURS    = 12   # diğer tüm ürünler (Karaca dahil), eşit hızla
+# 2026-11-01: 4/6/12 → 3/4/8 — scraper kuyruğu sürekli boş bekliyordu (darboğaz
+# tarayıcı değil bu aralıklardı). Amazon (engel ara sayfası) ve Karaca (günde 2
+# tarama kararı) standartta 12 saatte kalır.
+ACTIVE_DEAL_HOURS = 3    # aktif fırsatlı ürün
+IMPORTANT_HOURS   = 4    # şu an dipte, takip listesi, fırsat karşılaştırma eşleri
+STANDARD_HOURS    = 12   # tarama turu kimliği (çerez sıfırlama) ve aşağıdaki varsayılan dışı platformlar
+_STANDARD_HOURS_DEFAULT = 8
+_STANDARD_HOURS_BY_PLATFORM = {"amazon": 12, "karaca": 12}
+
+
+def _standard_hours(platform: str) -> int:
+    return _STANDARD_HOURS_BY_PLATFORM.get(platform, _STANDARD_HOURS_DEFAULT)
 PACE_MAX_BURST    = 20   # platform başına tek seferde kuyruğa en fazla bu kadar standart ürün
 
 _BASE_SQL = "p.platform IS NOT NULL AND p.platform <> 'beymen' AND p.source_url IS NOT NULL"
@@ -296,7 +305,7 @@ async def _requeue_worker():
                 db.commit()
                 log.info(f"[requeue] önemli ürünler (fırsat/dipte/takip): {added1} eklendi, {bumped1} öne çekildi")
 
-            # Standart: platform başına eşit hız — ürün_sayısı / 12 sa
+            # Standart: platform başına eşit hız — ürün_sayısı / _standard_hours(platform)
             paced = []
             elapsed = max(0.0, _time.monotonic() - _pace_state["last"])
             _pace_state["last"] = _time.monotonic()
@@ -307,7 +316,8 @@ async def _requeue_worker():
                 # DİKKAT: db katmanının satırları dict gibi — tuple açma (for a, b in ...)
                 # sütun ADLARINI verir, değerleri değil
                 plat, count = pr["platform"], pr["cnt"]
-                rate_per_s = count / (STANDARD_HOURS * 3600)
+                std_h = _standard_hours(plat)
+                rate_per_s = count / (std_h * 3600)
                 credit = min(_pace_state["credit"].get(plat, 0.0) + rate_per_s * elapsed, PACE_MAX_BURST)
                 take = int(credit)
                 if take > 0:
@@ -315,7 +325,7 @@ async def _requeue_worker():
                         SELECT p.id, p.source_url, p.platform FROM products p
                         WHERE p.platform = '{plat}' AND {{base}} AND {{due}}
                         ORDER BY COALESCE(p.last_seen_at, '2000-01-01') ASC
-                        LIMIT {take}""".format(plat=plat, take=take), STANDARD_HOURS)
+                        LIMIT {take}""".format(plat=plat, take=take), std_h)
                     paced += rows
                     # vadesi gelmiş ürün kotadan azsa kalan krediyi biriktirme (sonradan patlama olmasın)
                     credit = 0.0 if len(rows) < take else credit - len(rows)
