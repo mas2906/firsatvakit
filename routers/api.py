@@ -52,6 +52,32 @@ async def _run_cross_search(product_id, platforms=None):
     await cross_search_product(get_db(), product_id, platforms)
 
 
+_CROSS_SEM = None
+
+
+async def _cross_search_throttled(product_id: int):
+    """Barkodu yeni gelen ürün için çapraz arama — aynı anda TEK arama (binlerce ürün
+    aynı saatte barkod alabiliyor; VPS'ten mağazalara istek fırtınası olmasın).
+    Zaten başka mağazayla eşleşmişse atlanır."""
+    global _CROSS_SEM
+    if _CROSS_SEM is None:
+        _CROSS_SEM = asyncio.Semaphore(1)
+    async with _CROSS_SEM:
+        try:
+            db = get_db()
+            matched = db.execute(
+                "SELECT 1 FROM product_group_members a JOIN product_group_members b "
+                "ON b.group_id=a.group_id AND b.product_id<>a.product_id WHERE a.product_id=? LIMIT 1",
+                (product_id,)).fetchone()
+            if matched:
+                return
+            from cross_search import cross_search_product
+            await cross_search_product(db, product_id)
+            await asyncio.sleep(2)
+        except Exception as e:
+            log.warning(f"[cross] #{product_id} çapraz arama hatası: {e}")
+
+
 async def _dispatch_scrape(product_id: int, url: str, platform: str, background_tasks,
                            cross_search_plats: list = None):
     """Scraper servis varsa oraya gönder, USE_LOCAL_SCRAPER=true ise kuyruğa bırak, yoksa lokal çalıştır."""
@@ -491,7 +517,20 @@ async def _save_scraped_data(product_id: int, data: dict):
             db.commit()
         return
 
+    new_barcode = data.get("barcode")
+    had_barcode = True
+    if new_barcode:
+        prev = db.execute("SELECT barcode FROM products WHERE id=?", (product_id,)).fetchone()
+        had_barcode = bool(prev and prev["barcode"])
+
     _update_product_fields(db, product_id, data, stock, now)
+
+    # Ürüne İLK KEZ barkod geldiyse çapraz aramayı başlat. Çapraz arama yalnızca
+    # barkodla eşleştiriyor; toplu eklenen ürünlerde ekleme anındaki arama barkod
+    # olmadığı için atlanıyordu (2026-11-01: son 1 saatte 2.092 N11 ürününden 1 eşleşme).
+    if new_barcode and not had_barcode:
+        db.commit()
+        asyncio.create_task(_cross_search_throttled(product_id))
 
     if oos:
         _handle_out_of_stock(db, product_id, price, now)

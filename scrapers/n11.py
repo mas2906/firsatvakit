@@ -25,7 +25,7 @@ from bs4 import BeautifulSoup
 from scrapers.crawlee_base import (
     IOS_UAS, get_session, drop_session, RL,
     cb_ok, cb_fail, cb_reset, price_filter,
-    crawlee_pw_scrape, _CURL_OK,
+    crawlee_pw_scrape, _CURL_OK, redirected_away,
 )
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
@@ -236,6 +236,12 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
         raw_path = images[0].get("path", "")
         image_url = raw_path.replace("{0}", "600_800") if raw_path else None
 
+    # Barkod: N11 seçili/satıştaki varyantın GTIN'ini defaultGtin'de veriyor
+    # (skus[] tüm renk/boyut varyantlarının barkodlarını içerir — onlar değil).
+    # Eskiden hiç okunmuyordu; N11 ürünleri barkodsuz kalıp çapraz arama atlanıyordu.
+    gtin = str(product.get("defaultGtin") or "").strip()
+    barcode = gtin if re.fullmatch(r"\d{8,14}", gtin) else None
+
     log.info(f"[n11/model] ✔ title={product.get('title','?')[:40]} price={price}")
     return {
         "title":        product.get("title"),
@@ -244,7 +250,7 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
         "image_url":    image_url,
         "stock":        stock,
         "cart_discount": False,
-        "barcode":      None,
+        "barcode":      barcode,
         "rating":       None,
         "review_count": None,
     }
@@ -415,6 +421,10 @@ async def _n11_via_curl(url: str) -> Optional[dict]:
         if r.status_code != 200:
             return None
 
+        if redirected_away("n11", url, str(r.url)):
+            log.info(f"[n11/curl] kaldırılmış ürün → {str(r.url)[-60:]}")
+            return {"removed": True, "final_url": str(r.url)}
+
         html = r.text
         if not html or len(html) < 3000:
             drop_session("n11")
@@ -446,7 +456,7 @@ async def scrape_n11(url: str, price_only: bool = False,
     # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
     # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
     data = await _n11_via_curl(url)
-    if data and (data.get("dead_url") or data.get("price")):
+    if data and (data.get("dead_url") or data.get("removed") or data.get("price")):
         return price_filter(data, price_only, cached_image)
 
     log.info(f"[n11] curl başarısız → Playwright: {url[:60]}")

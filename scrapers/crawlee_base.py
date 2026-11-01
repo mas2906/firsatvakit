@@ -279,7 +279,9 @@ def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[
         return data
     if data.get("dead_url") or data.get("removed") or data.get("blocked") or data.get("error"):
         return data
-    out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon") if k in data}
+    # barcode da taşınır: VPS COALESCE ile yalnızca boşsa yazar. Eskiden fiyat
+    # taramaları barkodu atıyordu; ilk taramada alınamayan barkod hiç kaydedilmiyordu.
+    out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon", "barcode") if k in data and data[k] is not None}
     if cached_image:
         out["image_url"] = cached_image
     return out
