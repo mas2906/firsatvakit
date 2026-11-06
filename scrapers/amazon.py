@@ -21,14 +21,15 @@ from typing import Optional
 
 from bs4 import BeautifulSoup
 
-from scrapers.crawlee_base import price_filter, crawlee_pw_scrape, already_on
+from scrapers.crawlee_base import PRICE_ONLY, price_filter, crawlee_pw_scrape, _warmup_navigation
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
 log = logging.getLogger("scraper.amazon")
 
 # ── Algılama kelimeleri ────────────────────────────────────────────────────────
 _AZ_CAPTCHA  = ["robot check", "validatecaptcha", "type the characters", "not a robot",
-                "güvenlik kontrolü", "captcha", "px-captcha", "api-services-support"]
+                "güvenlik kontrolü", "captcha", "px-captcha", "api-services-support",
+                "alışverişe devam etmek için"]
 _AZ_BLOCK    = ["üzgünüz", "isteğinizi işlemeye", "sorun üzerinde çalışıyoruz",
                 "something went wrong", "we're sorry", "to discuss automated"]
 _AZ_NOTFOUND = ["sitemizde işlev gösteren bir sayfaya karşılık gelmiyor",
@@ -51,8 +52,24 @@ _OOS_KW = [
 def _az_is_blocked(html: str) -> bool:
     if not html or len(html) < 500:
         return True
+    # Gerçek ürün sayfası (başlık var) engel sayılmaz — sayfa başındaki JS/metinde
+    # "captcha"/"üzgünüz" geçebiliyor, eskiden canlı ürün "engel" diye atlanabiliyordu.
+    if 'id="productTitle"' in html:
+        return False
     t = html[:10000].lower()
     return any(h in t for h in _AZ_CAPTCHA + _AZ_BLOCK)
+
+
+def _az_block_kind(html: str) -> str:
+    """Engel türü: yalnızca teşhis logu için."""
+    t = (html or "")[:10000].lower()
+    if "alışverişe devam etmek için" in t:
+        return "devam dugmesi"
+    if "to discuss automated" in t or "api-services-support" in t:
+        return "otomatik erisim"
+    if "validatecaptcha" in t or "type the characters" in t or "robot check" in t:
+        return "captcha"
+    return "diger"
 
 
 def _az_is_notfound(html: str) -> bool:
@@ -169,10 +186,12 @@ def _parse_coupon_soup(soup: BeautifulSoup) -> tuple[Optional[str], Optional[flo
     Kupon bilgisi (amazon_tr_scraper.py parse_coupon).
     Döndürür: ('pct', 10.0) | ('abs', 50.0) | (None, None)
     """
+    # Yalnızca kupon kutuları; metinde "kupon/coupon" geçmeli. Eskiden geniş
+    # "[id*='coupon']" ve promosyon mesajı kutusu, "kredi kartına %10" gibi koşullu
+    # kampanyaları da kupon sanabiliyordu (2026-11-02).
     for sel in [
         "#couponBadgeRegularVpc", "#couponBadge", ".couponBadge",
-        "#promoPriceBlockMessage_feature_div", "#cpsPlaceHolder_feature_div",
-        "#vpcButton", "#couponDeals", "#couponBadge_feature_div", "[id*='coupon']",
+        "#promoPriceBlockMessage_feature_div", "#vpcButton", "#couponBadge_feature_div",
     ]:
         try:
             el = soup.select_one(sel)
@@ -181,6 +200,10 @@ def _parse_coupon_soup(soup: BeautifulSoup) -> tuple[Optional[str], Optional[flo
         if not el:
             continue
         txt = el.get_text(" ", strip=True).lower()
+        if "kupon" not in txt and "coupon" not in txt:
+            continue
+        if any(k in txt for k in ("kredi kart", "banka", "prime üye", "taksit")):
+            continue
         m = re.search(r'%\s*(\d+(?:[.,]\d+)?)', txt) or re.search(r'(\d+(?:[.,]\d+)?)\s*%', txt)
         if m:
             try:
@@ -232,7 +255,8 @@ def _get_other_sellers_price(soup: BeautifulSoup) -> Optional[float]:
         "#moreBuyingChoices_feature_div .a-price:not(.a-text-price) .a-offscreen",
         "#moreBuyingChoices_feature_div .a-price .a-offscreen",
         "#olpLinkWidget_feature_div .a-price .a-offscreen",
-        "#usedBuySection .a-price .a-offscreen",
+        # #usedBuySection çıkarıldı: ikinci el fiyatı yeni ürün fiyatı diye kaydedilip
+        # sahte indirim üretiyordu (bkz. _az_parse içindeki "İkinci El" notu).
         "#buybox-see-all-buying-choices .a-price .a-offscreen",
     ]:
         els = soup.select(sel)
@@ -332,17 +356,16 @@ def _parse_stock_soup(soup: BeautifulSoup, html: str) -> str:
     avail = soup.select_one("#availability span, #availabilityInsideBuyBox_feature_div span")
     if avail:
         av = avail.get_text(strip=True).lower()
-        if any(k in av for k in ("stokta", "var", "in stock", "available", "kargo", "sipariş", "teslim")):
-            return "Stokta Var"
+        # Olumsuz kontrol ÖNCE: "şu an için stokta yok" "stokta" kelimesini de içeriyor,
+        # eskiden olumlu kontrol önce yapıldığı için stokta yok ürün "Stokta Var" çıkıyordu.
         if any(k in av for k in _OOS_KW) or "out of stock" in av or "unavailable" in av:
             return "Stok Yok"
-    h_snip = html[:8000].lower()
-    if any(k in h_snip for k in _OOS_KW):
-        return "Stok Yok"
-    if "add-to-cart-button" in h_snip or "buy-now-button" in h_snip:
-        return "Stokta Var"
-    # Net sinyal yok → stokta yok say, yanlış fiyat kaydetme (referans: check_stock_soup)
-    return "Stok Yok"
+        if any(k in av for k in ("stokta", "in stock", "available", "kargo", "sipariş", "teslim")):
+            return "Stokta Var"
+    # Net sinyal yok → "Bilinmiyor" (fiyat da yoksa tarama hata sayılır). Eskiden
+    # "Stok Yok" dönüyordu; eksik yüklenen sayfa 2 kez üst üste gelince canlı ürün
+    # siliniyordu (2026-11-01 akşamı 270+ Amazon ürünü "stok_yok" ile silindi).
+    return "Bilinmiyor"
 
 
 def _az_best_img(url: str) -> str:
@@ -541,12 +564,15 @@ def _az_parse(html: str) -> Optional[dict]:
     rating = review_count = None
     rating_el = soup.select_one("#acrPopover, [data-hook='rating-out-of-text']")
     if rating_el:
-        m = re.search(r"([\d,]+)\s+üzerinden ([\d,]+)", rating_el.get("title") or rating_el.get_text())
-        if not m:
-            m = re.search(r"([\d,]+)\s+out of ([\d,]+)", rating_el.get("title") or rating_el.get_text())
+        rt = rating_el.get("title") or rating_el.get_text(" ")
+        # TR: "5 yıldız üzerinden 4,5" (puan SONDA); EN: "4.5 out of 5 stars" (puan başta).
+        # Eski TR deseni "4,5 üzerinden 5" bekliyordu, hiç eşleşmiyordu.
+        m = (re.search(r"üzerinden\s+([\d]+[.,]?\d*)", rt)
+             or re.search(r"([\d]+[.,]?\d*)\s+out of", rt))
         if m:
             try:
-                rating = float(m.group(1).replace(",", "."))
+                v = float(m.group(1).replace(",", "."))
+                rating = v if 0 < v <= 5 else None
             except Exception:
                 pass
     rc_el = soup.select_one("#acrCustomerReviewText, [data-hook='total-review-count']")
@@ -558,7 +584,18 @@ def _az_parse(html: str) -> Optional[dict]:
             except Exception:
                 pass
 
-    cart_discount = bool(was_price and price and was_price > price * 1.01)
+    # Üstü çizili fiyat (was_price) sepet indirimi DEĞİL — eskiden öyle sayılıyordu ve
+    # Amazon fırsatları %15 sepet toleransıyla geç kapanıyordu. Sepet/kupon = kupon var.
+    cart_discount = bool(coupon_text)
+
+    # 2026-11-06 kullanıcı kuralı: sepet düğmesi ve fiyat yoksa ürün bitmiştir, 3 kez
+    # üst üste gelirse VPS siler (OOS_DELETE_AFTER). Yalnız TAM açılmış sayfada geçerli:
+    # 2026-11-01'de yarım yüklenen sayfalar 270+ canlı ürünü sildirdi, _parse_stock_soup
+    # bu yüzden belirsiz sinyalde "Bilinmiyor" döner. Başlık, satın alma kutusu ve
+    # boyut şartı yarım sayfayı dışarıda bırakır; engel kontrolü bu fonksiyondan önce yapılır.
+    if (not price and stock == "Bilinmiyor" and title and len(html) >= 300_000
+            and soup.select_one("#buybox-see-all-buying-choices, #desktop_buybox, #buybox")):
+        stock = "Stok Yok"
 
     if not price and stock not in ("Stok Yok",):
         return None
@@ -584,14 +621,17 @@ def _az_parse(html: str) -> Optional[dict]:
 
 # ── Katman 0: Playwright ───────────────────────────────────────────────────────
 async def _az_pw_handler(page, url: str) -> Optional[dict]:
-    # crawlee ürün sayfasını zaten açtı. Eskiden burada ana sayfaya "ısınma"
-    # gidip ürünü YENİDEN açıyordu — 3 navigasyon, ürün başı ~50sn; yük altında
-    # 65sn sınırını aşıp "veri yok" dönüyordu (2026-10-31 log analizi).
-    if not already_on(page, url):
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            pass
+    # 2026-11-05 (kullanıcı isteği): Ekim'deki eski davranış geri alındı — ürüne
+    # gitmeden önce ana sayfaya ısınma ziyareti. Kalıcı tarayıcı yolunda Amazon
+    # kendi navigasyonunu yapar (_SELF_NAVIGATING), sayfa burada henüz boştur.
+    # 2026-11-06 (kullanıcı isteği): fiyat taramasında ısınma ve kaydırma yok.
+    fast = PRICE_ONLY.get()
+    if not fast:
+        await _warmup_navigation(page, "https://www.amazon.com.tr")
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        pass
     try:
         await page.wait_for_selector(
             "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
@@ -600,29 +640,36 @@ async def _az_pw_handler(page, url: str) -> Optional[dict]:
         )
     except Exception:
         pass
-    await asyncio.sleep(random.uniform(0.3, 0.7))
-    try:
-        await page.mouse.wheel(0, random.randint(250, 500))
-        await asyncio.sleep(0.3)
-    except Exception:
-        pass
+    if not fast:
+        await asyncio.sleep(random.uniform(0.3, 0.7))
+        try:
+            await page.mouse.wheel(0, random.randint(250, 500))
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
 
     # ASIN redirect tespiti (curl katmanındaki kontrolün Playwright karşılığı) —
     # olmadan Amazon bir ürünü başka bir ASIN'e birleştirdiğinde, yanlış ürünün
     # verisi asıl istenen product_id altına kaydedilebiliyordu.
-    asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
-    if asin_m and asin_m.group(1) not in (page.url or ""):
-        return {"not_found": True}
-
     html = await page.content()
     if not html or len(html) < 3000:
         return None
-    if _az_is_notfound(html):
-        return {"not_found": True}
+    # Engel kontrolü ASIN kontrolünden ÖNCE: doğrulama sayfası farklı bir URL'de
+    # (/errors/validateCaptcha) açılınca eskiden "ASIN yok → not_found" deniyor ve
+    # VPS ürünü ölü link diye ANINDA siliyordu.
     if _az_is_blocked(html):
         # Ayrı işaretle: eskiden "veri yok"la karışıyor, hatanın hızdan (engel)
         # mi sayfadan (fiyat okunamadı) mı geldiği anlaşılmıyordu.
-        return {"blocked": "amazon engel ara sayfasi"}
+        return {"blocked": f"amazon engel ara sayfasi ({_az_block_kind(html)})"}
+    if _az_is_notfound(html):
+        return {"not_found": True}
+
+    # ASIN yönlendirmesi: Amazon ürünü başka ASIN'e birleştirdiyse yanlış ürünün
+    # verisi kaydedilmesin. Anında silme yerine "removed" — VPS 2 teyitte siler
+    # (varyant/bölge yönlendirmesi tek seferlik olabiliyor).
+    asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
+    if asin_m and asin_m.group(1) not in (page.url or "") and asin_m.group(1) not in html[:200000]:
+        return {"removed": True, "final_url": page.url}
     return await asyncio.to_thread(_az_parse, html)
 
 
@@ -631,8 +678,7 @@ async def scrape_amazon(url: str, price_only: bool = False,
                          cached_image: Optional[str] = None) -> Optional[dict]:
     # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
     # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
-    # timeout 50→65: isinma navigasyonu (_warmup_navigation) eklendi, ~15-20s ek sure gerekiyor
-    data = await crawlee_pw_scrape(url, "amazon", _az_pw_handler, timeout=65)
+    data = await crawlee_pw_scrape(url, "amazon", _az_pw_handler, timeout=78)
     if data and (data.get("dead_url") or data.get("not_found")):
         return data
     return price_filter(data, price_only, cached_image) if data else None

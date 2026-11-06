@@ -17,6 +17,9 @@ from price_rules import (YOYO_CONFIRM_HOURS, DealDecision, evaluate_drop, is_pri
                          min_discount_for)
 from telegram_pub import notify_pending_approval, notify_approved_deal_update
 
+from config import HB_CART_BASELINE_UNTIL, SCAN_ONLY_PLATFORMS, SCAN_ONLY_SQL
+from sync_status import paused_platforms
+
 from .deps import now_str, require_admin
 
 log = logging.getLogger("main")
@@ -246,12 +249,14 @@ def _update_product_fields(db, product_id: int, data: dict, stock, now: str):
         " description=COALESCE(?,description), rating=COALESCE(?,rating),"
         " review_count=COALESCE(?,review_count), brand=COALESCE(?,brand),"
         " barcode=COALESCE(?,barcode), stock=COALESCE(?,stock),"
+        " seller=COALESCE(?,seller),"
         " variants=COALESCE(?,variants),"
         " ai_review_summary=COALESCE(?,ai_review_summary),"
         " last_seen_at=? WHERE id=?",
         (data.get("title"), data.get("image_url"), data.get("description"),
          data.get("rating"), data.get("review_count"), data.get("brand"),
-         data.get("barcode"), stock, variants_json, ai_summary, now, product_id)
+         data.get("barcode"), stock, (data.get("seller") or None),
+         variants_json, ai_summary, now, product_id)
     )
 
 
@@ -265,11 +270,15 @@ def _is_oos(stock: str) -> bool:
 
 
 # Varsayılan 1: ilk "stok yok"ta sil. İstisnalar:
-#  amazon 2      — ayrıştırıcı stok bilgisi bulamazsa "Stok Yok" varsayıyor
+#  amazon 3      — fiyat ve sepet düğmesi yoksa ürün bitmiş sayılır (2026-11-06 kullanıcı
+#                  isteği); fiyat gelince sayaç sıfırlanır
 #  hepsiburada 3 — aynı ürün dakikalar içinde satıcısız/satıcılı gidip geliyor
 #                  (#2322: 20:27 stok yok, 20:28 29.999 TL); fiyat gelince sayaç sıfırlanır
 #  beymen 3      — beymen_sync'in tasarımı; günlük liste eşitlemesi silineni geri ekliyor
-OOS_DELETE_AFTER = {"amazon": 2, "hepsiburada": 3, "beymen": 3}
+OOS_DELETE_AFTER = {"amazon": 3, "hepsiburada": 3, "beymen": 3}
+# Amazon'da iki "stok yok" sayımı arasında en az bu kadar saat olmalı (2026-11-07). Fiyatsız
+# ürün yeniden denemesi 3 sayımı ortalama 104 dakikaya sıkıştırıp 559 ürünü iki saatte sildi.
+OOS_MIN_GAP_HOURS = {"amazon": 24}
 
 
 def _handle_out_of_stock(db, product_id: int, price: float, now: str):
@@ -288,18 +297,22 @@ def _handle_out_of_stock(db, product_id: int, price: float, now: str):
         db.execute("UPDATE deals SET active=0, status='expired', expires_at=? WHERE id=?", (now, d["id"]))
         log.info(f"[webhook] ⏹ Deal #{d['id']} kapatıldı — stok yok")
 
-    row = db.execute("SELECT oos_count, platform FROM products WHERE id=?", (product_id,)).fetchone()
+    row = db.execute("SELECT oos_count, platform, oos_last_at FROM products WHERE id=?", (product_id,)).fetchone()
+    gap_hours = OOS_MIN_GAP_HOURS.get(row["platform"] if row else "")
+    if gap_hours and row["oos_last_at"] and _to_dt(now) - _to_dt(row["oos_last_at"]) < timedelta(hours=gap_hours):
+        db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
+        db.commit()
+        return
     oos = (row["oos_count"] or 0) + 1 if row else 1
     # 2026-10-31 kullanıcı isteği: stoğu olmayan ürün silinsin (eskiden 3 teyit).
-    # Amazon'un ayrıştırıcısı stok bilgisini bulamazsa "Stok Yok" varsayıyor —
-    # tek bir bozuk sayfa canlı ürünü sildirmesin diye orada 2 teyit.
+    # Silme sınırı platforma göre OOS_DELETE_AFTER'da.
     limit = OOS_DELETE_AFTER.get(row["platform"] if row else "", 1)
     if oos >= limit:
         log.info(f"[webhook] 🗑 Ürün #{product_id} {oos} kez stok yok — siliniyor")
         from .admin import _delete_product_cascade
         _delete_product_cascade(db, product_id, "stok_yok")
     else:
-        db.execute("UPDATE products SET oos_count=? WHERE id=?", (oos, product_id))
+        db.execute("UPDATE products SET oos_count=?, oos_last_at=? WHERE id=?", (oos, now, product_id))
         db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
         db.commit()
 
@@ -316,6 +329,21 @@ def _close_expired_deals(db, product_id: int, price: float, now: str):
             log.info(f"[webhook] ⏹ Deal #{deal['id']} kapandı — fiyat yükseldi (eşik=%{int((close_threshold-1)*100)})")
 
 
+def _hb_cart_baseline(db, product_id: int, price: float, data: dict, now: str) -> bool:
+    """Geçiş dönemi: Hepsiburada sepet fiyatının ilk okunuşu gerçek bir düşüş değil,
+    fırsat üretmez. Bekleyen fırsat varsa yanlış (sepetsiz) fiyatı düzeltilir."""
+    if (not data.get("cart_discount") or now >= HB_CART_BASELINE_UNTIL
+            or _product_platform(db, product_id) != "hepsiburada"):
+        return False
+    db.execute(
+        "UPDATE deals SET new_price=?, cart_discount=1, "
+        "discount_pct=ROUND(((old_price-?)/old_price*100)::numeric,1) "
+        "WHERE product_id=? AND status='pending' AND old_price>0",
+        (price, price, product_id)
+    )
+    return True
+
+
 async def _process_deal(db, product_id: int, price: float, prev_price_stable: float,
                         data: dict, now: str, decision: DealDecision = None) -> bool:
     """Deal oluşturma/güncelleme mantığı. False döndürürse caller erken çıkmalı.
@@ -330,7 +358,7 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
     min_pct = min_discount_for(platform)   # Karaca %3, diğerleri %10
     if decision is None:
         points = _price_points(db, product_id)
-        decision = evaluate_drop(points, price, _to_dt(now), min_pct)
+        decision = evaluate_drop(points, price, _to_dt(now), min_pct, platform)
         if decision.is_deal and is_yoyo(points, _to_dt(now)):
             log.info(f"[webhook] ⏳ #{product_id} yo-yo ürün — %{decision.pct:.1f} düşüş "
                      f"{YOYO_CONFIRM_HOURS} saat sabit kalırsa fırsat olacak")
@@ -373,8 +401,8 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
     if existing_deal:
         deal_id = existing_deal["id"]
         db.execute(
-            "UPDATE deals SET old_price=?,new_price=?,discount_pct=?,created_at=? WHERE id=?",
-            (old_price, price, round(pct, 1), now, deal_id)
+            "UPDATE deals SET old_price=?,new_price=?,discount_pct=?,cart_discount=?,created_at=? WHERE id=?",
+            (old_price, price, round(pct, 1), 1 if data.get("cart_discount") else 0, now, deal_id)
         )
         if not existing_deal["slug"]:
             db.execute(
@@ -403,6 +431,10 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
     db.commit()
     log.info(f"[webhook] 📋 Deal #{deal_id} onay bekliyor: #{product_id} %{pct:.1f}")
 
+    # Yalnızca taranan platform: indirim admin listesinde durur, kimseye bildirim gitmez
+    if platform in SCAN_ONLY_PLATFORMS:
+        return True
+
     # Onaylı (yayında) deal varsa admin'e [DEAL] etiketiyle ayrı bildirim at
     approved_deal = db.execute("""
         SELECT d.id FROM deals d
@@ -415,6 +447,7 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
             if prod_row:
                 prod_dict = dict(prod_row)
                 prod_dict["deal_id"] = approved_deal["id"]
+                prod_dict["cart_discount"] = bool(data.get("cart_discount"))
                 await notify_approved_deal_update(
                     approved_deal["id"], prod_dict, price, old_price, round(pct, 1)
                 )
@@ -430,6 +463,7 @@ async def _process_deal(db, product_id: int, price: float, prev_price_stable: fl
             if prod_row:
                 prod_dict = dict(prod_row)
                 prod_dict["deal_id"] = deal_id
+                prod_dict["cart_discount"] = bool(data.get("cart_discount"))
                 await notify_pending_approval(
                     deal_id, prod_dict, price, old_price, round(pct, 1), pending_count
                 )
@@ -489,7 +523,8 @@ async def _maybe_confirm_yoyo_deal(db, product_id: int, price: float, since: str
         ).fetchone()
         if already:
             return
-        decision = evaluate_drop(points, price, first_seen, min_discount_for(_product_platform(db, product_id)))
+        platform = _product_platform(db, product_id)
+        decision = evaluate_drop(points, price, first_seen, min_discount_for(platform), platform)
         if not decision.is_deal:
             return
         log.info(f"[webhook] ✔ #{product_id} yo-yo fiyatı {YOYO_CONFIRM_HOURS}+ saat sabit kaldı — fırsat açılıyor")
@@ -536,7 +571,7 @@ async def _save_scraped_data(product_id: int, data: dict):
         _handle_out_of_stock(db, product_id, price, now)
         return
 
-    db.execute("UPDATE products SET oos_count=0 WHERE id=? AND oos_count>0", (product_id,))
+    db.execute("UPDATE products SET oos_count=0, oos_last_at=NULL WHERE id=? AND oos_count>0", (product_id,))
 
     recent_rows = db.execute(
         "SELECT price_value, scraped_at FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 3",
@@ -566,6 +601,10 @@ async def _save_scraped_data(product_id: int, data: dict):
         prev_price_stable = None
 
     if prev_price_stable and price < prev_price_stable:
+        if _hb_cart_baseline(db, product_id, price, data, now):
+            db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
+            db.commit()
+            return
         should_continue = await _process_deal(db, product_id, price, prev_price_stable, data, now)
         if not should_continue:
             db.execute("DELETE FROM scan_queue WHERE product_id=?", (product_id,))
@@ -681,7 +720,8 @@ async def admin_live(request: Request):
     db = get_db()
     pending_count = db.execute(
         "SELECT COUNT(*) FROM deals d JOIN products p ON d.product_id=p.id "
-        "WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')"
+        "WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok') "
+        f"AND p.platform NOT IN {SCAN_ONLY_SQL}"
     ).fetchone()[0]
     queue_count = db.execute(
         "SELECT COUNT(*) FROM scan_queue WHERE status IN ('pending','processing')"
@@ -694,6 +734,12 @@ async def admin_live(request: Request):
         "active_deals": active_deals,
         "products": products,
     })
+
+
+MAIN_PLATFORMS = ("amazon", "trendyol", "hepsiburada", "n11")    # "Tümünü Durdur" bunları kapsar
+SCRAPER_PLATFORMS = MAIN_PLATFORMS + ("karaca", "beymen")
+# Günde bir çalışan işler: (platform → settings'teki son çalışma anahtarı)
+DAILY_JOB_KEYS = {"karaca": "karaca_discovery_at", "beymen": "beymen_sync_at"}
 
 
 @router.get("/api/pending-jobs")
@@ -722,8 +768,14 @@ async def pending_jobs(request: Request):
     if platform_param in _KNOWN:
         extra_conds.append("p.platform = ?")
         extra_vals.append(platform_param)
-    extra_sql = "".join(f" AND {c}" for c in extra_conds)
     db = get_db()
+    # Durdurulan platforma iş verilmez: scraper süreci açık kalır, kuyruk boşmuş gibi bekler.
+    # Süreci VPS'ten kapatmıyoruz, çünkü kapanan scraper'ı panelden yeniden başlatmak mümkün değil.
+    paused = paused_platforms(db)
+    if paused:
+        extra_conds.append(f"p.platform NOT IN ({','.join('?' * len(paused))})")
+        extra_vals.extend(paused)
+    extra_sql = "".join(f" AND {c}" for c in extra_conds)
     rows = db.execute(
         f"""SELECT sq.id AS sq_id, sq.product_id, sq.priority, p.source_url, p.platform, p.last_seen_at,
                    p.image_url as cached_image,
@@ -815,7 +867,7 @@ async def api_deals(platform: str = "", limit: int = Query(default=20, ge=1, le=
 async def api_stats():
     return dict(get_db().execute(
         "SELECT (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,"
-        " (SELECT COUNT(*) FROM products) as products,"
+        f" (SELECT COUNT(*) FROM products WHERE platform NOT IN {SCAN_ONLY_SQL}) as products,"
         " (SELECT COUNT(*) FROM clicks) as total_clicks,"
         " (SELECT COUNT(*) FROM product_groups) as comparisons"
     ).fetchone())
@@ -826,10 +878,10 @@ async def scraper_monitor(request: Request):
     """Scraper sağlık durumu: son tarama zamanı, hata oranı, IP blok tespiti."""
     require_admin(request)
     db = get_db()
-    platforms = ["amazon", "trendyol", "hepsiburada", "n11", "karaca", "beymen"]
-    # Günde bir çalışan eşitleme işleri: (platform → settings'teki son çalışma anahtarı)
-    daily_jobs = {"karaca": "karaca_discovery_at", "beymen": "beymen_sync_at"}
+    platforms = list(SCRAPER_PLATFORMS)
+    daily_jobs = DAILY_JOB_KEYS
     result = {}
+    paused = paused_platforms(db)
 
     for p in platforms:
         # Son başarılı tarama — price_history değişmese bile last_seen_at güncellenir
@@ -881,6 +933,7 @@ async def scraper_monitor(request: Request):
             "block_errors_30m": block_30m["cnt"] if block_30m else 0,
             "queue_pending": queue["cnt"] if queue else 0,
             "scan_rate_10m": round((rate_10m["cnt"] if rate_10m else 0) / 10, 1),
+            "paused": p in paused,
         }
 
     # Genel alive durumu: herhangi bir platformda son 30 dakikada başarılı tarama var mı

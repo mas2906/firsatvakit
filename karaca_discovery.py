@@ -97,6 +97,10 @@ def discover() -> dict:
     sync_status.start("karaca")
     try:
         stats = _discover()
+    except sync_status.Stopped:
+        log.info("[karaca-discovery] panelden durduruldu")
+        sync_status.stopped("karaca")
+        return {}
     except Exception as e:
         sync_status.fail("karaca", f"{type(e).__name__}: {e}")
         raise
@@ -113,6 +117,7 @@ def _discover() -> dict:
     for path, max_pages in CATEGORIES:
         page, total = 1, None
         while page <= max_pages and (total is None or page <= total):
+            sync_status.check_stop("karaca")
             url = BASE + path + (f"?page={page}" if page > 1 else "")
             html = _fetch(session, url)
             if html is None:

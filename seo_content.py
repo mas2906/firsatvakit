@@ -85,11 +85,20 @@ def generate_comparison_data(db, group_id):
         FROM product_group_members pgm JOIN products p ON pgm.product_id=p.id
         WHERE pgm.group_id=?
           AND (p.stock IS NULL OR p.stock != 'Stok Yok')
+          AND p.platform NOT IN ('beymen','karaca')
         ORDER BY current_price ASC NULLS LAST
     """, (group_id,)).fetchall()
     products = [dict(m) for m in members]
+    # Yalnızca Beymen/Karaca üyesi olan grup yok sayılır; görseli de onlardan gelmesin
+    if not products and db.execute(
+        "SELECT 1 FROM product_group_members m JOIN products p ON p.id=m.product_id "
+        "WHERE m.group_id=? AND p.platform IN ('beymen','karaca') LIMIT 1", (group_id,)
+    ).fetchone():
+        return None
     priced = [p for p in products if p.get("current_price")]
     group = dict(g)
+    if any(h in (group.get("image_url") or "") for h in ("karaca.com", "beymen.com")):
+        group["image_url"] = next((p["image_url"] for p in products if p.get("image_url")), None)
     # ~%24 grubun adı boş — şablondaki |truncate None'da patlıyor ve sayfa 500
     # dönüyordu. İlk ürünün başlığını ad olarak kullan.
     if not group.get("name"):
@@ -144,7 +153,7 @@ def build_meta_tags(page_type, data=None):
                 "description": (d.get("summary") or "")[:160], "og_image": d.get("cover_image") or "",
                 "og_type": "article"}
     if page_type == "index":
-        platform_names = {"amazon": "Amazon", "trendyol": "Trendyol", "hepsiburada": "Hepsiburada", "n11": "N11", "karaca": "Karaca", "beymen": "Beymen"}
+        platform_names = {"amazon": "Amazon", "trendyol": "Trendyol", "hepsiburada": "Hepsiburada", "n11": "N11"}
         pl = platform_names.get(d.get("platform") or "")
         page = d.get("page") or 1
         suffix = f" — Sayfa {page}" if page > 1 else ""
@@ -167,7 +176,7 @@ def generate_sitemap_xml(db, domain="https://firsatvakti.com"):
     urls = [
         {"loc": f"{domain}/", "priority": "1.0", "changefreq": "hourly"},
         *({"loc": f"{domain}/?platform={pl}", "priority": "0.9", "changefreq": "hourly"}
-          for pl in ("amazon", "trendyol", "hepsiburada", "n11", "karaca", "beymen")),
+          for pl in ("amazon", "trendyol", "hepsiburada", "n11")),
         {"loc": f"{domain}/dipte", "priority": "0.9", "changefreq": "hourly"},
         {"loc": f"{domain}/blog", "priority": "0.7", "changefreq": "daily"},
         *({"loc": f"{domain}/{pg}", "priority": "0.3", "changefreq": "yearly"}
@@ -186,13 +195,14 @@ def generate_sitemap_xml(db, domain="https://firsatvakti.com"):
                      "priority": "0.9" if d["active"] else "0.5",
                      "changefreq": "daily" if d["active"] else "weekly"})
     # Karşılaştırma sayfaları
-    for g in db.execute("SELECT pg.id,pg.updated_at FROM product_groups pg WHERE (SELECT COUNT(*) FROM product_group_members WHERE group_id=pg.id)>=2 ORDER BY pg.id DESC LIMIT 5000").fetchall():
+    for g in db.execute("SELECT pg.id,pg.updated_at FROM product_groups pg WHERE (SELECT COUNT(*) FROM product_group_members m JOIN products mp ON mp.id=m.product_id WHERE m.group_id=pg.id AND mp.platform NOT IN ('beymen','karaca'))>=2 ORDER BY pg.id DESC LIMIT 5000").fetchall():
         urls.append({"loc": f"{domain}/compare/{g['id']}", "lastmod": (g["updated_at"] or "")[:10], "priority": "0.7", "changefreq": "weekly"})
     # Ürün sayfaları — deal'ı olan ürünler /deal/{id}'ye redirect ediyor, sitemap'e
     # redirect eden URL koymak Search Console'da "Yönlendirmeli sayfa" hatası üretir
     for p in db.execute("""
         SELECT p.id, p.last_seen_at FROM products p
         WHERE p.title IS NOT NULL AND p.title <> ''
+          AND p.platform NOT IN ('beymen','karaca')
           AND NOT EXISTS (SELECT 1 FROM deals d WHERE d.product_id = p.id
                           AND d.status IN ('approved','expired'))
         ORDER BY p.id DESC LIMIT 30000

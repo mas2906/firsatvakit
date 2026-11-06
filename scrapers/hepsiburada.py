@@ -18,9 +18,9 @@ from typing import Optional
 from bs4 import BeautifulSoup
 
 from scrapers.crawlee_base import (
-    IOS_UAS, get_session, drop_session, RL,
+    IOS_UAS, get_session, drop_session, RL, PRICE_ONLY,
     cb_ok, cb_fail, cb_reset, price_filter,
-    crawlee_pw_scrape, _CURL_OK,
+    crawlee_pw_scrape, _CURL_OK, redirected_away, already_on,
 )
 from scrapers.utils import parse_price_tr_clean, normalize_image_url
 
@@ -86,6 +86,7 @@ def _hb_parse_html(html: str) -> Optional[dict]:
     stock = "Bilinmiyor"
     cart_discount = False
     coupon = None
+    barcode = seller = sku = listing_id = None
 
     ps = None
 
@@ -107,6 +108,11 @@ def _hb_parse_html(html: str) -> Optional[dict]:
         try:
             product = ps.get("product") or {}
             title   = product.get("name")
+            # Barkod (bazen "4210201313908-2" varyant ekli) ve buybox satıcısı
+            m_bc = re.match(r"(\d{8,14})(?:-\d+)?$", str(product.get("barcode") or "").strip())
+            barcode = m_bc.group(1) if m_bc else None
+            seller  = (str(product.get("merchantName") or "").strip()) or None
+            sku, listing_id = product.get("sku"), product.get("listingId")
             price   = _hb_price_from_state(ps)
             imgs    = product.get("images") or []
             if imgs and isinstance(imgs[0], str):
@@ -217,6 +223,13 @@ def _hb_parse_html(html: str) -> Optional[dict]:
             if v and v > 0:
                 price = v
 
+    # Tarayıcıda açılan sayfa: "Sepete özel fiyat 799,20 TL". curl'ün HTML'inde bu öğe yok.
+    el = soup.select_one('[data-test-id="checkout-price"]')
+    if el and price and "sepet" in el.get_text(" ", strip=True).lower():
+        v = parse_price_tr_clean(el.get_text(" ", strip=True))
+        if v and price * 0.25 <= v < price * 0.999:
+            price, cart_discount = v, True
+
     if stock == "Bilinmiyor":
         for sel in ['[data-test-id="addToCart"]', '[data-test-id^="add-to-cart-button-"]']:
             if soup.select_one(sel):
@@ -279,7 +292,36 @@ def _hb_parse_html(html: str) -> Optional[dict]:
         "stock":         stock,
         "cart_discount": cart_discount,
         "coupon":        coupon,
+        "barcode":       barcode,
+        "seller":        seller,
+        "_sku":          sku,
+        "_listing_id":   listing_id,
     }
+
+
+async def _hb_cart_price(session, url: str, ua: str, sku: str,
+                         listing_id: Optional[str]) -> tuple[bool, Optional[float]]:
+    """Sepet fiyatı HTML'de yok; sayfa onu tarayıcıda bu istekle alır. Üyelik gerektirmeyen
+    fiyat `non-segmented-price` alanında, kampanya yoksa satış fiyatına eşit.
+    Dönüş: (istek başarılı mı, sepet fiyatı)."""
+    r = await session.get(
+        f"https://www.hepsiburada.com/api/v1/product/listings/{sku}",
+        headers={**_HB_IOS_HEADERS, "User-Agent": ua, "Referer": url,
+                 "Accept": "application/json, text/plain, */*"},
+        timeout=15,
+    )
+    if r.status_code in (403, 429, 503):
+        cb_fail("hb_curl")
+        RL["hepsiburada"].record_failure()
+    if r.status_code != 200:
+        return False, None
+    listings = (r.json().get("data") or {}).get("listings") or []
+    listing = next((x for x in listings if x.get("listingId") == listing_id), None)
+    for item in (listing or {}).get("minimumPrices") or []:
+        value = item.get("value")
+        if item.get("name") == "non-segmented-price" and isinstance(value, (int, float)):
+            return True, float(value)
+    return True, None
 
 
 async def _hb_via_curl(url: str) -> Optional[dict]:
@@ -301,6 +343,12 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
         if r.status_code != 200:
             drop_session("hepsiburada")
             return None
+
+        # Kategori sayfaları 2MB+ — aşağıdaki boyut kontrolünden ÖNCE bakılmalı,
+        # yoksa kaldırılmış ürün "blok" sayılıp tüm platformu yavaşlatıyordu.
+        if redirected_away("hepsiburada", url, str(r.url)):
+            log.info(f"[hepsiburada/curl] kaldırılmış ürün → {str(r.url)[-60:]}")
+            return {"removed": True, "final_url": str(r.url)}
 
         html = r.text
         if not html or len(html) < 3000:
@@ -325,6 +373,16 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
             return None
 
         result = _hb_parse_html(html)
+        sku = (result or {}).pop("_sku", None)
+        listing_id = (result or {}).pop("_listing_id", None)
+        if result and result.get("price") and sku:
+            ok, cart = await _hb_cart_price(session, url, ua, sku, listing_id)
+            if not ok:
+                # HTML fiyatıyla devam edilirse fiyat sepetli/sepetsiz gidip gelir;
+                # Playwright sayfadaki sepet fiyatını okur.
+                return None
+            if cart and result["price"] * 0.25 <= cart < result["price"] * 0.999:
+                result["price"], result["cart_discount"] = cart, True
         if result and result.get("price"):
             cb_reset("hb_curl")
             RL["hepsiburada"].record_success()
@@ -339,18 +397,24 @@ async def _hb_via_curl(url: str) -> Optional[dict]:
         return None
 
 
+_HB_UNAVAILABLE_RE = re.compile(
+    r"Bu ürün (?:şu an satılamamaktadır|geçici olarak temin edilememektedir)")
+
+
 async def _hb_pw_handler(page, url: str) -> Optional[dict]:
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        pass
+    if not already_on(page, url):  # crawlee sayfayı zaten açtı — ikinci kez açma
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
     try:
         await page.wait_for_selector(
             '[data-test-id="default-price"],[data-test-id="checkout-price"]',
             timeout=5000,
         )
     except Exception:
-        await asyncio.sleep(2)
+        if not PRICE_ONLY.get():
+            await asyncio.sleep(2)
 
     html = await page.content()
     # Playwright/Camoufox masaüstü sayfayı tam hydrate ediyor: aynı ürün curl_cffi'nin
@@ -363,6 +427,9 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
         return None
 
     data = _hb_parse_html(html)
+    if data:
+        data.pop("_sku", None)
+        data.pop("_listing_id", None)
 
     if not data or not data.get("price"):
         try:
@@ -379,6 +446,16 @@ async def _hb_pw_handler(page, url: str) -> Optional[dict]:
                     data["price"] = v
         except Exception:
             pass
+
+    # Satıcısı olmayan ürün: sayfa "Bu ürün şu an satılamamaktadır" / "geçici olarak
+    # temin edilememektedir" diyor, satıcı listesi boş, sepet düğmesi pasif — ama
+    # JSON-LD yine "InStock, 0.00" yazdığı için ürün "stokta var, fiyat yok" sanılıp
+    # her taramada bos_yanit hatası veriyordu (2026-10-31: son 50 hatanın 8'i).
+    # Yalnızca masaüstü (Playwright) sayfasında bakılır: curl'ün mobil HTML'i satışta
+    # olan üründe de satıcı listesini boş dönebiliyor.
+    if (not data or not data.get("price")) and _HB_UNAVAILABLE_RE.search(html or ""):
+        log.info("[hepsiburada/pw] ürün satılamıyor (satıcı yok) → Stok Yok")
+        return {"price": None, "stock": "Stok Yok"}
 
     if not data:
         return None
@@ -400,7 +477,7 @@ async def scrape_hepsiburada(url: str, price_only: bool = False,
     # RL.wait() artık çağıran (local_scraper.process_job) tarafında, dış
     # timeout'un DIŞINDA yapılıyor — bkz. crawlee_base.RL üzerindeki not.
     data = await _hb_via_curl(url)
-    if data and (data.get("dead_url") or data.get("price")):
+    if data and (data.get("dead_url") or data.get("removed") or data.get("price")):
         return price_filter(data, price_only, cached_image)
 
     log.info(f"[hepsiburada] curl başarısız → Playwright: {url[:60]}")

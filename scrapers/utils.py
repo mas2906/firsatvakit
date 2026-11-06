@@ -127,15 +127,10 @@ class RateLimiter:
         async with self._sem:
             elapsed = _time.monotonic() - self._last_ts
             delay = random.uniform(self._min, self._max)
-            # Gece saatlerinde (00-07) gerçek bir insan çok daha az alışveriş
-            # yapar — temel gecikmeyi yavaşlat.
-            if 0 <= datetime.now().hour < 7:
-                delay *= random.uniform(1.5, 2.0)
-            # İnsan davranışı düz uniform dağılım değildir — çoğu bekleme kısa,
-            # ama arada (dikkat dağılması/okuma gibi) daha uzun duraklamalar olur.
-            # %12 ihtimalle bu uzun-kuyruklu duraklamayı ekle.
-            if random.random() < 0.12:
-                delay += random.uniform(self._max, self._max * 3)
+            # Gece (00-07) yavaşlaması 2026-10-16'da kaldırıldı — kullanıcı
+            # isteğiyle tüm platformlar 7/24 aynı hızda tarar.
+            # Uzun-kuyruklu "insan gibi duraklama" (max..3×max ek bekleme) 2026-10-31'de
+            # kaldırıldı — kullanıcı isteği: istekler arası en fazla max_delay (4sn).
             delay -= elapsed
             if delay > 0:
                 await asyncio.sleep(delay)

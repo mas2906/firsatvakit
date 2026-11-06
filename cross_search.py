@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """Çapraz Platform Ürün Arama & Fiyat Karşılaştırma — v2."""
 
-import re, asyncio, random, json, logging
+from config import SCAN_ONLY_PLATFORMS
+import re, asyncio, random, json, logging, time
 from datetime import datetime
 from typing import Optional
 from urllib.parse import quote_plus
@@ -205,7 +206,7 @@ def _title_from_url_slug(url: str) -> str:
 
 async def cross_search_product(db, product_id: int, search_platforms: list = None):
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
-    if not product:
+    if not product or product["platform"] in SCAN_ONLY_PLATFORMS:
         return
 
     title = product["title"]
@@ -378,7 +379,26 @@ async def _search_trendyol(q) -> list:
     return out
 
 
+# Toplu eklemede VPS'ten dakikada 20+ Amazon araması gidiyordu (2026-11-05). Bu IP de
+# engellenmesin diye tüm çapraz aramalar için aramalar arası en az bu kadar saniye.
+AMAZON_SEARCH_MIN_GAP = 15.0
+_amazon_lock = None
+_amazon_last = 0.0
+
+
+async def _amazon_pace() -> None:
+    global _amazon_lock, _amazon_last
+    if _amazon_lock is None:
+        _amazon_lock = asyncio.Lock()
+    async with _amazon_lock:
+        wait = _amazon_last + AMAZON_SEARCH_MIN_GAP - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _amazon_last = time.monotonic()
+
+
 async def _search_amazon(q) -> list:
+    await _amazon_pace()
     html = await _get(f"https://www.amazon.com.tr/s?k={quote_plus(q)}",
                       {"Referer": "https://www.amazon.com.tr/"})
     if not html: return []
@@ -422,7 +442,8 @@ async def _search_n11(q) -> list:
                  or item.select_one(".price-wrapper .newPrice")
                  or item.select_one(".newPrice")
                  or item.select_one(".price-currency, .basket-price, .price-area"))
-            img = item.select_one("img")
+            # Kartın ilk <img>'i "Kuponlu Ürün" gibi rozet olabilir, ürün görseli bu sınıfta
+            img = item.select_one("img.listing-items-image")
             mid = re.search(r"-(\d+)$", href.rstrip("/"))
             out.append({
                 "url": href.split("?")[0],
@@ -559,6 +580,7 @@ def get_price_comparison(db, product_id: int) -> dict:
         WHERE pgm.group_id=?
           AND pgm.match_type != 'removed'
           AND (p.stock IS NULL OR p.stock != 'Stok Yok')
+          AND p.platform NOT IN ('beymen','karaca')
         ORDER BY current_price ASC NULLS LAST
     """, (member["group_id"],)).fetchall()
 

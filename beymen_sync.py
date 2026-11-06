@@ -135,6 +135,7 @@ def crawl(session, max_pages: int = MAX_PAGES) -> dict[str, dict]:
     for ci, path in enumerate(CATEGORIES, 1):
         page, total = 1, None
         while page <= max_pages and (total is None or page <= total):
+            sync_status.check_stop("beymen")
             url = BASE + path + (f"?sayfa={page}" if page > 1 else "")
             data = None
             for attempt in range(3):
@@ -182,6 +183,10 @@ def sync(max_pages: int = MAX_PAGES) -> dict:
     sync_status.start("beymen")
     try:
         return _sync(cffi, httpx, started, max_pages)
+    except sync_status.Stopped:
+        log.info("[beymen] panelden durduruldu")
+        sync_status.stopped("beymen")
+        return {}
     except Exception as e:
         sync_status.fail("beymen", f"{type(e).__name__}: {e}")
         raise
@@ -230,6 +235,7 @@ def _sync(cffi, httpx, started: float, max_pages: int) -> dict:
                 failed += 1
             if (sent + failed) % 200 == 0:
                 sync_status.set_status("beymen", done=sent + failed, failed=failed)
+                sync_status.check_stop("beymen")
             time.sleep(WEBHOOK_DELAY)
 
     stats = {"products": len(found), "added": added, "webhooks": sent, "failed": failed,

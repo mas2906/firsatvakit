@@ -12,11 +12,13 @@ Sağladığı özellikler:
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
 import re
 import time as _time
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Optional
 from urllib.parse import urlsplit
@@ -215,7 +217,20 @@ RL: dict[str, RateLimiter] = {
     # saatte ~150'ye kadar çıkılabiliyor (ihtiyacın 3-4 katı).
     # 2026-11-01 akşam: kullanıcı isteğiyle 15-30 → 8-15sn (16 Eki'de 8-20sn'de
     # %92 başarı vardı). Engel gelirse amazon_pw 15dk askıya alınır.
-    "amazon":      RateLimiter(8.0, 15.0),
+    # 2026-11-05: kullanıcı isteğiyle 8-15 → 15-30sn; 5 istekten 4'ü engel yedi.
+    # Süre istek başlangıcından ölçülür, sayfa süresi (10-50sn) bunun içindedir.
+    # 2026-11-05 akşam: 15-30 → 60-120sn (saatte ~40). Katalog 425'ten 3.300+ ürüne
+    # çıkınca ev IP'si engellendi; aynı istek VPS'ten geçiyor, yani sorun IP itibarı.
+    # Saatte ~40, engelsiz dönemdeki yük. Tur süresi scheduler'da 96 saat.
+    # 2026-11-05 gece: 60-120 → 15-20sn (kullanıcı isteği: dakikada 3-4 ürün). DİKKAT:
+    # 15-30sn'de 5 istekten 4'ü engel yemişti; devre kesici (2 ardışık engel) ve
+    # adaptif yavaşlama güvenlik ağı olarak duruyor.
+    # 2026-11-06 (kullanıcı kararı): Amazon da diğer platformlarla aynı 2-4sn. DİKKAT:
+    # 1 Kasım'da 2-4sn'de birkaç saat sonra engel gelmişti; güvenlik ağı: 4 ardışık
+    # engelde 120sn askı + adaptif yavaşlama (RateLimiter.record_failure).
+    # 2026-11-07 (kullanıcı kararı): 2-4 → 25-35sn, saatte en fazla ~120 sayfa. Tarayıcı
+    # yeniden kullanılınca saatte 640 sayfaya çıkıldı, 2.542 başarıdan sonra engel geldi.
+    "amazon":      RateLimiter(25.0, 35.0),
     "hepsiburada": RateLimiter(2.0, 4.0),
     "karaca":      RateLimiter(2.0, 4.0),
 }
@@ -228,7 +243,40 @@ _COOLDOWN_S = 120
 # Amazon engel ara sayfası ("Alışverişe devam etmek için tıklayın") gösterince
 # 2 dk sonra aynı hızla dönmek engeli saatlerce uzatıyordu (2026-11-01: 03-12
 # arası saatte 1-16 başarı). Engel gelince uzun süre geri çekil.
-_COOLDOWN_BY_KEY = {"amazon_pw": 15 * 60}
+_COOLDOWN_BY_KEY: dict[str, int] = {}  # 2026-11-05: Amazon özel askısı kaldırıldı (kullanıcı kararı)
+# Amazon'da araya giren tek başarı seriyi sıfırladığı için 4 ardışık engel geç
+# doluyordu (2026-11-05: 5 istekte 4 engel). 2 ardışık engelde geri çekil.
+_STREAK_LIMIT_BY_KEY: dict[str, int] = {"amazon_pw": 2}  # 2026-11-07: geri açıldı (kullanıcı kararı)
+# Engel sürdükçe deneme seyrekleşir, başarı gelince başa döner. Durum diske yazılır:
+# yeniden başlatma askıyı sıfırlıyordu (2026-11-05 14:39 bilgisayar açılışı).
+# 2026-11-07: Amazon'da geri açıldı; 120sn askıyla engelin üstüne saatte ~100 istek gidiyordu.
+_ESCALATING_COOLDOWNS: dict[str, tuple] = {"amazon_pw": (900, 1800, 3600, 7200, 14400, 21600)}
+_ESCALATION: dict[str, int] = {}
+_CB_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "logs", "scraper_breaker.json",
+)
+
+
+def _save_cb_state() -> None:
+    state = {k: {"until": _DISABLED.get(k, 0.0), "level": v} for k, v in _ESCALATION.items()}
+    try:
+        with open(_CB_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError as e:
+        log.warning(f"[cb] durum kaydedilemedi: {e}")
+
+
+def _load_cb_state() -> None:
+    try:
+        with open(_CB_STATE_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return
+    for key, item in state.items():
+        _DISABLED[key] = float(item.get("until", 0.0))
+        _ESCALATION[key] = int(item.get("level", 0))
+        _STREAK[key] = _STREAK_LIMIT_BY_KEY.get(key, _STREAK_LIMIT) - 1
 
 
 def cb_ok(key: str) -> bool:
@@ -242,15 +290,31 @@ def cb_remaining(key: str) -> float:
 
 def cb_fail(key: str) -> None:
     _STREAK[key] = _STREAK.get(key, 0) + 1
-    if _STREAK[key] >= _STREAK_LIMIT:
-        cooldown = _COOLDOWN_BY_KEY.get(key, _COOLDOWN_S)
+    limit = _STREAK_LIMIT_BY_KEY.get(key, _STREAK_LIMIT)
+    if _STREAK[key] >= limit:
+        steps = _ESCALATING_COOLDOWNS.get(key)
+        if steps:
+            level = _ESCALATION.get(key, 0)
+            cooldown = steps[min(level, len(steps) - 1)]
+            _ESCALATION[key] = level + 1
+            # Askı sonrası tek deneme: engel sürüyorsa ikinci istek atılmadan yeniden askı
+            _STREAK[key] = limit - 1
+        else:
+            cooldown = _COOLDOWN_BY_KEY.get(key, _COOLDOWN_S)
+            _STREAK[key] = 0
         _DISABLED[key] = _time.time() + cooldown
-        _STREAK[key] = 0
-        log.warning(f"[{key}] {_STREAK_LIMIT} ardışık hata → {cooldown}s askı")
+        if steps:
+            _save_cb_state()
+        log.warning(f"[{key}] {limit} ardışık hata → {cooldown}s askı")
 
 
 def cb_reset(key: str) -> None:
     _STREAK[key] = 0
+    if _ESCALATION.pop(key, None) is not None:
+        _save_cb_state()
+
+
+_load_cb_state()
 
 
 # ── Satıştan kaldırılmış ürün tespiti ─────────────────────────────────────────
@@ -273,6 +337,12 @@ def redirected_away(platform: str, orig_url: str, final_url: str) -> bool:
     return False
 
 
+# Fiyat taraması: gerekli veri gelince ürün biter, süs bekleme yapılmaz. Tam
+# tarama (link eklenince, bilgisi eksik ürün) eski akışıyla çalışır.
+# Değer scrapers/router.py içinde her iş için ayarlanır.
+PRICE_ONLY: ContextVar[bool] = ContextVar("price_only", default=False)
+
+
 # ── price_filter yardımcısı ───────────────────────────────────────────────────
 def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[str]) -> Optional[dict]:
     if not data or not price_only:
@@ -281,7 +351,7 @@ def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[
         return data
     # barcode da taşınır: VPS COALESCE ile yalnızca boşsa yazar. Eskiden fiyat
     # taramaları barkodu atıyordu; ilk taramada alınamayan barkod hiç kaydedilmiyordu.
-    out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon", "barcode") if k in data and data[k] is not None}
+    out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon", "barcode", "seller") if k in data and data[k] is not None}
     if cached_image:
         out["image_url"] = cached_image
     return out
@@ -437,7 +507,7 @@ if _CAMOUFOX_OK:
 # CPU/RAM tavanını burada garanti ediyoruz.
 # 2026-10-31: 4→6 — Trendyol 4 worker + Amazon 2 + HB/N11 fallback'leri 4 slot
 # için kuyruğa giriyor, Trendyol işleri ortalama ~165sn sürüyordu. Makine 24GB.
-_GLOBAL_PW_SEM = asyncio.Semaphore(8)  # 2026-10-31: 6→8 (kalıcı tarayıcı havuzu, açılış maliyeti yok)
+_GLOBAL_PW_SEM = asyncio.Semaphore(10)  # 2026-11-06: 8→10 (Amazon 6 + Trendyol 4); 2026-10-31: 6→8 (kalıcı tarayıcı havuzu, açılış maliyeti yok)
 
 
 # ── Kalıcı Camoufox tarayıcıları (platform başına) ────────────────────────────
@@ -448,7 +518,8 @@ _GLOBAL_PW_SEM = asyncio.Semaphore(8)  # 2026-10-31: 6→8 (kalıcı tarayıcı 
 # yenilenir — Camoufox parmak izi tarayıcı açılışında üretildiği için böylece
 # parmak izi de dönüşümlü değişir.
 _PW_RETIRE_AFTER = 40
-_SELF_NAVIGATING = {"trendyol", "n11"}
+# amazon: handler önce ana sayfaya ısınma ziyareti yapar, sonra ürünü açar.
+_SELF_NAVIGATING = {"trendyol", "n11", "amazon"}
 
 
 class _BrowserSlot:
@@ -522,7 +593,8 @@ async def _persistent_pw_scrape(url: str, platform: str, page_handler) -> dict:
             except Exception as e:
                 log.debug(f"[pw/{platform}] goto hata: {e}")
                 return {}
-            await _human_interact(page)
+            if not PRICE_ONLY.get():
+                await _human_interact(page)
         return await page_handler(page, url) or {}
     finally:
         if ctx is not None:
@@ -608,7 +680,8 @@ async def crawlee_pw_scrape(
         @crawler.router.default_handler
         async def _handler(ctx: PlaywrightCrawlingContext):
             page = ctx.page
-            await _human_interact(page)
+            if not PRICE_ONLY.get():
+                await _human_interact(page)
             data = await page_handler(page, ctx.request.url)
             if data:
                 result.update(data)
@@ -623,19 +696,39 @@ async def crawlee_pw_scrape(
     return _pw_finish(platform, cb_key, result)
 
 
+_PW_RECENT: dict[str, list[float]] = {}
+_OK_SINCE_BLOCK: dict[str, int] = {}
+
+
+def _note_pw_attempt(platform: str) -> int:
+    """Son 60 dakikadaki tarayıcı isteği sayısı (engel teşhisi için)."""
+    now = _time.time()
+    recent = [t for t in _PW_RECENT.get(platform, []) if now - t < 3600]
+    recent.append(now)
+    _PW_RECENT[platform] = recent
+    return len(recent)
+
+
 def _pw_finish(platform: str, cb_key: str, result: dict) -> Optional[dict]:
+    recent = _note_pw_attempt(platform)
     # Engel sayfası: sonuç döner (neden loglansın diye) ama başarı sayılmaz —
     # devre kesici ve hız sınırlayıcı için hata.
     if result and result.get("blocked"):
+        log.warning(f"[{platform}] engel: {result['blocked']} | son 60dk istek={recent} | "
+                    f"engelden önceki başarı={_OK_SINCE_BLOCK.get(platform, 0)}")
+        _OK_SINCE_BLOCK[platform] = 0
         cb_fail(cb_key)
         if platform in RL:
             RL[platform].record_failure()
         return result
     if result:
+        _OK_SINCE_BLOCK[platform] = _OK_SINCE_BLOCK.get(platform, 0) + 1
         cb_reset(cb_key)
         if platform in RL:
             RL[platform].record_success()
-    else:
+    elif platform != "amazon":
+        # Amazon'da boş sonuç (fiyat okunamadı/veri yok) devre kesici ve hız sınırlayıcıyı
+        # tetiklemez — yalnızca gerçek engel sayfası sayılır (2026-11-05, kullanıcı kararı).
         cb_fail(cb_key)
         if platform in RL:
             RL[platform].record_failure()

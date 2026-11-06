@@ -41,6 +41,11 @@ def extract_url_from_text(text: str) -> Optional[str]:
         if not m:
             return None
         url = "https://" + m.group(0)
+    # Boşluksuz yapıştırılmış iki link ("...p-123https://www.trendyol.com/...")
+    # tek URL sanılıp bozuk kaydediliyordu (ürün #29928) — ilkini al.
+    nxt = re.search(r"https?://", url[8:], re.IGNORECASE)
+    if nxt:
+        url = url[:8 + nxt.start()]
     url = url.rstrip(".,;:!?)]}»\"'")
     # iOS klavyesi ilk harfi büyütebiliyor: "Https://" → "https://"
     scheme, rest = url.split("://", 1)
@@ -179,8 +184,7 @@ def detect_platform(url: str) -> str | None:
         return "trendyol"
     if "n11.com" in h:
         return "n11"
-    if h == "karaca.com" or h.endswith(".karaca.com"):
-        return "karaca"
+    # karaca.com 2026-11-02'de platformdan çıkarıldı — yeni link kabul edilmez
     if "hepsiburada.com" in h:
         return "hepsiburada"
     return None

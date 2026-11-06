@@ -24,6 +24,16 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
+# ── Yalnızca taranan platformlar ─────────────────────────────────
+# 2026-11-05 kullanıcı kararı: taranır, indirimleri yalnızca admin panelindeki ayrı listede
+# görünür. Sitede, aramada, sitemap'te, karşılaştırmada, çapraz aramada ve bildirimlerde yoklar.
+SCAN_ONLY_PLATFORMS = ("beymen", "karaca")
+SCAN_ONLY_SQL = "('beymen','karaca')"
+
+# Hepsiburada sepet fiyatı okunmaya başlayınca kampanyalı ürünlerin ilk taraması gerçek bir
+# indirim değil: bu ana kadar sepet fiyatı fırsat üretmeden fiyat geçmişine yazılır.
+HB_CART_BASELINE_UNTIL = "2026-11-06 09:00:00"
+
 # ── Scraper ───────────────────────────────────────────────────────
 # Platform başına istekler arası min bekleme (saniye)
 PLATFORM_DELAY = {

@@ -59,6 +59,24 @@ def _fmt_price(v) -> str:
     return f"{v:,.2f} TL".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _cart_line(product: dict) -> str:
+    """Sepet fiyatı (sayfada etikette değil, sepete eklenince düşen fiyat) olan fırsatlarda
+    mesaja eklenen satır — okuyucu sayfada farklı fiyat görünce şaşırmasın."""
+    return "🛒 <b>Sepette fiyat</b> — sepete ekleyince bu fiyata düşer\n" if product.get("cart_discount") else ""
+
+
+def _info_lines(product: dict) -> str:
+    """Satıcı ve barkod satırları — bilinmiyorsa satır hiç eklenmez."""
+    out = ""
+    seller = (product.get("seller") or "").strip()
+    if seller:
+        out += f"🏪 Satıcı: <b>{html.escape(seller[:60])}</b>\n"
+    barcode = (product.get("barcode") or "").strip()
+    if barcode:
+        out += f"🔢 Barkod: <code>{html.escape(barcode)}</code>\n"
+    return out
+
+
 def build_deal_message(product: dict, new_price: float, old_price: float, pct: float, short_slug: str) -> str:
     """
     Kanal ve abone bildirimleri için mesaj şablonu.
@@ -87,7 +105,8 @@ def build_deal_message(product: dict, new_price: float, old_price: float, pct: f
         f"🛍 <b>{title}</b>\n"
         f"{rating_line}\n\n"
         f"💰 <s>{_fmt_price(old_price)}</s> → "
-        f"🔥 <b>{_fmt_price(new_price)}</b>\n\n"
+        f"🔥 <b>{_fmt_price(new_price)}</b>\n"
+        f"{_cart_line(product)}{_info_lines(product)}\n"
         f"🔗 <a href='{short_url}'>Fırsata Git ↗</a> "
         f"<a href='{deal_url}'>Detay</a>\n"
         f"──────────────────\n"
@@ -210,7 +229,8 @@ async def notify_pending_approval(
         f"{emoji} <b>{platform.capitalize()}</b>\n"
         f"🛍 <b>{title}</b>\n\n"
         f"💰 <s>{_fmt_price(old_price)}</s> → 🔥 <b>{_fmt_price(new_price)}</b>\n"
-        f"📉 <b>%{pct:.0f} indirim</b>\n\n"
+        f"📉 <b>%{pct:.0f} indirim</b>\n"
+        f"{_cart_line(product)}{_info_lines(product)}\n"
         f"👉 <a href='{admin_url}'>Admin Paneli'nde Onayla ↗</a>\n"
         f"──────────────────\n"
         f"<i>Toplam {pending_count} ürün onay bekliyor</i>"
@@ -243,7 +263,8 @@ async def notify_approved_deal_update(
         f"{emoji} <b>{platform.capitalize()}</b>\n"
         f"🛍 <b>{title}</b>\n\n"
         f"💰 <s>{_fmt_price(old_price)}</s> → 🔥 <b>{_fmt_price(new_price)}</b>\n"
-        f"📉 <b>%{pct:.0f} ek indirim</b>\n\n"
+        f"📉 <b>%{pct:.0f} ek indirim</b>\n"
+        f"{_cart_line(product)}{_info_lines(product)}\n"
         f"🔗 <a href='{deal_url}'>Deal Sayfasına Git ↗</a>\n"
         f"──────────────────\n"
         f"<i>Bu ürün zaten yayında — fiyat daha da düştü</i>"
@@ -308,6 +329,9 @@ async def publish_deal(
     tasks = []
 
     for sub in subs:
+        # Admin fırsatı zaten onaylarken görüyor; bot sohbetine (@firsat_vaktibot) kopyası gitmesin
+        if ADMIN_CHAT_ID and str(sub["chat_id"]) == str(ADMIN_CHAT_ID):
+            continue
         plats = (sub["platforms"] or "amazon,trendyol,n11,hepsiburada").split(",")
 
         plats = [normalize_platform(x) for x in plats]

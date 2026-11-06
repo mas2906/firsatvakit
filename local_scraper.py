@@ -99,11 +99,11 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECS", "1"))
 # Trendyol kataloğu küçük olduğu için (bkz. /admin) daha da düşük — daha önce
 # yüksek concurrency + kısa gecikmeyle blok yemişti.
 PLATFORM_CONCURRENT = {
-    "amazon":      1,   # 2026-11-01: 3→1 — engel ara sayfası (bkz. crawlee_base RL notu)
+    "amazon":      1,   # 2026-11-06: 6→1 (kullanıcı kararı; 6 işçi + her üründe yeni tarayıcı belleği doldurdu). Eski: 2026-11-01: 3→1 — engel ara sayfası (bkz. crawlee_base RL notu)
     "trendyol":    4,   # 2026-10-16: 1→4 — sayfa süresi beklemeyle üst üste binsin; istek aralığını RL (6-15sn) belirler
     "hepsiburada": 3,   # 2026-10-31: 2→3
     "n11":         3,   # 2026-10-31: 2→3
-    "karaca":      2,   # 2026-10-31: 1→2 (curl, hafif)
+    "karaca":      2,   # panelden durdurulabilir (VPS durdurulan platforma iş vermez)
 }
 
 SCHEDULE = {
@@ -198,8 +198,8 @@ async def process_job(job: dict, client: httpx.AsyncClient) -> None:
     # DevTools/gercek-veri olcumune gore kalibre edildi: curl on-denemesi
     # (varsa, session.get timeout=) + Playwright'in kendi ic timeout'u
     # (crawlee_pw_scrape timeout=) + guvenlik payi.
-    _timeout = (80 if platform == "trendyol"    else  # PW 65s (isinma dahil, curl yok)
-                80 if platform == "amazon"       else  # PW 65s (isinma dahil, curl yok)
+    _timeout = (80 if platform == "trendyol"    else  # PW 65s (curl yok)
+                80 if platform == "amazon"       else  # PW 65s (curl yok)
                 90 if platform == "n11"          else  # curl 20s + PW 55s
                 90)                                    # hepsiburada: curl 20s + PW 55s
 

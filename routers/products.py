@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from affiliate import build_affiliate_url, make_short_slug
 from comments import get_product_comments
+from config import SCAN_ONLY_PLATFORMS, SCAN_ONLY_SQL
 from cross_search import get_price_comparison
 from db import get_db
 from price_rules import deal_score, find_pump_events
@@ -88,6 +89,8 @@ def _refresh_stale_comparison(db, products) -> None:
     for p in products:
         if p.get("platform") == "beymen":
             continue  # Windows scraper taramaz; fiyat beymen_sync.py ile günde bir güncellenir
+        if p.get("platform") == "amazon":
+            continue  # Sayfa görüntülemesi Amazon isteği üretmez; hızı scheduler belirler (engel koruması)
         has_active_deal = db.execute(
             "SELECT 1 FROM deals WHERE product_id=? AND active=1 LIMIT 1", (p["id"],)
         ).fetchone()
@@ -114,7 +117,7 @@ def _refresh_stale_comparison(db, products) -> None:
         db.commit()
 
 
-_DIPTE_SQL = """
+_DIPTE_SQL = f"""
 WITH ph AS (
   SELECT product_id, price_value, scraped_at,
          ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY scraped_at DESC, id DESC) AS rn
@@ -137,6 +140,7 @@ WHERE a.first_at <= ?
   AND cur.price_value >= a.med * 0.25
   AND (p.stock IS NULL OR p.stock <> 'Stok Yok')
   AND p.title IS NOT NULL AND p.title <> ''
+  AND p.platform NOT IN {SCAN_ONLY_SQL}
 ORDER BY (a.med - cur.price_value) / a.med DESC
 LIMIT 60
 """
@@ -171,7 +175,7 @@ async def dipte(request: Request, platform: str = ""):
     cards = sorted(cards, key=lambda c: (c["score"], c["pct"]), reverse=True)
     meta = {"title": f"Şu An En Düşük Fiyatında Olan {len(cards)} Ürün — Gerçek Fırsatlar | FırsatVakti",
             "description": ("Fiyat geçmişine göre şu anda tüm zamanların en düşük fiyatında olan ürünler: "
-                            "Amazon, Trendyol, Hepsiburada, N11, Karaca ve Beymen'de olağan fiyatının en az %15 altındaki gerçek indirimler.")}
+                            "Amazon, Trendyol, Hepsiburada ve N11'de olağan fiyatının en az %15 altındaki gerçek indirimler.")}
     if platform:
         meta["canonical"] = f"/dipte?platform={platform}"
     return templates.TemplateResponse("dipte.html", {
@@ -188,7 +192,7 @@ async def deals_redirect(request: Request):
 
 # ── Yeni tema (2026-10-13): puanlı fırsat akışı ───────────────────────────────
 STORE_NAMES = {"amazon": "Amazon", "trendyol": "Trendyol", "hepsiburada": "Hepsiburada",
-               "n11": "N11", "karaca": "Karaca", "beymen": "Beymen"}
+               "n11": "N11"}
 FEED_TABS = [("one-cikanlar", "Öne Çıkanlar"), ("populer", "Popüler"),
              ("sana-ozel", "Sana Özel"), ("dipte", "Şu An Dipte")]
 _TAB_ALIASES = {"all": "one-cikanlar", "top_discount": "one-cikanlar", "cheapest": "one-cikanlar",
@@ -202,7 +206,8 @@ def _tracked_count(db) -> int:
     """Ana sayfa hero'sundaki 'ürün takipte' sayısı — 10 dk önbellek."""
     import time
     if time.time() - _tracked_cache["at"] > 600:
-        _tracked_cache["n"] = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        _tracked_cache["n"] = db.execute(
+            f"SELECT COUNT(*) FROM products WHERE platform NOT IN {SCAN_ONLY_SQL}").fetchone()[0]
         _tracked_cache["at"] = time.time()
     return _tracked_cache["n"]
 
@@ -254,6 +259,7 @@ _ACTIVE_DEALS_SQL = """
                    WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY product_id)) lp ON lp.product_id=p2.id
              WHERE pgm2.group_id=(SELECT pgm3.group_id FROM product_group_members pgm3 WHERE pgm3.product_id=d.product_id LIMIT 1)
                AND (p2.stock IS NULL OR p2.stock != 'Stok Yok')
+               AND p2.platform NOT IN ('beymen','karaca')
              ORDER BY lp.price_value ASC LIMIT 1) AS best_compare_platform,
            (SELECT 1 FROM product_group_members pgm4 WHERE pgm4.product_id=d.product_id LIMIT 1) AS in_group
     FROM deals d LEFT JOIN products p ON d.product_id = p.id
@@ -352,6 +358,7 @@ async def index(request: Request, platform: str = "", page: int = 1, tab: str = 
     for c in all_cards:
         store_counts[c["platform"]] = store_counts.get(c["platform"], 0) + 1
     show_hero = tab == "one-cikanlar" and not platform and page == 1
+    hero_cutoff = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     latest_at = max((str(c.get("created_at") or "") for c in all_cards), default="")
 
     meta = build_meta_tags("index", {"platform": platform, "page": page})
@@ -367,7 +374,10 @@ async def index(request: Request, platform: str = "", page: int = 1, tab: str = 
         "stores": STORE_NAMES, "page": page, "total_pages": total_pages,
         "alert_count": alert_count, "total_cards": len(cards),
         "store_counts": store_counts, "total_all": len(all_cards),
-        "hero_cards": cards[:_HERO_COUNT] if show_hero else [],
+        # "Bugünün en iyi fırsatları": yalnızca son 24 saatte bulunan fırsatlar
+        "show_hero": show_hero,
+        "hero_cards": [c for c in cards if str(c.get("created_at") or "") >= hero_cutoff][:_HERO_COUNT]
+                      if show_hero else [],
         "latest_at": latest_at, "tracked_count": _tracked_count(db) if show_hero else 0,
     })
 
@@ -395,7 +405,7 @@ async def search(request: Request, q: str = "", page: int = 1, platform: str = "
                        (SELECT d.id FROM deals d WHERE d.product_id=p.id AND d.active=1
                         ORDER BY d.id DESC LIMIT 1) AS deal_id
                 FROM products p
-                WHERE p.title ILIKE ? {extra}
+                WHERE p.title ILIKE ? AND p.platform NOT IN {SCAN_ONLY_SQL} {extra}
                 ORDER BY p.last_seen_at DESC NULLS LAST
                 LIMIT 120
             """, params).fetchall()]
@@ -571,6 +581,10 @@ async def product_detail(request: Request, product_id: int):
     product = db.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone()
     if not product:
         raise HTTPException(404, "Ürün bulunamadı")
+    if product["platform"] in SCAN_ONLY_PLATFORMS:
+        viewer = current_user(request)
+        if not viewer or viewer["role"] != "admin":
+            raise HTTPException(404, "Ürün bulunamadı")
     # Sadece /deal/{id} sayfasının gerçekten göstereceği (approved/expired)
     # deal'lar için yönlendir — aksi halde pending/rejected bir deal'ı olan
     # ürünler /deal/{id}'de 404 alıp ürün sayfasına hiç ulaşamıyordu.

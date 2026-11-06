@@ -359,6 +359,7 @@ def _create_schema(db: _Connection):
             stock TEXT DEFAULT 'unknown',
             ai_review_summary TEXT,
             oos_count INTEGER DEFAULT 0,
+            oos_last_at TEXT,
             variants TEXT,
             first_seen_at TEXT, last_seen_at TEXT
         )""",

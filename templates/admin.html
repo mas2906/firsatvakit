@@ -13,7 +13,7 @@
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;">
       <a href="/admin/articles" class="btn-tg" style="text-decoration:none;">📝 Makaleler</a>
-      <form method="post" action="/admin/scan/run" id="scan-form">
+      <form method="post" action="/admin/scan/run" id="scan-form" data-ajax="toast" data-msg="✓ Kuyruk sıfırlandı">
         <button type="submit" id="scan-btn" class="btn-add" style="border:none;cursor:pointer;">
           🔄 Kuyruğu Sıfırla
         </button>
@@ -122,6 +122,7 @@
       var b30 = d.block_errors_30m || 0;
       var e30 = d.errors_30m || 0;
       var last = d.last_success;
+      if (d.paused) return ['DURDURULDU', '#6366f1'];
       var stale = !last || (Date.now() - new Date(last.replace(' ','T')+'Z').getTime()) > 60 * 60 * 1000;
 
       if (b30 >= 5) return ['IP BLOK', '#dc2626'];
@@ -176,6 +177,13 @@
       return html;
     }
 
+    function pauseBtn(platform, paused, label) {
+      return '<button type="button" onclick="setScraperPaused(\'' + platform + '\',' + (paused ? 0 : 1) + ',this)"'
+        + ' style="margin-top:6px;padding:4px 10px;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;border:1.5px solid '
+        + (paused ? '#10b981;background:#10b98122;color:#10b981' : 'var(--border);background:var(--bg3);color:var(--text)')
+        + ';">' + label + '</button>';
+    }
+
     function renderMonitor(data) {
       var grid = document.getElementById('monitor-grid');
       var upd  = document.getElementById('monitor-updated');
@@ -183,13 +191,15 @@
       var html = '';
 
       // Genel durum kartı
-      var aliveColor = meta.alive ? '#10b981' : '#dc2626';
-      var aliveText  = meta.alive ? '● Aktif' : '● Durdu';
+      var allPaused = ['amazon', 'trendyol', 'hepsiburada', 'n11'].every(function (p) { return data[p] && data[p].paused; });
+      var aliveColor = allPaused ? '#6366f1' : (meta.alive ? '#10b981' : '#dc2626');
+      var aliveText  = allPaused ? '⏸ Durduruldu' : (meta.alive ? '● Aktif' : '● Durdu');
       html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;display:flex;align-items:center;gap:10px;">'
         + '<span style="font-size:20px;">🖥️</span>'
         + '<div>'
           + '<div style="font-weight:700;font-size:13px;color:var(--text);">Scraper Servisi</div>'
           + '<div style="font-size:12px;color:' + aliveColor + ';font-weight:700;">' + aliveText + '</div>'
+          + pauseBtn('all', allPaused, allPaused ? '▶ Tümünü Başlat' : '⏸ Tümünü Durdur')
         + '</div>'
       + '</div>';
 
@@ -202,7 +212,7 @@
 
         // Beymen: Windows scraper'ı yok — kartta sadece günlük eşitleme durumu
         if (d.daily_sync && d.daily_sync.mode === 'full') {
-          var sb = syncBadge(d.daily_sync);
+          var sb = d.paused ? badge : syncBadge(d.daily_sync);
           html += '<div style="background:var(--bg);border:1.5px solid var(--border);border-radius:12px;padding:12px 16px;">'
             + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
               + '<span style="font-weight:700;font-size:13px;color:' + pInfo.color + ';">' + pInfo.label + '</span>'
@@ -211,6 +221,7 @@
             + '<div style="font-size:11px;color:var(--muted);line-height:1.8;">' + syncLines(d.daily_sync)
               + '<br>⚠ Hata (1sa): <b style="color:' + (e1h > 10 ? '#dc2626' : 'var(--text)') + ';">' + e1h + '</b>'
             + '</div>'
+            + pauseBtn(p, d.paused, d.paused ? '▶ Başlat' : '⏸ Durdur')
           + '</div>';
           return;
         }
@@ -229,6 +240,7 @@
             + ' &nbsp;|&nbsp; 📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
             + (d.daily_sync ? '<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:4px;">' + syncLines(d.daily_sync) + '</div>' : '')
           + '</div>'
+          + pauseBtn(p, d.paused, d.paused ? '▶ Başlat' : '⏸ Durdur')
         + '</div>';
       });
 
@@ -246,10 +258,10 @@
             + '<span style="color:' + platformColor(r.platform) + ';font-weight:700;">[' + escapeHtml((r.platform||'').toUpperCase()) + ']</span>'
             + '<b>#' + r.product_id + '</b> ' + escapeHtml(r.title || '—')
             + ' — <span style="color:#dc2626;font-weight:700;">' + r.count + '/100 hata</span>'
-            + '<form method="post" action="/admin/product/' + r.product_id + '/clear-errors" style="display:inline;margin:0;">'
+            + '<form method="post" action="/admin/product/' + r.product_id + '/clear-errors" data-ajax="monitor" data-msg="✓ Hatalar silindi" style="display:inline;margin:0;">'
             + '<button type="submit" style="background:#f59e0b;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Hataları Sıfırla</button>'
             + '</form>'
-            + '<form method="post" action="/admin/product/' + r.product_id + '/delete" onsubmit="return confirm(\'#' + r.product_id + ' silinsin mi?\')" style="display:inline;margin:0;">'
+            + '<form method="post" action="/admin/product/' + r.product_id + '/delete" data-ajax="monitor" data-msg="✓ Ürün silindi" onsubmit="return confirm(\'#' + r.product_id + ' silinsin mi?\')" style="display:inline;margin:0;">'
             + '<button type="submit" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Ürünü Sil</button>'
             + '</form>'
             + '</div>';
@@ -299,6 +311,7 @@
         .catch(function(){});
     }
 
+    window.refreshMonitor = fetchMonitor;
     fetchMonitor();
     setInterval(fetchMonitor, 10000);
   })();
@@ -402,7 +415,8 @@
         {% endif %}
       </div>
       {% endif %}
-      <form method="post" action="/admin/bulk-add">
+      <div id="bulk-result-live" style="display:none;margin-bottom:16px;padding:14px 18px;border-radius:12px;font-size:13px;font-weight:700;white-space:pre-wrap;"></div>
+      <form method="post" action="/admin/bulk-add" data-ajax="bulk">
         <textarea name="urls" rows="8"
           placeholder="Her satıra 1 URL yapıştır (n11, Trendyol, Hepsiburada, Amazon)&#10;&#10;https://www.n11.com/urun/...&#10;https://www.trendyol.com/...&#10;https://www.hepsiburada.com/...&#10;https://www.amazon.com.tr/..."
           style="width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg);color:var(--text);font-family:'DM Sans',monospace;font-size:13px;resize:vertical;outline:none;line-height:1.6;"></textarea>
@@ -463,6 +477,30 @@
     </div>
     {% endfor %}
   </div>
+  {% endif %}
+
+  <!-- ══ BEYMEN / KARACA (açılır kapanır, varsayılan kapalı) ═ -->
+  {% if scan_total %}
+  <details id="scan-deals-box" data-total="{{ scan_total }}" style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;margin-bottom:28px;">
+    <summary style="padding:16px 24px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;cursor:pointer;list-style:none;">
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;"><span id="scan-deals-arrow">▸</span> BEYMEN / KARACA TARAMA İNDİRİMLERİ</h2>
+      <span style="font-size:12px;color:var(--text2);">Karaca {{ scan_counts.get('karaca', 0) }} · Beymen {{ scan_counts.get('beymen', 0) }} · sadece burada görünür, yayınlanmaz</span>
+    </summary>
+    <div style="padding:10px 24px;border-top:1.5px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--text2);">
+      <label for="scan-deals-limit">Gösterilecek adet</label>
+      <select id="scan-deals-limit" onchange="loadScanDeals(this.value)" style="background:var(--bg3);border:1.5px solid var(--border);border-radius:8px;padding:4px 8px;font-size:12px;color:var(--text);">
+        {% for n in scan_deal_limits %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+      </select>
+      <span id="scan-deals-count">{{ scan_total }} indirimin {{ scan_deals|length }} tanesi gösteriliyor</span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <tbody id="scan-deals-tbody">
+        {% include "_admin_scan_deal_rows.html" %}
+        </tbody>
+      </table>
+    </div>
+  </details>
   {% endif %}
 
   <!-- ══ ONAY BEKLEYEN FIRSATLAR ════════════════════════════ -->
@@ -619,15 +657,13 @@
         <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Ürünler</h2>
         <span style="font-size:12px;color:var(--muted);font-weight:600;" id="product-count">{{ products|length }} ürün</span>
       </div>
-      <form method="get" action="/admin" id="product-search-form" style="display:flex;gap:6px;align-items:center;">
+      <form method="get" action="/admin" id="product-search-form" onsubmit="clearTimeout(_searchTimer);runProductSearch(this.q.value);return false;" style="display:flex;gap:6px;align-items:center;">
         <input type="search" name="q" id="product-search" placeholder="Ürün adı veya URL ara..."
                value="{{ search_q }}"
                oninput="debouncedSearch(this.value)"
                style="background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:8px 14px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;width:260px;"
                onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'">
-        {% if search_q %}
-        <a href="/admin#products" style="font-size:12px;color:var(--muted);text-decoration:none;padding:4px 8px;background:var(--bg3);border-radius:7px;border:1px solid var(--border);">✕ Temizle</a>
-        {% endif %}
+        <button type="button" id="product-search-clear" onclick="clearProductSearch()" style="{% if not search_q %}display:none;{% endif %}font-size:12px;color:var(--muted);cursor:pointer;padding:4px 8px;background:var(--bg3);border-radius:7px;border:1px solid var(--border);">✕ Temizle</button>
       </form>
     </div>
     <div style="overflow-x:auto;">
@@ -642,22 +678,7 @@
           </tr>
         </thead>
         <tbody id="product-tbody">
-          {% for p in products %}
-          <tr style="border-top:1px solid var(--border);transition:background .1s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
-            <td style="padding:12px 16px;color:var(--muted);font-size:12px;">#{{ p.id }}</td>
-            <td style="padding:12px 16px;max-width:320px;">
-              <div style="font-weight:500;color:var(--text);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;">{{ p.title or '(başlık yok — taranıyor)' }}</div>
-              <div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px;">{{ p.source_url }}</div>
-            </td>
-            <td style="padding:12px 16px;">
-              <span class="badge-{{ p.platform }}" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">{{ p.platform|title }}</span>
-            </td>
-            <td style="padding:12px 16px;text-align:right;font-weight:600;color:var(--text);">{{ p.price_count }}</td>
-            <td style="padding:12px 16px;text-align:center;">
-              <button onclick="deleteProduct({{ p.id }}, this)" style="padding:5px 14px;background:#fef2f2;border:none;border-radius:7px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Ürünü Sil</button>
-            </td>
-          </tr>
-          {% endfor %}
+          {% include "_admin_product_rows.html" %}
         </tbody>
       </table>
     </div>
@@ -667,6 +688,16 @@
   <div style="background:var(--bg2);border:1.5px solid var(--border);border-radius:18px;overflow:hidden;">
     <div style="padding:20px 24px;border-bottom:1.5px solid var(--border);">
       <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:.5px;color:var(--text);margin:0;">Tarama Kuyruğu</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;">
+        {% for c in queue_counts %}
+        <span style="font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:4px 10px;color:var(--muted);">
+          <b class="badge-{{ c.platform }}" style="padding:1px 6px;border-radius:4px;">{{ c.platform }}</b>
+          ⏳ {{ c.processing }} çalışıyor · ⏸ {{ c.pending }} bekliyor
+        </span>
+        {% else %}
+        <span style="font-size:12px;color:var(--muted);">Kuyruk boş</span>
+        {% endfor %}
+      </div>
     </div>
     <div style="overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -688,7 +719,7 @@
             <td style="padding:10px 16px;text-align:center;">
               {% if q.status == 'done' %}
               <span style="background:#dcfce7;color:#16a34a;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">✓ Tamam</span>
-              {% elif q.status == 'running' %}
+              {% elif q.status in ('running', 'processing') %}
               <span style="background:#fef3c7;color:#d97706;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">⏳ Çalışıyor</span>
               {% elif q.status == 'failed' %}
               <span style="background:#fef2f2;color:#dc2626;font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">✗ Hata</span>
@@ -714,7 +745,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
         <span style="background:#fef2f2;color:#dc2626;font-size:12px;font-weight:700;padding:4px 12px;border-radius:8px;">Son 50 hata</span>
-        <form method="post" action="/admin/clear-errors" onsubmit="return confirm('Tüm hatalar silinsin mi?')">
+        <form method="post" action="/admin/clear-errors" data-ajax="clear-errors" data-msg="✓ Hatalar silindi" onsubmit="return confirm('Tüm hatalar silinsin mi?')">
           <button type="submit" style="background:#dc2626;color:#fff;border:none;border-radius:8px;padding:5px 14px;font-size:12px;font-weight:700;cursor:pointer;">Hataları Sıfırla</button>
         </form>
       </div>
@@ -731,9 +762,9 @@
             <th style="padding:8px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;">İşlem</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="scraper-error-tbody">
           {% for e in scraper_errors %}
-          <tr style="border-top:1px solid var(--border);">
+          <tr data-err-pid="{{ e.product_id or '' }}" style="border-top:1px solid var(--border);">
             <td style="padding:8px 14px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
               {% if e.product_id %}
               <a href="/product/{{ e.product_id }}" style="color:var(--accent);text-decoration:none;font-size:12px;">
@@ -755,10 +786,10 @@
             <td style="padding:8px 14px;color:var(--muted);white-space:nowrap;">{{ e.occurred_at[:16] }}</td>
             <td style="padding:8px 14px;white-space:nowrap;">
               {% if e.product_id %}
-              <form method="post" action="/admin/product/{{ e.product_id }}/clear-errors" style="display:inline;margin:0;">
+              <form method="post" action="/admin/product/{{ e.product_id }}/clear-errors" data-ajax="err-product" data-pid="{{ e.product_id }}" data-msg="✓ Hatalar silindi" style="display:inline;margin:0;">
                 <button type="submit" title="Bu ürünün tüm hatalarını sil" style="background:#f59e0b;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Sıfırla</button>
               </form>
-              <form method="post" action="/admin/product/{{ e.product_id }}/delete" onsubmit="return confirm('Ürün #{{ e.product_id }} kalıcı silinsin mi?')" style="display:inline;margin:0;margin-left:4px;">
+              <form method="post" action="/admin/product/{{ e.product_id }}/delete" data-ajax="err-product" data-pid="{{ e.product_id }}" data-msg="✓ Ürün silindi" onsubmit="return confirm('Ürün #{{ e.product_id }} kalıcı silinsin mi?')" style="display:inline;margin:0;margin-left:4px;">
                 <button type="submit" title="Ürünü kalıcı sil" style="background:#dc2626;color:#fff;border:none;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:700;cursor:pointer;">Sil</button>
               </form>
               {% endif %}
@@ -778,21 +809,150 @@
 #wa-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:9999; align-items:center; justify-content:center; }
 #wa-modal.show { display:flex; }
 #wa-box { background:var(--bg2); border-radius:20px; padding:32px 28px; max-width:420px; width:90%; text-align:center; box-shadow:0 8px 40px rgba(0,0,0,.3); }
+#scan-deals-box summary::-webkit-details-marker { display:none; }
+#scan-deals-arrow { display:inline-block; transition:transform .15s; }
+#scan-deals-box[open] #scan-deals-arrow { transform:rotate(90deg); }
 </style>
 <script>
-var _searchTimer = null;
+var _searchTimer = null, _searchSeq = 0;
 function debouncedSearch(val) {
   clearTimeout(_searchTimer);
-  _searchTimer = setTimeout(function() {
-    var url = new URL(window.location.href);
-    if (val.trim()) {
-      url.searchParams.set('q', val.trim());
-    } else {
-      url.searchParams.delete('q');
+  _searchTimer = setTimeout(function() { runProductSearch(val); }, 300);
+}
+function runProductSearch(val) {
+  var q = val.trim(), seq = ++_searchSeq;  // geç gelen eski yanıt yenisinin üzerine yazmasın
+  fetch('/admin/products/search?q=' + encodeURIComponent(q))
+    .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+    .then(function (rows) {
+      if (seq !== _searchSeq) return;
+      var tb = document.getElementById('product-tbody');
+      tb.innerHTML = rows;
+      document.getElementById('product-count').textContent = tb.querySelectorAll('tr[data-pid]').length + ' ürün';
+      document.getElementById('product-search-clear').style.display = q ? '' : 'none';
+      var url = new URL(window.location.href);  // yenileyince arama korunsun
+      if (q) url.searchParams.set('q', q); else url.searchParams.delete('q');
+      history.replaceState(null, '', url.toString());
+    })
+    .catch(function () { if (seq === _searchSeq) adminToast('Arama yapılamadı', false); });
+}
+function clearProductSearch() {
+  var inp = document.getElementById('product-search');
+  inp.value = '';
+  clearTimeout(_searchTimer);
+  runProductSearch('');
+  inp.focus();
+}
+
+// ── Beymen/Karaca listesi: açık/kapalı durumu ve adet bu tarayıcıda hatırlanır ──
+var _scanSeq = 0;
+function _scanPrefGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+function _scanPrefSet(key, val) {
+  try { localStorage.setItem(key, val); } catch (e) {}
+}
+function loadScanDeals(limit) {
+  var seq = ++_scanSeq;  // geç gelen eski yanıt yenisinin üzerine yazmasın
+  _scanPrefSet('fv_scan_limit', limit);
+  fetch('/admin/scan-deals?limit=' + encodeURIComponent(limit))
+    .then(function (r) { if (!r.ok) throw 0; return r.text(); })
+    .then(function (rows) {
+      if (seq !== _scanSeq) return;
+      var tb = document.getElementById('scan-deals-tbody');
+      tb.innerHTML = rows;
+      document.getElementById('scan-deals-count').textContent =
+        document.getElementById('scan-deals-box').dataset.total + ' indirimin ' +
+        tb.querySelectorAll('tr').length + ' tanesi gösteriliyor';
+    })
+    .catch(function () { if (seq === _scanSeq) adminToast('Liste yüklenemedi', false); });
+}
+(function () {
+  var box = document.getElementById('scan-deals-box');
+  if (!box) return;
+  box.open = _scanPrefGet('fv_scan_open') === '1';
+  box.addEventListener('toggle', function () { _scanPrefSet('fv_scan_open', box.open ? '1' : '0'); });
+  var sel = document.getElementById('scan-deals-limit'), limit = _scanPrefGet('fv_scan_limit');
+  var known = [].some.call(sel.options, function (o) { return o.value === limit; });
+  if (known && limit !== sel.value) {
+    sel.value = limit;
+    loadScanDeals(limit);
+  }
+})();
+
+// ── Sayfa yenilenmeden işlemler ──
+function adminToast(msg, ok) {
+  var t = document.getElementById('admin-toast');
+  if (!t) {
+    t = document.createElement('div'); t.id = 'admin-toast';
+    t.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:10000;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;font-weight:700;box-shadow:0 6px 24px rgba(0,0,0,.25);';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.background = ok === false ? '#dc2626' : '#16a34a';
+  t.style.display = 'block';
+  clearTimeout(t._h);
+  t._h = setTimeout(function () { t.style.display = 'none'; }, 3000);
+}
+
+function setScraperPaused(platform, paused, btn) {
+  btn.disabled = true;
+  var body = new FormData();
+  body.append('platform', platform);
+  body.append('paused', paused);
+  fetch('/admin/scraper/pause', {method: 'POST', body: body})
+    .then(function (r) { if (!r.ok) throw 0; return r.json(); })
+    .then(function () {
+      var daily = platform === 'beymen' || platform === 'karaca';
+      adminToast(paused ? '⏸ Durduruldu — elindeki işi bitirip bekleyecek'
+                        : (daily ? '▶ Başlatıldı — 1 dakika içinde çalışır' : '▶ Başlatıldı'));
+      if (window.refreshMonitor) window.refreshMonitor();
+    })
+    .catch(function () { btn.disabled = false; adminToast('İşlem yapılamadı', false); });
+}
+
+// data-ajax'lı formlar: inline onsubmit'teki confirm iptal edilirse defaultPrevented gelir
+document.addEventListener('submit', function (e) {
+  var f = e.target, mode = f.getAttribute && f.getAttribute('data-ajax');
+  if (!mode || e.defaultPrevented) return;
+  e.preventDefault();
+  var btn = f.querySelector('button[type=submit]');
+  if (btn) btn.disabled = true;
+  fetch(f.getAttribute('action'), {
+    method: 'POST', body: new FormData(f), redirect: 'manual',
+    headers: {'X-Requested-With': 'fetch'}
+  }).then(function (r) {
+    if (!r.ok && r.type !== 'opaqueredirect') throw 0;
+    if (btn) btn.disabled = false;
+    if (mode === 'bulk') {
+      return r.json().then(function (d) {
+        showBulkResult(d);
+        var ta = f.querySelector('textarea[name="urls"]');
+        ta.value = ''; ta.dispatchEvent(new Event('input'));
+      });
     }
-    url.hash = 'products';
-    window.location.href = url.toString();
-  }, 500);
+    if (mode === 'err-product') {
+      var pid = f.getAttribute('data-pid');
+      document.querySelectorAll('tr[data-err-pid="' + pid + '"]').forEach(function (tr) { tr.remove(); });
+    } else if (mode === 'clear-errors') {
+      document.getElementById('scraper-error-tbody').innerHTML = '';
+    } else if (mode === 'monitor' && window.refreshMonitor) {
+      window.refreshMonitor();
+    }
+    adminToast(f.getAttribute('data-msg') || '✓ Yapıldı');
+  }).catch(function () {
+    if (btn) btn.disabled = false;
+    adminToast('İşlem yapılamadı', false);
+  });
+});
+
+function showBulkResult(d) {
+  var box = document.getElementById('bulk-result-live');
+  var errs = d.errors || [];
+  box.style.display = 'block';
+  box.style.background = errs.length ? '#fff7ed' : '#f0fdf4';
+  box.style.color = errs.length ? '#9a3412' : '#15803d';
+  box.textContent = '✅ ' + d.added + ' yeni eklendi · ⏭️ ' + d.skipped + ' zaten sistemde · ❌ ' + errs.length + ' hata'
+    + (errs.length ? '\n' + errs.map(function (x) { return '• ' + x; }).join('\n') : '');
 }
 
 function deleteProduct(pid, btn) {
@@ -873,11 +1033,7 @@ function handleDealApprove(e, id) {
     try {
       var u = new URL(r.url);
       var wt = u.searchParams.get('wa_text');
-      if(wt) {
-        document.getElementById('wa-text-area').value = wt;
-        document.getElementById('wa-share-btn').href = 'https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B';
-        document.getElementById('wa-modal').style.display = 'flex';
-      }
+      if(wt) openWaModal(wt, u.searchParams.get('wa_deal'));
     } catch(ex){}
   }).catch(function(){ btn.disabled=false; btn.innerHTML=orig; });
   return false;
@@ -919,6 +1075,9 @@ function handleDealDelete(e, id) {
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:var(--text);margin:0 0 6px;">Fırsat Onaylandı!</h2>
     <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Telegram kanalına gönderildi. WhatsApp kanalında da paylaşmak ister misin?</p>
 
+    <img id="wa-img-preview" alt="" style="display:none;max-height:140px;max-width:100%;margin:0 auto 8px;border-radius:10px;object-fit:contain;">
+    <div id="wa-img-status" style="font-size:12px;color:var(--muted);margin-bottom:8px;min-height:0;"></div>
+
     <!-- Kopyalanabilir metin -->
     <textarea id="wa-text-area" readonly
       style="width:100%;height:110px;background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text);resize:none;box-sizing:border-box;margin-bottom:10px;text-align:left;"></textarea>
@@ -930,10 +1089,10 @@ function handleDealDelete(e, id) {
     </button>
 
     <!-- WhatsApp'ta Paylaş butonu -->
-    <a id="wa-share-btn" href="#" target="_blank"
+    <a id="wa-share-btn" href="#" target="_blank" onclick="return shareWa(event)"
        style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;background:#25d366;color:#fff;border-radius:12px;padding:13px;font-family:'DM Sans',sans-serif;font-size:14px;font-weight:700;text-decoration:none;margin-bottom:8px;box-sizing:border-box;">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-      WhatsApp'ta Paylaş
+      WhatsApp Kanalında Paylaş
     </a>
 
     <!-- WhatsApp Kanalına Git -->
@@ -1017,12 +1176,59 @@ function copyWaText() {
 (function() {
   var params = new URLSearchParams(window.location.search);
   var waText = params.get('wa_text');
-  if (waText) {
-    document.getElementById('wa-text-area').value = waText;
-    document.getElementById('wa-share-btn').href = 'https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B';
-    document.getElementById('wa-modal').style.display = 'flex';
-  }
+  if (waText) openWaModal(waText, params.get('wa_deal'));
 })();
+
+// ── WhatsApp: butona basınca resim (+metin) panoya kopyalanır, FırsatVakti kanalı açılır ──
+// Kanala otomatik gönderim API'si yok; kanal açılınca Ctrl+V / Yapıştır ile resim eklenir.
+var WA_CHANNEL = 'https://whatsapp.com/channel/0029VbCK8hMKGGGJlDijHc0B';
+var _waPng = null;
+function openWaModal(text, dealId) {
+  document.getElementById('wa-text-area').value = text;
+  document.getElementById('wa-share-btn').href = WA_CHANNEL;
+  document.getElementById('wa-modal').style.display = 'flex';
+  _waPng = null;
+  var st = document.getElementById('wa-img-status'), im = document.getElementById('wa-img-preview');
+  im.style.display = 'none';
+  if (!dealId) { st.textContent = ''; return; }
+  st.textContent = '⏳ Resim hazırlanıyor...';
+  fetch('/admin/deal/' + dealId + '/share-image', {credentials: 'same-origin'})
+    .then(function (r) { if (!r.ok) throw 0; return r.blob(); })
+    .then(function (b) {
+      // Pano yalnızca PNG kabul ediyor
+      return createImageBitmap(b).then(function (bmp) {
+        var c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+        var x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(bmp, 0, 0);
+        return new Promise(function (res) { c.toBlob(res, 'image/png'); });
+      });
+    })
+    .then(function (png) {
+      _waPng = png;
+      im.src = URL.createObjectURL(png); im.style.display = 'block';
+      st.textContent = '';
+    })
+    .catch(function () { st.textContent = '⚠ Resim alınamadı — sadece metin kopyalanacak'; });
+}
+function shareWa(e) {
+  var text = document.getElementById('wa-text-area').value;
+  var st = document.getElementById('wa-img-status');
+  var done = function (msg) { st.textContent = msg; };
+  try {
+    if (_waPng && window.ClipboardItem) {
+      var tb = new Blob([text], {type: 'text/plain'});
+      navigator.clipboard.write([new ClipboardItem({'image/png': _waPng, 'text/plain': tb})])
+        .then(function () { done('✓ Resim panoya kopyalandı — kanalda Yapıştır (Ctrl+V), açıklamaya metni yapıştır'); })
+        .catch(function () {
+          navigator.clipboard.write([new ClipboardItem({'image/png': _waPng})])
+            .then(function () { done('✓ Resim panoya kopyalandı — kanalda Yapıştır (Ctrl+V); metin için "Metni Kopyala"'); })
+            .catch(function () { done('⚠ Resim kopyalanamadı — resme sağ tıklayıp kopyala'); });
+        });
+    } else {
+      navigator.clipboard.writeText(text).then(function () { done('✓ Metin kopyalandı — kanalda yapıştır'); });
+    }
+  } catch (ex) {}
+  return true;  // href → FırsatVakti WhatsApp kanalı (yeni sekmede)
+}
 
 // ── CSRF: tüm admin fetch/form isteklerine X-CSRFToken başlığı ekle ──
 (function() {

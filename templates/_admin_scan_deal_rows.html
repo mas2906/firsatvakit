@@ -1,0 +1,9 @@
+{% for d in scan_deals %}
+<tr style="border-top:1px solid var(--border);">
+  <td style="padding:10px 16px;font-weight:700;text-transform:capitalize;">{{ d.platform }}</td>
+  <td style="padding:10px 16px;min-width:220px;"><a href="{{ d.source_url }}" target="_blank" rel="noopener noreferrer" style="color:var(--text);">{{ (d.title or 'Ürün')|truncate(80) }}</a></td>
+  <td style="padding:10px 16px;white-space:nowrap;"><s style="color:var(--text2);">{{ "%.2f"|format(d.old_price or 0) }}</s> → <b>{{ "%.2f"|format(d.new_price or 0) }} TL</b>{% if d.cart_discount %} <span style="font-size:11px;color:#16a34a;">sepette</span>{% endif %}</td>
+  <td style="padding:10px 16px;font-weight:700;color:#16a34a;">%{{ d.discount_pct }}</td>
+  <td style="padding:10px 16px;white-space:nowrap;color:var(--text2);">{{ (d.created_at or '')[:16] }}</td>
+</tr>
+{% endfor %}

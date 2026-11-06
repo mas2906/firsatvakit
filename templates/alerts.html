@@ -21,7 +21,7 @@
     <form method="post" action="/alerts" style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
       <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token or request.cookies.get('csrftoken', '') }}">
       <label for="al-kw" style="flex:1 1 240px;">Ürün, marka veya mağaza
-        <input id="al-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Karaca">
+        <input id="al-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Philips">
       </label>
       <label for="al-pct" style="flex:0 1 170px;">En az indirim
         <select id="al-pct" name="min_pct">

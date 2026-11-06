@@ -11,6 +11,7 @@ import logging
 import time as _time
 from datetime import datetime, timedelta
 
+import sync_status
 from db import get_db, init_db
 from telegram_pub import send_admin_alert
 from config import AUTO_EXPIRE_HOURS
@@ -23,12 +24,14 @@ log = logging.getLogger("scheduler")
 # kuyruğu sürekli boş bekliyordu; darboğaz tarayıcı değil bu aralıklardı. Bu,
 # scraper kapasitesinin sınırı (2-4sn → platform başına saatte ~1.000-1.200
 # istek): Trendyol/Hepsiburada'da engel riski artar, panelde izlenmeli.
-# Amazon engel ara sayfası nedeniyle 12 saatte kalır.
+# Amazon 2026-11-05: 12 → 96 saat. Katalog 3.300+ ürün, ev IP'si için güvenli hız
+# saatte ~40 (bkz. scrapers/crawlee_base.py RL); 12 saat hedefi saatte 275 istek demekti.
 ACTIVE_DEAL_HOURS = 1    # aktif fırsatlı ürün
 IMPORTANT_HOURS   = 2    # şu an dipte, takip listesi, fırsat karşılaştırma eşleri
 STANDARD_HOURS    = 12   # tarama turu kimliği (çerez sıfırlama) — tarama aralığı değil
 _STANDARD_HOURS_DEFAULT = 2
-_STANDARD_HOURS_BY_PLATFORM = {"amazon": 12}
+_STANDARD_HOURS_BY_PLATFORM = {"amazon": 96}
+AMAZON_MIN_HOURS  = 12   # Amazon'da fırsat/dipte/takip ürünleri de bundan sık taranmaz
 PACE_MAX_BURST    = 20   # platform başına tek seferde kuyruğa en fazla bu kadar standart ürün
 
 
@@ -36,6 +39,10 @@ def _standard_hours(platform: str) -> int:
     return _STANDARD_HOURS_BY_PLATFORM.get(platform, _STANDARD_HOURS_DEFAULT)
 
 _BASE_SQL = "p.platform IS NOT NULL AND p.platform <> 'beymen' AND p.source_url IS NOT NULL"
+# Amazon'da "stok yok" dönen ürün 24 saat dinlenir: stok yok sonucu ne last_seen_at ne de
+# hata kaydı yazdığı için aynı ürün iki saatte üç kez taranıyordu (2026-11-07).
+_AMAZON_OOS_REST = ("NOT (p.platform = 'amazon' AND p.oos_last_at IS NOT NULL "
+                    "AND p.oos_last_at::timestamp >= NOW() - INTERVAL '24 hours')")
 _pace_state = {"last": _time.monotonic(), "credit": {}}
 _dipte_cache = {"ids": [], "ts": 0.0}
 
@@ -43,8 +50,11 @@ _dipte_cache = {"ids": [], "ts": 0.0}
 def _due_rows(db, sql: str, hours: int) -> list:
     """sql içindeki {base}/{due} yer tutucularını doldurup vadesi gelmiş ürünleri döndürür.
     Şu an işlenmekte olanlar hariç; kuyrukta bekleyenler _enqueue'da öne çekilir/atlanır."""
-    due = (f"(p.last_seen_at IS NULL OR p.last_seen_at::timestamp < NOW() - INTERVAL '{int(hours)} hours') "
+    h = int(hours)
+    hours_sql = f"(CASE WHEN p.platform = 'amazon' THEN {max(h, AMAZON_MIN_HOURS)} ELSE {h} END)"
+    due = (f"(p.last_seen_at IS NULL OR p.last_seen_at::timestamp < NOW() - {hours_sql} * INTERVAL '1 hour') "
            "AND NOT EXISTS (SELECT 1 FROM scan_queue sq WHERE sq.product_id = p.id AND sq.status = 'processing') "
+           f"AND {_AMAZON_OOS_REST} "
            # Hata alan ürünün last_seen_at'i güncellenmez → hep "en eski" görünüp her
            # fırsatta yeniden denenir ve diğerlerinin sırasını yerdi (captcha sırasında
            # engeli de büyütür). 2 saat dinlendir; fiyatı hiç alınamamışlar adım 2'de.
@@ -173,6 +183,11 @@ async def _cleanup_worker():
 
 
 
+def _job_due(job, name: str) -> bool:
+    """Günlük iş panelden durdurulmadıysa ve vakti geldiyse çalışır."""
+    return not sync_status.is_paused(name) and job.is_due()
+
+
 async def _karaca_discovery_worker():
     """Karaca kategori keşfi (çok satanlar + indirimli ilk 10 sayfa) — günde bir.
     Son çalışma zamanı settings'te; servis yeniden başlasa da 24 saat kuralı korunur."""
@@ -180,11 +195,11 @@ async def _karaca_discovery_worker():
     await asyncio.sleep(60)  # başlangıçta diğer işçilere öncelik ver
     while True:
         try:
-            if await asyncio.to_thread(karaca_discovery.is_due):
+            if await asyncio.to_thread(_job_due, karaca_discovery, "karaca"):
                 await asyncio.to_thread(karaca_discovery.discover)
         except Exception as e:
             log.error(f"[karaca-discovery] Hata: {e}", exc_info=True)
-        await asyncio.sleep(3600)
+        await asyncio.sleep(60)  # panelden "Başlat" en geç 1 dk içinde çalıştırsın
 
 
 async def _beymen_sync_worker():
@@ -195,11 +210,11 @@ async def _beymen_sync_worker():
     await asyncio.sleep(300)
     while True:
         try:
-            if await asyncio.to_thread(beymen_sync.is_due):
+            if await asyncio.to_thread(_job_due, beymen_sync, "beymen"):
                 await asyncio.to_thread(beymen_sync.sync)
         except Exception as e:
             log.error(f"[beymen] Hata: {e}", exc_info=True)
-        await asyncio.sleep(3600)
+        await asyncio.sleep(60)  # panelden "Başlat" en geç 1 dk içinde çalıştırsın
 
 
 async def _requeue_worker():
@@ -225,11 +240,12 @@ async def _requeue_worker():
             # captcha'ya takılan yeni link 500 işlik normal kuyruğun sonuna düşüp ~7 saat
             # bekliyordu (2026-10-08). 24 saatte 5'ten fazla hata alan ürün atlanır ki
             # gerçekten ölü bir link kuyruğu tıkamasın.
-            new_rows = db.execute("""
+            new_rows = db.execute(f"""
                 SELECT p.id, p.source_url, p.platform
                 FROM products p
                 WHERE p.platform IS NOT NULL AND p.platform <> 'beymen'
                   AND p.source_url IS NOT NULL
+                  AND {_AMAZON_OOS_REST}
                   AND NOT EXISTS (SELECT 1 FROM price_history h WHERE h.product_id = p.id)
                   AND (SELECT COUNT(*) FROM scraper_errors e WHERE e.product_id = p.id
                        AND e.occurred_at::timestamp >= NOW() - INTERVAL '24 hours') < 5
@@ -250,12 +266,13 @@ async def _requeue_worker():
                     (r["id"], r["source_url"], r["platform"], now)
                 )
             # Kuyrukta normal öncelikle bekleyenleri öne çek (yoksa ~500 işin arkasında kalır)
-            bumped = db.execute("""
+            bumped = db.execute(f"""
                 UPDATE scan_queue SET priority = 0
                 WHERE status = 'pending' AND priority > 0
                   AND product_id IN (
                       SELECT p.id FROM products p
                       WHERE p.platform IS NOT NULL AND p.platform <> 'beymen'
+                        AND {_AMAZON_OOS_REST}
                         AND NOT EXISTS (SELECT 1 FROM price_history h WHERE h.product_id = p.id)
                         AND (SELECT COUNT(*) FROM scraper_errors e WHERE e.product_id = p.id
                              AND e.occurred_at::timestamp >= NOW() - INTERVAL '24 hours') < 5

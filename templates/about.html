@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Hakkımızda — FırsatVakti{% endblock %}
-{% block description %}FırsatVakti, Amazon, Trendyol, Hepsiburada, N11, Karaca ve Beymen'deki fiyatları sürekli takip eden, indirimleri fiyat geçmişiyle doğrulayan ücretsiz bir fiyat karşılaştırma ve indirim bildirimi servisidir.{% endblock %}
+{% block description %}FırsatVakti, Amazon, Trendyol, Hepsiburada ve N11'deki fiyatları sürekli takip eden, indirimleri fiyat geçmişiyle doğrulayan ücretsiz bir fiyat karşılaştırma ve indirim bildirimi servisidir.{% endblock %}
 {% block og_title %}Hakkımızda — FırsatVakti{% endblock %}
 {% block og_description %}FırsatVakti hakkında bilgi edinin. Türkiye'nin büyük e-ticaret platformlarını takip eden ücretsiz fiyat karşılaştırma servisi.{% endblock %}
 {% block content %}
@@ -36,7 +36,7 @@
   <section class="fv-panel">
     <h2>Takip ettiğimiz mağazalar</h2>
     <div class="fv-chips" style="flex-wrap:wrap;">
-      {% for key, name in [('amazon','Amazon'),('trendyol','Trendyol'),('hepsiburada','Hepsiburada'),('n11','N11'),('karaca','Karaca'),('beymen','Beymen')] %}
+      {% for key, name in [('amazon','Amazon'),('trendyol','Trendyol'),('hepsiburada','Hepsiburada'),('n11','N11')] %}
       <a class="fv-pchip" href="/?platform={{ key }}">{{ name }}</a>
       {% endfor %}
     </div>

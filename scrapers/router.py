@@ -4,6 +4,7 @@
 
 from typing import Optional
 
+from scrapers.crawlee_base import PRICE_ONLY
 from scrapers.amazon      import scrape_amazon
 from scrapers.trendyol    import scrape_trendyol
 from scrapers.n11         import scrape_n11
@@ -30,6 +31,7 @@ async def scrape_product(
     if not fn:
         print(f"[router] Desteklenmeyen platform: {platform}")
         return None
+    PRICE_ONLY.set(price_only)
     try:
         return await fn(url, price_only=price_only, cached_image=cached_image)
     except Exception as e:

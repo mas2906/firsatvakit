@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Optional
 
-from scrapers.crawlee_base import price_filter, crawlee_pw_scrape
+from scrapers.crawlee_base import PRICE_ONLY, price_filter, crawlee_pw_scrape
 from scrapers.utils import parse_price_tr_clean
 
 log = logging.getLogger("scraper.trendyol")
@@ -36,8 +36,31 @@ _TY_BLOCK_MARKERS = [
 _TY_API_PRIMARY = "https://public.trendyol.com/discovery-web-productgw-service/api/productDetail/{cid}"
 _TY_BASKET_KEYS = [
     "basketPrice", "flashSalePrice", "droppedPrice", "promotionPrice",
-    "basketSellingPrice", "campaignSellingPrice", "memberPrice", "loyaltyDiscountedPrice",
+    "basketSellingPrice", "campaignSellingPrice",
 ]
+# memberPrice / loyaltyDiscountedPrice / tyPlusCouponApplicablePrice yalnızca Trendyol Plus
+# üyelerine, couponApplicablePrice kupon toplayana geçerli — herkesin ödediği fiyat değil,
+# bu yüzden kullanılmaz (2026-11-02).
+
+
+def _ty_cart_flag(html: str) -> bool:
+    """Sayfadaki fiyat "Sepette" indirimli mi? Gömülü üründe discountedPrice (herkesin
+    sepette ödediği, kaydettiğimiz fiyat) sellingPrice'tan düşükse evet. Fiyatın kendisi
+    zaten sepet fiyatı; bu bayrak yalnızca rozet ve fırsat kapanma toleransı içindir."""
+    p = _ty_shared_product(html) or {}
+    w = ((p.get("merchantListing") or {}).get("winnerVariant") or {}).get("price") or {}
+    d, s = _pv(w.get("discountedPrice")), _pv(w.get("sellingPrice"))
+    return bool(d and s and d < s * 0.99)
+
+
+def _ty_barcode_seller(product: dict) -> tuple:
+    """Kazanan varyantın barkodu (GTIN) ve buybox satıcısı — eskiden hiç okunmuyordu."""
+    ml = product.get("merchantListing") or {}
+    winner = ml.get("winnerVariant") or product.get("winnerVariant") or {}
+    gtin = str(winner.get("barcode") or "").strip()
+    barcode = gtin if re.fullmatch(r"\d{8,14}", gtin) else None
+    seller = str((ml.get("merchant") or {}).get("name") or "").strip() or None
+    return barcode, seller
 
 
 def _pv(v) -> Optional[float]:
@@ -84,6 +107,7 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
 
     in_stock = winner.get("inStock") or winner.get("hasStock") or product.get("inStock", True)
     rs = product.get("ratingScore") or {}
+    barcode, seller = _ty_barcode_seller(product)
     return {
         "title":         title,
         "price":         float(price) if price else None,
@@ -92,7 +116,8 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
         "rating":        rs.get("averageRating"),
         "review_count":  rs.get("totalCount"),
         "stock":         "Stokta Var" if in_stock else "Stok Yok",
-        "barcode":       None,
+        "barcode":       barcode,
+        "seller":        seller,
         "cart_discount": cart_discount,
         "coupon":        None,
     }
@@ -316,13 +341,23 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
             log.info(f"[trendyol/pw] yönlendirme → kaldırılmış ürün: {resp.url[:70]}")
             return {"removed": True, "final_url": resp.url}
 
-    try:
-        await page.wait_for_selector(
-            ".prc-dsc, [data-testid='current-price'], [class*='product-price']",
-            timeout=6000,
-        )
-    except Exception:
-        await asyncio.sleep(3)
+    if PRICE_ONLY.get():
+        # Fiyat taraması: API yanıtı ya da sayfadaki fiyat gelir gelmez bitir.
+        for _ in range(20):
+            if _api_json:
+                break
+            early = _ty_parse_html(await page.content())
+            if early and early.get("price"):
+                break
+            await asyncio.sleep(0.3)
+    else:
+        try:
+            await page.wait_for_selector(
+                ".prc-dsc, [data-testid='current-price'], [class*='product-price']",
+                timeout=6000,
+            )
+        except Exception:
+            await asyncio.sleep(3)
 
     if _api_json:
         body    = _api_json[-1]
@@ -346,6 +381,10 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
 
     data = _ty_parse_html(html)
     if data and data.get("price"):
+        data["cart_discount"] = _ty_cart_flag(html)
+        bc, sl = _ty_barcode_seller(_ty_shared_product(html) or {})
+        data["barcode"] = data.get("barcode") or bc
+        data["seller"] = sl
         log.info(f"[trendyol/pw] ✔(html) price={data.get('price')}")
         return data
 

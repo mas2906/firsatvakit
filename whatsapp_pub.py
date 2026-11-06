@@ -103,11 +103,20 @@ async def publish_deal_whatsapp(deal_id: int, product: dict,
         if reviews:
             rating_line += f" ({reviews:,} yorum)"
 
+    info = ""
+    if product.get("cart_discount"):
+        info += "🛒 *Sepette fiyat* — sepete ekleyince bu fiyata düşer\n"
+    if (product.get("seller") or "").strip():
+        info += f"🏪 Satıcı: *{product['seller'].strip()[:60]}*\n"
+    if (product.get("barcode") or "").strip():
+        info += f"🔢 Barkod: {product['barcode'].strip()}\n"
+
     msg = (
         f"{emoji} *%{pct:.0f} İNDİRİM!*\n\n"
         f"🛍 *{title}*"
         f"{rating_line}\n\n"
-        f"💰 ~~{_fmt_price(old_price)}~~  →  🔥 *{_fmt_price(new_price)}*\n\n"
+        f"💰 ~~{_fmt_price(old_price)}~~  →  🔥 *{_fmt_price(new_price)}*\n"
+        f"{info}\n"
         f"👉 {short_url}\n"
         f"──────────────────\n"
         f"🌐 firsatvakti.com"

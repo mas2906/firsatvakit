@@ -3,13 +3,13 @@
 {% from "_fv_card.html" import fv_card, fv_hero_slide %}
 
 {% block content %}
-{% if hero_cards %}
+{% if show_hero %}
 <section class="fv-hero" aria-label="Öne çıkan fırsatlar">
-  <div class="fv-hero-grid">
+  <div class="fv-hero-grid"{% if not hero_cards %} style="grid-template-columns:1fr"{% endif %}>
     <div class="fv-hero-text">
       {% if latest_at %}<p class="fv-live"><i aria-hidden="true"></i>Son fırsat {{ latest_at|ago }} onaylandı</p>{% endif %}
       <h1>Gerçek indirimler, <em>fiyat geçmişiyle</em></h1>
-      <p class="fv-hero-desc">Amazon, Trendyol, Hepsiburada, N11, Karaca ve Beymen'deki fiyatları sürekli takip ediyoruz. Her indirimi ürünün kendi geçmişine göre puanlıyor, önce zamlanıp sonra "indirilen" ürünleri ayıklıyoruz.</p>
+      <p class="fv-hero-desc">Amazon, Trendyol, Hepsiburada ve N11'deki fiyatları sürekli takip ediyoruz. Her indirimi ürünün kendi geçmişine göre puanlıyor, önce zamlanıp sonra "indirilen" ürünleri ayıklıyoruz.</p>
       <form class="fv-hsearch" action="/search" method="get" role="search">
         <label for="fv-hq" class="fv-sr">Ürün ara</label>
         <input id="fv-hq" type="search" name="q" placeholder="Ürün, marka veya mağaza ara" minlength="2">
@@ -32,6 +32,7 @@
         </div>
       </div>
     </div>
+    {% if hero_cards %}
     <section class="fv-hdeal" aria-label="Bugünün en iyi fırsatları">
       {% for c in hero_cards %}{{ fv_hero_slide(c, loop.index0) }}{% endfor %}
       <div class="fv-hnav">
@@ -41,6 +42,7 @@
         <a href="#firsatlar">Tüm fırsatlar →</a>
       </div>
     </section>
+    {% endif %}
   </div>
 </section>
 {% endif %}
@@ -54,7 +56,7 @@
   {% else %}
   <div class="fv-sechead">
     <div>
-      {% if hero_cards %}<h2>İndirime giren ürünler</h2>{% else %}
+      {% if show_hero %}<h2>İndirime giren ürünler</h2>{% else %}
       <h1>{% if platform %}{{ stores[platform] }} indirimleri ve günün fırsatları{% else %}Anlık indirimler ve günün fırsatları{% endif %}</h1>{% endif %}
       <p>{% if tab == 'populer' %}En çok tıklanan fırsatlar.{% else %}FırsatVakti Puanı'na göre sıralı: 30 günlük ortalamaya göre indirim, tüm zamanların en düşüğü, diğer mağazalardaki fiyat ve temiz fiyat geçmişi.{% endif %}</p>
     </div>
@@ -130,7 +132,7 @@
     <form method="post" action="/alerts" style="display:flex;flex-direction:column;gap:12px;">
       <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token or request.cookies.get('csrftoken', '') }}">
       <label for="fv-alert-kw">Ne arıyorsun?
-        <input id="fv-alert-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Karaca">
+        <input id="fv-alert-kw" name="keyword" type="text" required minlength="2" maxlength="60" placeholder="ör. airfryer, Dyson, Philips">
       </label>
       <label for="fv-alert-pct">En az indirim
         <select id="fv-alert-pct" name="min_pct">
@@ -169,9 +171,8 @@
   <p style="margin:0 0 12px;">
     FırsatVakti; <a href="/?platform=amazon">Amazon indirimleri</a>,
     <a href="/?platform=trendyol">Trendyol kampanyaları</a>,
-    <a href="/?platform=hepsiburada">Hepsiburada fırsatları</a>,
-    <a href="/?platform=n11">N11 indirimleri</a>, <a href="/?platform=karaca">Karaca</a> ve
-    <a href="/?platform=beymen">Beymen</a> gibi e-ticaret sitelerindeki fiyatları sürekli tarayan, bağımsız ve ücretsiz bir fırsat takip platformudur.
+    <a href="/?platform=hepsiburada">Hepsiburada fırsatları</a> ve
+    <a href="/?platform=n11">N11 indirimleri</a> gibi e-ticaret sitelerindeki fiyatları sürekli tarayan, bağımsız ve ücretsiz bir fırsat takip platformudur.
     Her ürünün fiyat geçmişini kaydederiz; böylece "indirim" diye sunulan fiyatın gerçekten en ucuz fiyat olup olmadığını görebilirsin.
   </p>
   <p style="margin:0 0 12px;">

@@ -30,6 +30,12 @@ PLATFORM_MIN_DISCOUNT_PCT = {"karaca": 3.0}
 def min_discount_for(platform: Optional[str]) -> float:
     return PLATFORM_MIN_DISCOUNT_PCT.get(platform or "", MIN_DISCOUNT_PCT)
 NEW_LOW_TOLERANCE = 0.99     # fiyat, 30 günlük dibin en az %1 altında olmalı
+# Fiyat dilimi kuralı (2026-11-07 kullanıcı kararı, yalnız Amazon): fiyat 30 günlük dibin
+# altına inmese de son 30 günün en ucuz %10'luk süresindeyse ve medyana göre en az %20
+# ucuzsa aday olur. Geçmiş 30 günde 249 ürünlük mevcut kurala 10 ürün ekledi; "dibe %3
+# yakınlık" da 10 ürün ekliyordu ama sürenin %29'unda görülmüş fiyatları da geçiriyordu.
+# {platform: (en fazla dilim %, medyana göre en az indirim %)}
+PERCENTILE_RULE = {"amazon": (10.0, 20.0)}
 # Ürünün fiyatı en az bu kadar gündür biliniyor olmalı. 7 → 3 (2026-10-11, kullanıcı
 # kararı): Karaca'nın açıp kapattığı indirimlerin İLK açılışı yeni ürünlerde 7 gün
 # dolmadan geliyordu ve kaçıyordu (ör. Crusty 2.999 → 2.549 TL, 5. gün). Tekrarları
@@ -83,6 +89,14 @@ def _weighted_median(segs: list) -> Optional[float]:
     return segs[-1][0]
 
 
+def _price_percentile(segs: list, price: float) -> float:
+    """Pencerenin yüzde kaçında fiyat bu seviye veya altındaydı (süre ağırlıklı)."""
+    total = sum(h for _, h in segs)
+    if total <= 0:
+        return 100.0
+    return sum(h for p, h in segs if p <= price) / total * 100
+
+
 def _known_days(win: list, end: datetime) -> float:
     return (end - win[0][0]).total_seconds() / 86400 if win else 0.0
 
@@ -131,7 +145,7 @@ class DealDecision:
 
 
 def evaluate_drop(points: Sequence[Point], price: float, at: datetime,
-                  min_pct: float = MIN_DISCOUNT_PCT) -> DealDecision:
+                  min_pct: float = MIN_DISCOUNT_PCT, platform: Optional[str] = None) -> DealDecision:
     """`at` anında görülen `price` bir fırsat mı? Pencere, `at`'ten ÖNCEKİ 30 gün
     (medyan süre ağırlıklı: 29 gün geçerli kalan fiyat, 1 saatlik fiyattan ağır basar)."""
     win = _window(points, at, 30)
@@ -142,6 +156,12 @@ def evaluate_drop(points: Sequence[Point], price: float, at: datetime,
     min30, med30 = min(p for p, _ in segs), _weighted_median(segs)
     pct = (med30 - price) / med30 * 100 if med30 else 0.0
     if price >= min30 * NEW_LOW_TOLERANCE:
+        rule = PERCENTILE_RULE.get(platform or "")
+        if rule and pct >= rule[1]:
+            low_pct = _price_percentile(segs, price)
+            if low_pct <= rule[0]:
+                return DealDecision(True, med30, pct, min30,
+                                    f"30 günün en ucuz %{low_pct:.0f} diliminde, medyana göre %{pct:.1f}")
         return DealDecision(False, med30, pct, min30,
                             f"30 günlük dibin altına inmedi (dip={min30:.2f}, fiyat={price:.2f})")
     if pct < min_pct:

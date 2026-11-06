@@ -227,6 +227,15 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
             was_price = wp_val
             break
 
+    # "Sepette" fiyat: N11 normal fiyatı priceFloat'ta, sepette düşen fiyatı
+    # displayPriceFloat'ta veriyor (sayfada üstü çizili değil; büyük yazı sepet fiyatı,
+    # küçük yazı normal fiyat). Kaydedilen fiyat zaten sepet fiyatı — bayrak yalnızca
+    # bildirim/rozet ve fırsat kapanma toleransı için (2026-11-02).
+    list_raw = product.get("priceFloat")
+    cart_discount = bool(isinstance(list_raw, (int, float)) and float(list_raw) > price * 1.01)
+    if cart_discount and not was_price:
+        was_price = float(list_raw)
+
     stock_val = product.get("stock")
     stock = "Stokta Var" if (stock_val and int(float(stock_val)) > 0) else "Stok Yok"
 
@@ -241,6 +250,8 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
     # Eskiden hiç okunmuyordu; N11 ürünleri barkodsuz kalıp çapraz arama atlanıyordu.
     gtin = str(product.get("defaultGtin") or "").strip()
     barcode = gtin if re.fullmatch(r"\d{8,14}", gtin) else None
+    sel = product.get("seller") if isinstance(product.get("seller"), dict) else {}
+    seller = (str(sel.get("nickName") or sel.get("name") or "").strip()) or None
 
     log.info(f"[n11/model] ✔ title={product.get('title','?')[:40]} price={price}")
     return {
@@ -249,8 +260,9 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
         "was_price":    was_price,
         "image_url":    image_url,
         "stock":        stock,
-        "cart_discount": False,
+        "cart_discount": cart_discount,
         "barcode":      barcode,
+        "seller":       seller,
         "rating":       None,
         "review_count": None,
     }
@@ -385,10 +397,10 @@ async def _n11_pw_handler(page, url: str) -> Optional[dict]:
     except Exception:
         pass
 
-    for _ in range(4):
+    for _ in range(20):
         if gql_result.get("price"):
             return gql_result
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.2)
 
     html = await page.content()
     cid = _n11_extract_cid(url)

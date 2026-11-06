@@ -12,8 +12,33 @@ from datetime import datetime, timezone
 from db import get_db
 
 
+PAUSE_KEY = "scraper_paused"
+
+
+class Stopped(Exception):
+    """Çalışan eşitleme admin panelinden durduruldu."""
+
+
 def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def paused_platforms(db) -> list:
+    """Admin panelinden durdurulan platformlar (settings'te virgüllü liste)."""
+    row = db.execute("SELECT value FROM settings WHERE key=?", (PAUSE_KEY,)).fetchone()
+    return [p for p in (row["value"] or "").split(",") if p] if row else []
+
+
+def is_paused(name: str) -> bool:
+    try:
+        return name in paused_platforms(get_db())
+    except Exception:
+        return False
+
+
+def check_stop(name: str) -> None:
+    if is_paused(name):
+        raise Stopped()
 
 
 def set_status(name: str, **fields) -> None:
@@ -59,6 +84,10 @@ def start(name: str) -> None:
 
 def finish(name: str, stats: dict) -> None:
     set_status(name, state="done", phase="bitti", finished_at=now(), last_stats=stats)
+
+
+def stopped(name: str) -> None:
+    set_status(name, state="stopped", phase="durduruldu", finished_at=now())
 
 
 def fail(name: str, err: str) -> None:

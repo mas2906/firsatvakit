@@ -6,8 +6,8 @@ from datetime import date, timedelta
 
 log = logging.getLogger("admin")
 
-from fastapi import APIRouter, BackgroundTasks, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from fastapi import Depends
 
@@ -18,7 +18,11 @@ from scraper_router import (clean_tracking_params, detect_platform, enqueue_url,
 from telegram_pub import publish_deal
 from whatsapp_pub import publish_deal_whatsapp
 
-from .api import _dispatch_scrape, _run_cross_search
+from config import SCAN_ONLY_PLATFORMS, SCAN_ONLY_SQL
+from sync_status import PAUSE_KEY, paused_platforms
+
+from .api import (DAILY_JOB_KEYS, MAIN_PLATFORMS, SCRAPER_PLATFORMS, _dispatch_scrape,
+                  _run_cross_search)
 from .deps import (_verify_csrf, cache_invalidate_index, current_user,
                    now_str, require_admin, require_csrf, templates)
 
@@ -63,13 +67,85 @@ def _delete_product_cascade(db, product_id: int, reason: str = "manuel") -> None
     db.commit()
 
 
+def _admin_products(db, q: str = "") -> list:
+    if q:
+        return db.execute("""
+            SELECT p.*, (SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count
+            FROM products p
+            WHERE p.title LIKE ? OR p.source_url LIKE ?
+            ORDER BY p.id DESC LIMIT 200
+        """, (f"%{q}%", f"%{q}%")).fetchall()
+    return db.execute(
+        "SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count"
+        " FROM products p ORDER BY p.id DESC LIMIT 10"
+    ).fetchall()
+
+
+@router.get("/admin/products/search")
+async def admin_products_search(request: Request, q: str = ""):
+    """Ürün aramasının tablo satırları — sayfa yenilenmeden tbody'ye yazılır."""
+    require_admin(request)
+    return templates.TemplateResponse("_admin_product_rows.html", {
+        "request": request, "products": _admin_products(get_db(), q.strip()),
+    })
+
+
+SCAN_DEAL_LIMITS = (50, 100, 200)
+
+
+def _scan_deals(db, limit: int = SCAN_DEAL_LIMITS[0]) -> list:
+    """Beymen/Karaca indirimleri: yalnızca panelde görünür, onaylanıp yayınlanmaz."""
+    return db.execute(f"""
+        SELECT d.id, d.old_price, d.new_price, d.discount_pct, d.cart_discount, d.created_at,
+               p.title, p.platform, p.source_url
+        FROM deals d JOIN products p ON d.product_id=p.id
+        WHERE d.status='pending' AND p.platform IN {SCAN_ONLY_SQL}
+        ORDER BY d.created_at DESC LIMIT ?
+    """, (limit,)).fetchall()
+
+
+@router.get("/admin/scan-deals")
+async def admin_scan_deals(request: Request, limit: int = SCAN_DEAL_LIMITS[0]):
+    """Beymen/Karaca satırları — adet değişince sayfa yenilenmeden tbody'ye yazılır."""
+    require_admin(request)
+    if limit not in SCAN_DEAL_LIMITS:
+        limit = SCAN_DEAL_LIMITS[0]
+    return templates.TemplateResponse("_admin_scan_deal_rows.html", {
+        "request": request, "scan_deals": _scan_deals(get_db(), limit),
+    })
+
+
+@router.post("/admin/scraper/pause")
+async def admin_scraper_pause(request: Request, platform: str = Form(...), paused: int = Form(...)):
+    """platform: SCRAPER_PLATFORMS'tan biri veya all (ana 4 platform). paused: 1 durdur, 0 başlat.
+    Günlük işler (Beymen, Karaca) başlatılınca 24 saati beklemeden en geç 1 dk içinde çalışır."""
+    require_admin(request)
+    if platform != "all" and platform not in SCRAPER_PLATFORMS:
+        raise HTTPException(400, "Geçersiz platform")
+    db = get_db()
+    targets = set(MAIN_PLATFORMS) if platform == "all" else {platform}
+    previous = set(paused_platforms(db))
+    current = (previous | targets) if paused else (previous - targets)
+    for p in (previous - current):
+        if p in DAILY_JOB_KEYS:
+            db.execute("DELETE FROM settings WHERE key=?", (DAILY_JOB_KEYS[p],))
+    db.execute(
+        "INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (PAUSE_KEY, ",".join(sorted(current)), now_str())
+    )
+    db.commit()
+    log.info(f"Scraper {'durduruldu' if paused else 'başlatıldı'}: {platform} (durdurulan: {sorted(current)})")
+    return JSONResponse({"paused": sorted(current)})
+
+
 @router.get("/admin")
 async def admin_panel(request: Request, q: str = ""):
     user = require_admin(request)
     db = get_db()
     stats = db.execute("""SELECT (SELECT COUNT(*) FROM products) as products,
         (SELECT COUNT(*) FROM deals) as deals, (SELECT COUNT(*) FROM deals WHERE active=1) as active_deals,
-        (SELECT COUNT(*) FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')) as pending_deals,
+        (SELECT COUNT(*) FROM deals d JOIN products p ON d.product_id=p.id WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok') AND p.platform NOT IN ('beymen','karaca')) as pending_deals,
         (SELECT COUNT(*) FROM users) as users, (SELECT COUNT(*) FROM clicks) as clicks,
         (SELECT COUNT(*) FROM scan_queue WHERE status IN ('pending','processing')) as queue_pending,
         (SELECT COUNT(*) FROM comments) as comments,
@@ -106,7 +182,7 @@ async def admin_panel(request: Request, q: str = ""):
         WITH pd AS (
             SELECT d.id, d.product_id, p.platform
             FROM deals d JOIN products p ON d.product_id=p.id
-            WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')
+            WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok') AND p.platform NOT IN ('beymen','karaca')
             ORDER BY d.created_at DESC LIMIT 50
         ),
         cd AS (
@@ -124,26 +200,35 @@ async def admin_panel(request: Request, q: str = ""):
         JOIN products p ON d.product_id=p.id
         LEFT JOIN short_links sl ON sl.deal_id=d.id
         LEFT JOIN cd ON cd.product_id = d.product_id
-        WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok')
+        WHERE d.status='pending' AND (p.platform != 'amazon' OR p.stock != 'Stok Yok') AND p.platform NOT IN ('beymen','karaca')
         ORDER BY d.created_at DESC LIMIT 50
     """).fetchall()
+    scan_deals = _scan_deals(db)
+    scan_counts = {r["platform"]: r["cnt"] for r in db.execute(f"""
+        SELECT p.platform, COUNT(*) AS cnt
+        FROM deals d JOIN products p ON d.product_id=p.id
+        WHERE d.status='pending' AND p.platform IN {SCAN_ONLY_SQL}
+        GROUP BY p.platform
+    """).fetchall()}
     recent_deals = db.execute(
         "SELECT d.*,p.title,p.platform FROM deals d JOIN products p ON d.product_id=p.id"
         " WHERE d.status!='pending' ORDER BY d.created_at DESC LIMIT 10"
     ).fetchall()
-    if q:
-        products = db.execute("""
-            SELECT p.*, (SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count
-            FROM products p
-            WHERE p.title LIKE ? OR p.source_url LIKE ?
-            ORDER BY p.id DESC LIMIT 200
-        """, (f"%{q}%", f"%{q}%")).fetchall()
-    else:
-        products = db.execute(
-            "SELECT p.*,(SELECT COUNT(*) FROM price_history ph WHERE ph.product_id=p.id) as price_count"
-            " FROM products p ORDER BY p.id DESC LIMIT 10"
-        ).fetchall()
-    queue = db.execute("SELECT * FROM scan_queue ORDER BY created_at DESC LIMIT 10").fetchall()
+    products = _admin_products(db, q)
+    # Platform başına son 3 aktif iş — eskiden toplam son 10 kayıt gösteriliyordu,
+    # o an en yeni işi olan platform listeyi dolduruyor, diğerleri hiç görünmüyordu.
+    queue = db.execute("""
+        SELECT * FROM (
+            SELECT sq.*, ROW_NUMBER() OVER (PARTITION BY platform ORDER BY created_at DESC) AS rn
+            FROM scan_queue sq WHERE status IN ('pending','processing')
+        ) t WHERE rn <= 3 ORDER BY platform, created_at DESC
+    """).fetchall()
+    queue_counts = db.execute("""
+        SELECT platform,
+               SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing
+        FROM scan_queue WHERE status IN ('pending','processing') GROUP BY platform ORDER BY platform
+    """).fetchall()
     chart_raw = {r["platform"]: r["cnt"] for r in db.execute("""
         SELECT p.platform, COUNT(*) as cnt
         FROM deals d JOIN products p ON d.product_id=p.id
@@ -163,8 +248,10 @@ async def admin_panel(request: Request, q: str = ""):
     bulk_result = request.session.pop("bulk_result", None)
     return templates.TemplateResponse("admin.html", {
         "request": request, "user": user, "stats": stats,
-        "pending_deals": pending_deals, "recent_deals": recent_deals,
-        "products": products, "queue": queue,
+        "pending_deals": pending_deals, "recent_deals": recent_deals, "scan_deals": scan_deals,
+        "scan_counts": scan_counts, "scan_total": sum(scan_counts.values()),
+        "scan_deal_limits": SCAN_DEAL_LIMITS,
+        "products": products, "queue": queue, "queue_counts": queue_counts,
         "wa_channel_url": os.getenv("WA_CHANNEL_URL", ""),
         "chart_labels": chart_labels, "chart_values": chart_values,
         "daily_labels": daily_labels, "daily_values": daily_values,
@@ -184,7 +271,7 @@ async def admin_approve_deal(deal_id: int, request: Request, affiliate_url: str 
     ).fetchone()
     if not deal:
         return RedirectResponse("/admin", status_code=302)
-    if deal["status"] == "approved":
+    if deal["status"] == "approved" or deal["platform"] in SCAN_ONLY_PLATFORMS:
         return RedirectResponse("/admin", status_code=302)
     aff = affiliate_url.strip() if affiliate_url.strip() else None
     db.execute("UPDATE deals SET active=1, status='approved', affiliate_url=? WHERE id=?", (aff, deal_id))
@@ -194,6 +281,7 @@ async def admin_approve_deal(deal_id: int, request: Request, affiliate_url: str 
     product = db.execute("SELECT * FROM products WHERE id=?", (deal["product_id"],)).fetchone()
     prod_dict = dict(product)
     prod_dict["deal_id"] = deal_id
+    prod_dict["cart_discount"] = bool(deal["cart_discount"])
     await publish_deal(db, deal_id, prod_dict, deal["new_price"], deal["old_price"], deal["discount_pct"], slug)
     try:
         await publish_deal_whatsapp(deal_id, prod_dict, deal["new_price"], deal["old_price"], deal["discount_pct"], slug)
@@ -204,11 +292,42 @@ async def admin_approve_deal(deal_id: int, request: Request, affiliate_url: str 
     old_p = int(deal["old_price"])
     new_p = int(deal["new_price"])
     link = f"https://firsatvakti.com/go/{slug}"
-    wa_text = f"🔥 %{int(pct)} İNDİRİM!\n\n🛍 {title}\n\n💰 {old_p:,} TL → {new_p:,} TL\n\n👉 {link}\n\n🌐 firsatvakti.com".replace(",", ".")
+    info = ""
+    if prod_dict.get("cart_discount"):
+        info += "🛒 Sepette fiyat — sepete ekleyince bu fiyata düşer\n"
+    if (prod_dict.get("seller") or "").strip():
+        info += f"🏪 Satıcı: {prod_dict['seller'].strip()[:60]}\n"
+    if (prod_dict.get("barcode") or "").strip():
+        info += f"🔢 Barkod: {prod_dict['barcode'].strip()}\n"
+    price_line = f"💰 {old_p:,} TL → {new_p:,} TL".replace(",", ".")
+    wa_text = (f"🔥 %{int(pct)} İNDİRİM!\n\n🛍 {title}\n\n{price_line}\n"
+               f"{info}\n👉 {link}\n\n🌐 firsatvakti.com")
     cache_invalidate_index()
     from urllib.parse import quote
     log.info(f"Deal #{deal_id} onaylandı ve yayınlandı")
-    return RedirectResponse(f"/admin?wa_text={quote(wa_text)}", status_code=302)
+    return RedirectResponse(f"/admin?wa_text={quote(wa_text)}&wa_deal={deal_id}", status_code=302)
+
+
+@router.get("/admin/deal/{deal_id}/share-image")
+async def admin_deal_share_image(deal_id: int, request: Request):
+    """WhatsApp paylaşım penceresi için ürün görseli. Mağaza CDN'leri tarayıcıya CORS
+    izni vermediğinden görsel sunucu üzerinden aynı origin'den verilir."""
+    require_admin(request)
+    import httpx
+    from fastapi.responses import Response
+    from telegram_pub import _download_image
+    row = get_db().execute(
+        "SELECT p.image_url FROM deals d JOIN products p ON p.id=d.product_id WHERE d.id=?",
+        (deal_id,)).fetchone()
+    if not row or not row["image_url"]:
+        return Response(status_code=404)
+    async with httpx.AsyncClient(timeout=15) as client:
+        img = await _download_image(client, row["image_url"])
+    if not img:
+        return Response(status_code=404)
+    ctype = "image/png" if img[:8] == b"\x89PNG\r\n\x1a\n" else (
+        "image/webp" if img[8:12] == b"WEBP" else "image/jpeg")
+    return Response(content=img, media_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.post("/admin/deal/{deal_id}/reject")
@@ -229,7 +348,8 @@ async def admin_reject_all_pending_deals(request: Request):
     require_admin(request)
     db = get_db()
     count = db.execute(
-        "UPDATE deals SET active=0, status='rejected' WHERE status='pending'"
+        "UPDATE deals SET active=0, status='rejected' WHERE status='pending' AND product_id IN "
+        f"(SELECT id FROM products WHERE platform NOT IN {SCAN_ONLY_SQL})"
     ).rowcount
     db.commit()
     cache_invalidate_index()
@@ -402,9 +522,10 @@ async def admin_bulk_add(request: Request, background_tasks: BackgroundTasks,
                 skipped += 1
         except Exception as exc:
             errors.append(f"{raw_url[:60]}: {exc}")
-    request.session["bulk_result"] = {
-        "added": added, "skipped": skipped, "errors": errors, "total": len(lines),
-    }
+    result = {"added": added, "skipped": skipped, "errors": errors, "total": len(lines)}
+    if request.headers.get("X-Requested-With") == "fetch":
+        return JSONResponse(result)
+    request.session["bulk_result"] = result
     return RedirectResponse("/admin#bulk-add", status_code=302)
 
 
