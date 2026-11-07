@@ -65,9 +65,21 @@ def _cart_line(product: dict) -> str:
     return "🛒 <b>Sepette fiyat</b> — sepete ekleyince bu fiyata düşer\n" if product.get("cart_discount") else ""
 
 
+def stock_qty_text(product: dict) -> str:
+    """Stok adedi metni (2026-11-07): "78 adet" / az kaldıysa "Son 3 ürün". Adet yoksa
+    (Trendyol, Amazon'da yazı yoksa) ya da ürün stok dışıysa boş döner."""
+    qty = product.get("stock_qty")
+    if product.get("stock") == "Stok Yok" or not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+        return ""
+    return f"Son {qty} ürün" if qty <= 5 else f"{qty:,} adet".replace(",", ".")
+
+
 def _info_lines(product: dict) -> str:
-    """Satıcı ve barkod satırları — bilinmiyorsa satır hiç eklenmez."""
+    """Satıcı, barkod ve stok adedi satırları — bilinmiyorsa satır hiç eklenmez."""
     out = ""
+    stock = stock_qty_text(product)
+    if stock:
+        out += f"📦 Stok: <b>{stock}</b>\n"
     seller = (product.get("seller") or "").strip()
     if seller:
         out += f"🏪 Satıcı: <b>{html.escape(seller[:60])}</b>\n"

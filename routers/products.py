@@ -61,6 +61,37 @@ def _dedup_history(db, product_id):
     return out
 
 
+def _stock_sales(db, product_id: int, user, days: int = 7) -> dict | None:
+    """Yalnız admin: stok adedindeki düşüşlerden kabaca satış tahmini (2026-11-07).
+    Artışlar yeniden stoklama sayılır, satıştan düşülmez. Hepsiburada'da adet buybox
+    satıcısına ait olduğu için satıcı değişince sayı sıçrayabilir — sayfada "tahmini" yazar."""
+    if not user or user["role"] != "admin":
+        return None
+    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        before = db.execute(
+            "SELECT qty, recorded_at FROM stock_history WHERE product_id=? AND recorded_at < ? "
+            "ORDER BY id DESC LIMIT 1", (product_id, cutoff)).fetchone()
+        rows = db.execute(
+            "SELECT qty, recorded_at FROM stock_history WHERE product_id=? AND recorded_at >= ? "
+            "ORDER BY id", (product_id, cutoff)).fetchall()
+    except Exception:
+        return None
+    points = ([before] if before else []) + list(rows)
+    if len(points) < 2:
+        return {"sold": None, "restocked": 0, "days": days, "changes": len(rows),
+                "since": points[0]["recorded_at"][:10] if points else None}
+    sold = restocked = 0
+    for a, b in zip(points, points[1:]):
+        diff = a["qty"] - b["qty"]
+        if diff > 0:
+            sold += diff
+        else:
+            restocked += -diff
+    return {"sold": sold, "restocked": restocked, "days": days, "changes": len(rows),
+            "since": points[0]["recorded_at"][:10]}
+
+
 def _pump_warning(history) -> dict | None:
     """Son 90 günde "önce zam, sonra indirim" örüntüsü varsa en yenisini döndürür."""
     try:
@@ -612,6 +643,7 @@ async def product_detail(request: Request, product_id: int):
         "user": user, "comparison": comparison,
         "comments_data": comments_data, "meta": meta, "pump_warning": _pump_warning(history),
         "is_watching": is_watching, "watcher_count": watcher_count,
+        "stock_sales": _stock_sales(db, product_id, user),
     })
 
 
@@ -685,7 +717,7 @@ async def deal_detail(request: Request, deal_id: int):
     db = get_db()
     deal = db.execute("""
         SELECT d.*, p.title, p.image_url, p.description, p.rating,
-               p.review_count, p.platform, p.source_url, p.asin_or_id, p.stock
+               p.review_count, p.platform, p.source_url, p.asin_or_id, p.stock, p.stock_qty
         FROM deals d JOIN products p ON d.product_id=p.id
         WHERE d.id=? AND d.status IN ('approved', 'expired')
     """, (deal_id,)).fetchone()
@@ -719,6 +751,7 @@ async def deal_detail(request: Request, deal_id: int):
         "comparison": comparison, "comments_data": comments_data, "meta": meta,
         "pump_warning": _pump_warning(history),
         "is_watching": is_watching, "watcher_count": watcher_count,
+        "stock_sales": _stock_sales(db, deal["product_id"], user),
     })
 
 

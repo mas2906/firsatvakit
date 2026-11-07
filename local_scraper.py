@@ -132,7 +132,7 @@ def _calc_concurrent(platform: str) -> int:
 
 
 from scrapers.router import scrape_product  # noqa: E402
-from scrapers.crawlee_base import RL, cb_remaining  # noqa: E402
+from scrapers.crawlee_base import RL, cb_holds, cb_release, cb_remaining  # noqa: E402
 
 # Yalnızca tarayıcıyla taranan platformlar (curl ön denemesi yok): devre kesici
 # askıdayken bunlar için kuyruktan iş çekilmez.
@@ -359,7 +359,8 @@ async def _worker(platform: str, worker_id: int, client: httpx.AsyncClient) -> N
             if platform in _BROWSER_ONLY:
                 wait = cb_remaining(f"{platform}_pw")
                 if wait > 0:
-                    await asyncio.sleep(min(wait, 60))
+                    # 20 sn: panelden askı bitirilince (_hold_reporter) çok beklemeden başlasın
+                    await asyncio.sleep(min(wait, 20))
                     continue
 
             job = await _fetch_one_job(client, platform)
@@ -389,6 +390,42 @@ async def _run_worker(platform: str, worker_id: int, client: httpx.AsyncClient) 
         except Exception as e:
             log.error(f"[{platform}/{worker_id}] Beklenmeyen çıkış: {e} — 10s sonra yeniden")
             await asyncio.sleep(10)
+
+
+# ── Engel askısı ↔ admin paneli ───────────────────────────────────────────────
+# Askı bu süreçte tutulur; panel eskiden göremiyordu ve Başlat düğmesi askıyı
+# bitiremiyordu (2026-11-07). 20 sn'de bir askılar VPS'e bildirilir, yanıtta
+# panelden Başlat'a basılan platformlar gelir.
+_HOLD_REPORT_SECS = 20
+_KEY_PLATFORM = {"hb": "hepsiburada"}
+
+
+def _hold_platform(key: str) -> str:
+    head = key.split("_", 1)[0]
+    return _KEY_PLATFORM.get(head, head)
+
+
+async def _hold_reporter(client: httpx.AsyncClient) -> None:
+    while True:
+        try:
+            holds: dict = {}
+            for key, until in cb_holds().items():
+                p = _hold_platform(key)
+                holds[p] = max(holds.get(p, 0.0), until)
+            r = await client.post(
+                f"{BASE_URL}/api/scraper-holds",
+                json={"holds": holds},
+                headers={"X-Api-Key": API_KEY},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                release = set(r.json().get("release") or [])
+                for key in list(cb_holds()):
+                    if _hold_platform(key) in release and cb_release(key):
+                        log.info(f"[{_hold_platform(key)}] panelden Başlat: askı bitti ({key})")
+        except Exception as e:
+            log.debug(f"[hold] bildirim hatası: {e}")
+        await asyncio.sleep(_HOLD_REPORT_SECS)
 
 
 _PID_FILE = os.path.join(_TMP, "firsatvakti_scraper.pid")
@@ -559,6 +596,7 @@ async def main() -> None:
             for p in platforms
             for wid in range(worker_counts[p])
         ]
+        tasks.append(_hold_reporter(init_client))
         await asyncio.gather(*tasks)
     finally:
         _release_pid_lock()

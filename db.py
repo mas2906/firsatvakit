@@ -360,6 +360,7 @@ def _create_schema(db: _Connection):
             ai_review_summary TEXT,
             oos_count INTEGER DEFAULT 0,
             oos_last_at TEXT,
+            stock_qty INTEGER,
             variants TEXT,
             first_seen_at TEXT, last_seen_at TEXT
         )""",

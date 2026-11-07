@@ -8,11 +8,12 @@
             <td style="padding:12px 16px;">
               <span class="badge-{{ p.platform }}" style="font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;">{{ p.platform|title }}</span>
             </td>
+            <td style="padding:12px 16px;font-size:12px;white-space:nowrap;">{% with st=p.stock, qty=p.stock_qty %}{% include "_admin_stock.html" %}{% endwith %}</td>
             <td style="padding:12px 16px;text-align:right;font-weight:600;color:var(--text);">{{ p.price_count }}</td>
             <td style="padding:12px 16px;text-align:center;">
               <button onclick="deleteProduct({{ p.id }}, this)" style="padding:5px 14px;background:#fef2f2;border:none;border-radius:7px;font-size:12px;font-weight:700;color:#dc2626;cursor:pointer;">🗑 Ürünü Sil</button>
             </td>
           </tr>
 {% else %}
-<tr><td colspan="5" style="padding:24px 16px;text-align:center;color:var(--muted);font-size:13px;">Ürün bulunamadı</td></tr>
+<tr><td colspan="6"style="padding:24px 16px;text-align:center;color:var(--muted);font-size:13px;">Ürün bulunamadı</td></tr>
 {% endfor %}

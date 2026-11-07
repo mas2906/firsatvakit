@@ -22,7 +22,7 @@ from config import SCAN_ONLY_PLATFORMS, SCAN_ONLY_SQL
 from sync_status import PAUSE_KEY, paused_platforms
 
 from .api import (DAILY_JOB_KEYS, MAIN_PLATFORMS, SCRAPER_PLATFORMS, _dispatch_scrape,
-                  _run_cross_search)
+                  _run_cross_search, request_hold_release)
 from .deps import (_verify_csrf, cache_invalidate_index, current_user,
                    now_str, require_admin, require_csrf, templates)
 
@@ -48,6 +48,11 @@ def _delete_product_cascade(db, product_id: int, reason: str = "manuel") -> None
             (reason, now_str(), product_id))
     except Exception as e:
         log.warning(f"[delete] silme kaydı atılamadı #{product_id}: {e}")
+    # Hata geri alması yalnız bu adımı etkilesin diye silmelerden ÖNCE (bkz. üstteki not)
+    try:
+        db.execute("DELETE FROM stock_history WHERE product_id=?", (product_id,))
+    except Exception as e:      # migration 015 çalışmamışsa tablo yok; silme sürsün
+        log.warning(f"[delete] stok geçmişi silinemedi #{product_id}: {e}")
     db.execute("DELETE FROM short_links WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
     db.execute("DELETE FROM clicks WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
     db.execute("DELETE FROM deal_publish_log WHERE deal_id IN (SELECT id FROM deals WHERE product_id=?)", (product_id,))
@@ -135,8 +140,11 @@ async def admin_scraper_pause(request: Request, platform: str = Form(...), pause
         (PAUSE_KEY, ",".join(sorted(current)), now_str())
     )
     db.commit()
-    log.info(f"Scraper {'durduruldu' if paused else 'başlatıldı'}: {platform} (durdurulan: {sorted(current)})")
-    return JSONResponse({"paused": sorted(current)})
+    # Başlat engel askısını da bitirir (scraper en geç ~20 sn'de alır, tek deneme yapar)
+    released = [] if paused else request_hold_release(sorted(targets))
+    log.info(f"Scraper {'durduruldu' if paused else 'başlatıldı'}: {platform} (durdurulan: {sorted(current)}"
+             f"{', askı bitirilecek: ' + str(released) if released else ''})")
+    return JSONResponse({"paused": sorted(current), "released": released})
 
 
 @router.get("/admin")
@@ -195,7 +203,7 @@ async def admin_panel(request: Request, q: str = ""):
             JOIN pd ON pd.product_id = pgm1.product_id AND p2.platform != pd.platform
             GROUP BY pgm1.product_id
         )
-        SELECT d.*, p.title, p.platform, p.image_url, p.source_url, sl.slug, cd.other_active_deals
+        SELECT d.*, p.title, p.platform, p.image_url, p.source_url, p.stock, p.stock_qty, sl.slug, cd.other_active_deals
         FROM deals d
         JOIN products p ON d.product_id=p.id
         LEFT JOIN short_links sl ON sl.deal_id=d.id

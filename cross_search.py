@@ -317,9 +317,19 @@ def _save_match(db, group_id, result, platform):
     pid = row["id"] if row else None
     if not pid: return
 
+    # Fiyat düşüşü geçmişe YAZILMAZ: eskiden yazılınca sonraki gerçek tarama aynı fiyatı
+    # "değişmedi" sayıp fırsat kontrolünü atlıyordu. Düşüşte gerçek tarama öne alınır
+    # (priority=-1), fırsat kontrolü orada sepet/stok/satıcı verisiyle yapılır (2026-11-07).
     price = result.get("price")
+    queue_priority = 2
     if price and price > 0:
-        db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,'TRY',?)", (pid, price, now))
+        last = db.execute("SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
+                          (pid,)).fetchone()
+        if last and price < last["price_value"]:
+            queue_priority = -1
+            print(f"[cross] ↓ #{pid} {platform} {last['price_value']} → {price}: fırsat kontrolü için tarama öne alındı")
+        elif not last or price != last["price_value"]:
+            db.execute("INSERT INTO price_history(product_id,price_value,currency,scraped_at) VALUES(?,?,'TRY',?)", (pid, price, now))
 
     is_title_fallback = result.get("match_type") == "title_fallback"
     db.execute(
@@ -329,12 +339,15 @@ def _save_match(db, group_id, result, platform):
          0.5 if is_title_fallback else 0.9,
          now)
     )
-    # Zaten pending/processing kuyruğu varsa tekrar ekleme
-    if not db.execute(
-        "SELECT id FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')", (pid,)
-    ).fetchone():
-        db.execute("INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',2,?)",
-                   (pid, clean, platform, now))
+    # Zaten pending/processing kuyruğu varsa tekrar ekleme (düşüşte bekleyen iş öne alınır)
+    queued = db.execute(
+        "SELECT id, status, priority FROM scan_queue WHERE product_id=? AND status IN ('pending','processing')", (pid,)
+    ).fetchone()
+    if not queued:
+        db.execute("INSERT INTO scan_queue(product_id,url,platform,status,priority,created_at) VALUES(?,?,?,'pending',?,?)",
+                   (pid, clean, platform, queue_priority, now))
+    elif queued["status"] == "pending" and queued["priority"] > queue_priority:
+        db.execute("UPDATE scan_queue SET priority=?, updated_at=? WHERE id=?", (queue_priority, now, queued["id"]))
     db.commit()
 
 

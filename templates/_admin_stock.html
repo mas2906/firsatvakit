@@ -1,0 +1,7 @@
+{# Admin paneli stok gösterimi (2026-11-07). Beklenen: st (stok metni), qty (adet ya da None). #}
+{% if st == 'Stok Yok' %}<span style="color:#dc2626;font-weight:700;">📦 Stokta yok</span>
+{% elif qty is number and qty > 0 and qty <= 5 %}<span style="color:#ea580c;font-weight:700;">📦 Son {{ qty }} ürün</span>
+{% elif qty is number and qty > 5 %}<span style="color:var(--text);font-weight:600;">📦 {{ "{:,}".format(qty).replace(",", ".") }} adet</span>
+{% elif st == 'Stokta Var' %}<span style="color:var(--muted);">📦 Stokta · adet yok</span>
+{% else %}<span style="color:var(--muted);">📦 —</span>
+{% endif %}

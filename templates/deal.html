@@ -55,7 +55,7 @@
         <div class="fv-meta">
           <span class="fv-store">{{ store }}</span>
           {% if deal.active %}<span class="fv-chip low">Aktif fırsat</span>{% else %}<span class="fv-chip bad">Fırsat sona erdi</span>{% endif %}
-          {% if deal.stock == 'Stok Yok' %}<span class="fv-chip bad">Stokta yok</span>{% elif deal.stock == 'Stokta Var' %}<span class="fv-chip cheap">Stokta</span>{% endif %}
+          {% with st=deal.stock, qty=deal.stock_qty %}{% include "_stock_badge.html" %}{% endwith %}
         </div>
         <h1>{{ deal.title or 'Ürün adı yükleniyor...' }}</h1>
       </div>
@@ -80,6 +80,7 @@
       {% endif %}
 
       {% include "_pump_warning.html" %}
+      {% include "_stock_sales.html" %}
 
       {% if short_url and deal.active %}
       <a class="fv-cta-lg" href="{{ short_url }}" target="_blank" rel="nofollow">{{ store }}'da fırsata git
@@ -115,7 +116,7 @@
       <h2>Ürün bilgileri</h2>
       <dl class="fv-kv">
         <div><dt>Mağaza</dt><dd>{{ store }}</dd></div>
-        <div><dt>Stok durumu</dt><dd class="{{ 'bad' if deal.stock == 'Stok Yok' else 'good' }}">{{ deal.stock or 'Bilinmiyor' }}</dd></div>
+        <div><dt>Stok durumu</dt><dd class="{{ 'bad' if deal.stock == 'Stok Yok' else 'good' }}">{{ deal.stock or 'Bilinmiyor' }}{% if deal.stock != 'Stok Yok' and deal.stock_qty is number and deal.stock_qty > 0 %} ({{ deal.stock_qty }} adet){% endif %}</dd></div>
         {% if deal.review_count %}<div><dt>Değerlendirme</dt><dd>{{ "{:,}".format(deal.review_count).replace(",", ".") }}</dd></div>{% endif %}
         <div><dt>Takip eden</dt><dd>{{ watcher_count }} kişi</dd></div>
         {% if deal.asin_or_id %}<div><dt>Ürün kodu</dt><dd>{{ deal.asin_or_id }}</dd></div>{% endif %}

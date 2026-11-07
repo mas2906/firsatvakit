@@ -135,6 +135,7 @@ def _n11_parse_gql(data: dict, target_cid: Optional[int] = None) -> Optional[dic
         "rating":        round(float(avg_score) / 20, 1) if avg_score else None,
         "review_count":  rating_block.get("totalCount"),
         "stock":         stock,
+        "stock_qty":     int(qty) if isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty >= 0 else None,
         "barcode":       detail.get("barcode"),
         "cart_discount": cart_discount,
     }
@@ -238,6 +239,12 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
 
     stock_val = product.get("stock")
     stock = "Stokta Var" if (stock_val and int(float(stock_val)) > 0) else "Stok Yok"
+    # Stok adedi: ürünün kendi "stock" alanı (2026-11-07: 2/51/78/98/618 doğrulandı;
+    # "Son 2 ürün" rozetiyle aynı sayı)
+    try:
+        stock_qty = max(0, int(float(stock_val))) if stock_val is not None else None
+    except (TypeError, ValueError):
+        stock_qty = None
 
     images = product.get("images") or []
     image_url = None
@@ -260,6 +267,7 @@ def _n11_parse_model(html: str, target_cid: Optional[int] = None) -> Optional[di
         "was_price":    was_price,
         "image_url":    image_url,
         "stock":        stock,
+        "stock_qty":    stock_qty,
         "cart_discount": cart_discount,
         "barcode":      barcode,
         "seller":       seller,

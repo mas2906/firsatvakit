@@ -1,0 +1,7 @@
+{# Stok rozeti (2026-11-07). Beklenen: st (stok metni), qty (adet ya da None).
+   Adet yalnız Hepsiburada, N11 ve az kalınca Amazon'da gelir; Trendyol'da yalnız var/yok. #}
+{% if st == 'Stok Yok' %}<span class="fv-chip bad">Stokta yok</span>
+{% elif qty is number and qty > 0 and qty <= 5 %}<span class="fv-chip warn">Son {{ qty }} ürün</span>
+{% elif qty is number and qty > 5 %}<span class="fv-chip cheap">Stokta {{ qty }} adet</span>
+{% elif st == 'Stokta Var' %}<span class="fv-chip cheap">Stokta</span>
+{% endif %}

@@ -123,6 +123,7 @@
       var e30 = d.errors_30m || 0;
       var last = d.last_success;
       if (d.paused) return ['DURDURULDU', '#6366f1'];
+      if (d.hold_until) return ['ASKIDA', '#f97316'];
       var stale = !last || (Date.now() - new Date(last.replace(' ','T')+'Z').getTime()) > 60 * 60 * 1000;
 
       if (b30 >= 5) return ['IP BLOK', '#dc2626'];
@@ -239,8 +240,11 @@
             + '<br>1sa hata: <b style="color:' + (e1h > 10 ? '#dc2626' : 'var(--text)') + ';">' + e1h + '</b>'
             + ' &nbsp;|&nbsp; 📋 Kuyruk: <b style="color:var(--text);">' + d.queue_pending + '</b>'
             + (d.daily_sync ? '<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:4px;">' + syncLines(d.daily_sync) + '</div>' : '')
+            + (d.hold_until && !d.paused ? '<div style="color:#f97316;font-weight:700;">⏸ Engel askısı: '
+                + new Date(d.hold_until * 1000).toLocaleTimeString('tr-TR', {hour: '2-digit', minute: '2-digit'})
+                + '\'e kadar (otomatik)</div>' : '')
           + '</div>'
-          + pauseBtn(p, d.paused, d.paused ? '▶ Başlat' : '⏸ Durdur')
+          + pauseBtn(p, d.paused || !!d.hold_until, (d.paused || d.hold_until) ? '▶ Başlat' : '⏸ Durdur')
         + '</div>';
       });
 
@@ -542,6 +546,8 @@
           <div style="font-size:12px;color:var(--muted);margin-top:4px;">
             📅 {{ d.created_at[:16] }}
             &nbsp;·&nbsp;
+            {% with st=d.stock, qty=d.stock_qty %}{% include "_admin_stock.html" %}{% endwith %}
+            &nbsp;·&nbsp;
             <a href="{{ d.source_url }}" target="_blank" style="color:var(--fire);text-decoration:none;font-weight:600;">Orijinal link ↗</a>
           </div>
         </div>
@@ -673,6 +679,7 @@
             <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">ID</th>
             <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Ürün</th>
             <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Platform</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Stok</th>
             <th style="padding:10px 16px;text-align:right;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">Fiyat Sayısı</th>
             <th style="padding:10px 16px;text-align:center;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;">İşlem</th>
           </tr>
@@ -901,9 +908,11 @@ function setScraperPaused(platform, paused, btn) {
   body.append('paused', paused);
   fetch('/admin/scraper/pause', {method: 'POST', body: body})
     .then(function (r) { if (!r.ok) throw 0; return r.json(); })
-    .then(function () {
+    .then(function (d) {
       var daily = platform === 'beymen' || platform === 'karaca';
+      var released = (d && d.released) || [];
       adminToast(paused ? '⏸ Durduruldu — elindeki işi bitirip bekleyecek'
+                        : released.length ? '▶ Askı bitiriliyor — 1 dakika içinde tek deneme yapılacak'
                         : (daily ? '▶ Başlatıldı — 1 dakika içinde çalışır' : '▶ Başlatıldı'));
       if (window.refreshMonitor) window.refreshMonitor();
     })

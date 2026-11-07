@@ -87,6 +87,7 @@ def _hb_parse_html(html: str) -> Optional[dict]:
     cart_discount = False
     coupon = None
     barcode = seller = sku = listing_id = None
+    stock_qty = None
 
     ps = None
 
@@ -113,6 +114,11 @@ def _hb_parse_html(html: str) -> Optional[dict]:
             barcode = m_bc.group(1) if m_bc else None
             seller  = (str(product.get("merchantName") or "").strip()) or None
             sku, listing_id = product.get("sku"), product.get("listingId")
+            # Stok adedi: buybox satıcısının seçili varyanttaki adedi ("buyboxOrder":1,"quantity":78)
+            # — 2026-11-07, 4 örnek sayfada 1/10/214/414 doğrulandı.
+            q = product.get("quantity")
+            if isinstance(q, (int, float)) and not isinstance(q, bool) and q >= 0:
+                stock_qty = int(q)
             price   = _hb_price_from_state(ps)
             imgs    = product.get("images") or []
             if imgs and isinstance(imgs[0], str):
@@ -290,6 +296,7 @@ def _hb_parse_html(html: str) -> Optional[dict]:
         "rating":        rating,
         "review_count":  review_count,
         "stock":         stock,
+        "stock_qty":     stock_qty,
         "cart_discount": cart_discount,
         "coupon":        coupon,
         "barcode":       barcode,

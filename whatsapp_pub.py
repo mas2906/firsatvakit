@@ -106,6 +106,10 @@ async def publish_deal_whatsapp(deal_id: int, product: dict,
     info = ""
     if product.get("cart_discount"):
         info += "🛒 *Sepette fiyat* — sepete ekleyince bu fiyata düşer\n"
+    from telegram_pub import stock_qty_text   # aynı biçim (2026-11-07)
+    stock = stock_qty_text(product)
+    if stock:
+        info += f"📦 Stok: *{stock}*\n"
     if (product.get("seller") or "").strip():
         info += f"🏪 Satıcı: *{product['seller'].strip()[:60]}*\n"
     if (product.get("barcode") or "").strip():

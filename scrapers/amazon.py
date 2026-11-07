@@ -368,6 +368,29 @@ def _parse_stock_soup(soup: BeautifulSoup, html: str) -> str:
     return "Bilinmiyor"
 
 
+# "Stokta sadece 3 adet kaldı", "Stokta yalnızca 1 adet kaldı", "Stokta 5 adet kaldı",
+# "Only 2 left in stock". Amazon adedi yalnız stok azalınca yazar; yazı yoksa adet bilinmez.
+# Düz "(\d+) adet" bilerek kullanılmıyor: "en fazla 3 adet satın alabilirsiniz" gibi sipariş
+# limiti yazısını stok sanardı. select#quantity'nin en büyük seçeneği de stok değil (stok ile
+# satıcı sipariş limitinin küçüğü; stok bolken 10/30'da kesilir) — kullanılmaz (2026-11-07).
+_AZ_QTY_RE = re.compile(
+    r"(?:sadece|yalnızca|yalnizca)\s+(\d{1,4})\s+adet"
+    r"|stokta\s+(\d{1,4})\s+adet\s+kald"
+    r"|only\s+(\d{1,4})\s+left", re.I)
+
+
+def _parse_stock_qty(soup: BeautifulSoup) -> Optional[int]:
+    """Yalnız stok kutusuna bakar (sayfanın geri kalanı başka satıcı/ürünlere ait olabilir).
+    Önce asıl mesaj öğesi (.primary-availability-message, kullanıcının verdiği seçici)."""
+    for sel in ("#availability .primary-availability-message", "#availability",
+                "#availabilityInsideBuyBox_feature_div"):
+        for el in soup.select(sel):
+            m = _AZ_QTY_RE.search(el.get_text(" ", strip=True))
+            if m:
+                return int(next(g for g in m.groups() if g))
+    return None
+
+
 def _az_best_img(url: str) -> str:
     """Amazon CDN URL'sinden size modifier kaldırıp 1500px versiyonu döndürür.
     CSS sprite / bundle URL'lerini olduğu gibi bırakır."""
@@ -609,6 +632,7 @@ def _az_parse(html: str) -> Optional[dict]:
         "rating":          rating,
         "review_count":    review_count,
         "stock":           stock,
+        "stock_qty":       0 if stock == "Stok Yok" else _parse_stock_qty(soup),
         "cart_discount":   cart_discount,
         "coupon":          coupon_text,
         "coupon_type":     coupon_type,

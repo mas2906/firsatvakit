@@ -314,6 +314,26 @@ def cb_reset(key: str) -> None:
         _save_cb_state()
 
 
+def cb_holds() -> dict:
+    """Askıdaki anahtarlar: {anahtar: askının bittiği zaman (epoch)}. Admin paneli gösterir."""
+    now = _time.time()
+    return {k: until for k, until in _DISABLED.items() if until > now}
+
+
+def cb_release(key: str) -> bool:
+    """Admin panelinden Başlat: askıyı şimdi bitir ama seviyeyi koru. Ardından TEK deneme
+    yapılır; engel sürüyorsa bir sonraki (daha uzun) askı başlar, başarıda sıfırlanır."""
+    if cb_remaining(key) <= 0:
+        return False
+    _DISABLED[key] = 0.0
+    limit = _STREAK_LIMIT_BY_KEY.get(key, _STREAK_LIMIT)
+    _STREAK[key] = limit - 1
+    if key in _ESCALATION:
+        _save_cb_state()
+    log.warning(f"[{key}] askı admin panelinden bitirildi — tek deneme yapılacak")
+    return True
+
+
 _load_cb_state()
 
 
@@ -352,6 +372,10 @@ def price_filter(data: Optional[dict], price_only: bool, cached_image: Optional[
     # barcode da taşınır: VPS COALESCE ile yalnızca boşsa yazar. Eskiden fiyat
     # taramaları barkodu atıyordu; ilk taramada alınamayan barkod hiç kaydedilmiyordu.
     out = {k: data[k] for k in ("price", "stock", "cart_discount", "coupon", "barcode", "seller") if k in data and data[k] is not None}
+    # Stok adedi None da olsa taşınır: "adet artık görünmüyor" bilgisi eski sayıyı silmeli
+    # (ör. Amazon "Stokta sadece 2 adet" yazısını kaldırınca) — 2026-11-07
+    if "stock_qty" in data:
+        out["stock_qty"] = data["stock_qty"]
     if cached_image:
         out["image_url"] = cached_image
     return out

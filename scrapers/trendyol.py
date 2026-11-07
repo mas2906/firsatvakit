@@ -53,6 +53,35 @@ def _ty_cart_flag(html: str) -> bool:
     return bool(d and s and d < s * 0.99)
 
 
+def _ty_running_out_qty(product: dict) -> Optional[int]:
+    """Kazanan satıcı "bitmek üzere" ise kalan adet (2026-11-07, kullanıcının bulduğu alanlar).
+    Trendyol adedi yalnız az kalınca verir: winnerVariant.isRunningOut + runningOutQuantity.
+    Diğer satıcıların (otherMerchants) değerleri bizim fiyatını tuttuğumuz satıcıya ait
+    olmadığı için okunmaz. maxSaleLimit stok değil, sipariş başına sınır — kullanılmaz.
+    Stok bolsa ya da sayı yoksa None (sitede "Stokta" yazar, eski "Son N" sayısı silinir)."""
+    ml = product.get("merchantListing") or {}
+    w = ml.get("winnerVariant") or product.get("winnerVariant") or {}
+    q = w.get("runningOutQuantity")
+    if w.get("isRunningOut") is True and isinstance(q, int) and not isinstance(q, bool) and q > 0:
+        return q
+    return None
+
+
+_TY_BTN_STOCK_RE = re.compile(
+    r'data-testid="add-to-cart-button".{0,1500}?class="[^"]*stock-info-text[^"]*"[^>]*>\s*([^<]{1,40})<', re.S)
+
+
+def _ty_button_stock_qty(html: str) -> Optional[int]:
+    """Yedek: "Sepete Ekle" düğmesindeki "Son X Ürün" yazısı (kullanıcının betiğinden,
+    2026-11-07). Yalnız gömülü ürün verisi yoksa kullanılır. Düğmenin dışına bakılmaz:
+    sayfadaki "Son 1 Ürün" rozetlerinin çoğu öneri kartlarına ait."""
+    m = _TY_BTN_STOCK_RE.search(html or "")
+    if not m or "son" not in m.group(1).lower():
+        return None
+    n = re.search(r"(\d{1,4})", m.group(1))
+    return int(n.group(1)) if n and int(n.group(1)) > 0 else None
+
+
 def _ty_barcode_seller(product: dict) -> tuple:
     """Kazanan varyantın barkodu (GTIN) ve buybox satıcısı — eskiden hiç okunmuyordu."""
     ml = product.get("merchantListing") or {}
@@ -116,6 +145,7 @@ def _ty_parse_product(product: dict) -> Optional[dict]:
         "rating":        rs.get("averageRating"),
         "review_count":  rs.get("totalCount"),
         "stock":         "Stokta Var" if in_stock else "Stok Yok",
+        "stock_qty":     _ty_running_out_qty(product),
         "barcode":       barcode,
         "seller":        seller,
         "cart_discount": cart_discount,
@@ -269,7 +299,8 @@ def _ty_parse_html_fields(html: str) -> Optional[dict]:
         try:
             price = float(mp.group(1))
             ms    = re.search(r'"inStock"\s*:\s*(true|false)', snippet)
-            stock = "Var" if ms and ms.group(1) == "true" else ("Stok Yok" if ms else "Bilinmiyor")
+            # 2026-11-07: "Var" yazıyordu; site "Stokta Var" bekliyor (487 üründe rozet çıkmıyordu)
+            stock = "Stokta Var" if ms and ms.group(1) == "true" else ("Stok Yok" if ms else "Bilinmiyor")
             title = None
             mt    = re.search(r"<title>([^<]+)</title>", html)
             if mt:
@@ -382,9 +413,16 @@ async def _ty_pw_handler(page, url: str) -> Optional[dict]:
     data = _ty_parse_html(html)
     if data and data.get("price"):
         data["cart_discount"] = _ty_cart_flag(html)
-        bc, sl = _ty_barcode_seller(_ty_shared_product(html) or {})
+        shared = _ty_shared_product(html)
+        bc, sl = _ty_barcode_seller(shared or {})
         data["barcode"] = data.get("barcode") or bc
         data["seller"] = sl
+        if shared:
+            data["stock_qty"] = _ty_running_out_qty(shared)
+        else:           # gömülü veri yoksa düğme yazısı; o da yoksa alan gönderilmez, eski değer kalır
+            btn_qty = _ty_button_stock_qty(html)
+            if btn_qty:
+                data["stock_qty"] = btn_qty
         log.info(f"[trendyol/pw] ✔(html) price={data.get('price')}")
         return data
 

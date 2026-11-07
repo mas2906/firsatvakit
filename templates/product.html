@@ -45,7 +45,7 @@
         <div class="fv-meta">
           <span class="fv-store">{{ store }}</span>
           <span class="fv-chip warn">Fiyatı takip ediliyor</span>
-          {% if product.stock == 'Stok Yok' %}<span class="fv-chip bad">Stokta yok</span>{% endif %}
+          {% with st=product.stock, qty=product.stock_qty %}{% include "_stock_badge.html" %}{% endwith %}
         </div>
         <h1>{{ product.title or 'Ürün bilgileri yükleniyor...' }}</h1>
       </div>
@@ -63,6 +63,7 @@
       <p class="fv-alert info" style="font-weight:500;"><span>Bu ürünün fiyatını izliyoruz. Fiyat <strong>son 30 günün en düşüğüne inip</strong> 30 günlük ortalamasından <strong>en az %10 ucuzladığında</strong> fırsat olarak yayınlanır.</span></p>
 
       {% include "_pump_warning.html" %}
+      {% include "_stock_sales.html" %}
 
       <a class="fv-btn block lg ghost" href="{{ product.source_url }}" target="_blank" rel="nofollow">{{ store }}'da görüntüle
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24" aria-hidden="true" style="margin-left:6px;"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg></a>

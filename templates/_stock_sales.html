@@ -1,0 +1,15 @@
+{# Yalnız admin: stok düşüşlerinden tahmini satış — routers/products._stock_sales (2026-11-07) #}
+{% if stock_sales %}
+<div role="note" class="fv-alert" style="align-items:flex-start;font-weight:500;">
+  <span>
+    <strong style="display:block;margin-bottom:2px;">🔒 Yalnız sen görüyorsun · Tahmini satış</strong>
+    {% if stock_sales.sold is not none %}
+    Son {{ stock_sales.days }} günde stok düşüşlerine göre <strong>~{{ stock_sales.sold }} adet</strong> satılmış görünüyor
+    {% if stock_sales.restocked %}(arada <strong>+{{ stock_sales.restocked }}</strong> adet yeniden stoklandı){% endif %}.
+    Kesin satış değildir: yalnız taramalar arasındaki adet farkıdır{% if (product is defined and product.platform == 'hepsiburada') or (deal is defined and deal.platform == 'hepsiburada') %}, Hepsiburada'da adet buybox satıcısına aittir ve satıcı değişince sayı sıçrayabilir{% endif %}.
+    {% else %}
+    Henüz yeterli stok geçmişi yok{% if stock_sales.since %} ({{ stock_sales.since }} tarihinden beri tek kayıt){% endif %}. Adet değiştikçe burada tahmin oluşacak.
+    {% endif %}
+  </span>
+</div>
+{% endif %}

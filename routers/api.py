@@ -281,7 +281,33 @@ OOS_DELETE_AFTER = {"amazon": 3, "hepsiburada": 3, "beymen": 3}
 OOS_MIN_GAP_HOURS = {"amazon": 24}
 
 
+def _record_stock_qty(db, product_id: int, data: dict, now: str) -> None:
+    """Stok adedini yaz; adet değiştiyse stock_history'e satır ekle (2026-11-07).
+    Scraper adet alanı göndermiyorsa (Trendyol, eski scraper) hiçbir şeye dokunmaz.
+    None = sayfa adedi göstermiyor → ürün üstündeki eski sayı silinir, geçmiş korunur."""
+    if "stock_qty" not in data:
+        return
+    raw = data.get("stock_qty")
+    qty = int(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 0 else None
+    prev = db.execute("SELECT stock_qty FROM products WHERE id=?", (product_id,)).fetchone()
+    if prev is None:
+        return
+    if prev["stock_qty"] != qty:
+        db.execute("UPDATE products SET stock_qty=? WHERE id=?", (qty, product_id))
+    if qty is None:
+        return
+    last = db.execute("SELECT qty FROM stock_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
+                      (product_id,)).fetchone()
+    if not last or last["qty"] != qty:
+        db.execute("INSERT INTO stock_history(product_id, qty, recorded_at) VALUES(?,?,?)",
+                   (product_id, qty, now))
+
+
 def _handle_out_of_stock(db, product_id: int, price: float, now: str):
+    # Silinmeyi bekleyen ürün de sitede "Stokta yok" görünsün (eskiden Amazon/HB'de 1. ve 2.
+    # "stok yok" arasında "Stokta Var" ve eski fiyatla duruyordu) — 2026-11-07
+    db.execute("UPDATE products SET stock='Stok Yok' WHERE id=?", (product_id,))
+    _record_stock_qty(db, product_id, {"stock_qty": 0}, now)
     prev_s = db.execute(
         "SELECT price_value FROM price_history WHERE product_id=? ORDER BY id DESC LIMIT 1",
         (product_id,)
@@ -559,6 +585,7 @@ async def _save_scraped_data(product_id: int, data: dict):
         had_barcode = bool(prev and prev["barcode"])
 
     _update_product_fields(db, product_id, data, stock, now)
+    _record_stock_qty(db, product_id, data, now)
 
     # Ürüne İLK KEZ barkod geldiyse çapraz aramayı başlat. Çapraz arama yalnızca
     # barkodla eşleştiriyor; toplu eklenen ürünlerde ekleme anındaki arama barkod
@@ -835,6 +862,53 @@ async def reset_stale_jobs(request: Request):
     return JSONResponse({"reset": cur.rowcount, "force": force})
 
 
+# ── Engel askısı ↔ admin paneli (2026-11-07) ─────────────────────────────────
+# Askıyı scraper kendi sürecinde tutuyor; 20 sn'de bir buraya bildirir. Panel
+# askıyı gösterir, Başlat'a basılınca platform _HOLD_RELEASE'e girer ve scraper'ın
+# sonraki bildiriminin yanıtıyla gider. Tek uvicorn süreci olduğu için bellekte
+# tutuluyor; servis yeniden başlarsa en geç 20 sn'de yeniden dolar.
+_SCRAPER_HOLDS: dict = {"holds": {}, "at": 0.0}
+_HOLD_RELEASE: set = set()
+_HOLD_STALE_SECS = 120      # bu kadar süredir bildirim yoksa askı bilgisi gösterilmez
+
+
+def active_holds() -> dict:
+    """{platform: askının bittiği zaman (epoch)} — bildirim tazeyse ve askı sürüyorsa."""
+    now = time.time()
+    if now - _SCRAPER_HOLDS["at"] > _HOLD_STALE_SECS:
+        return {}
+    return {p: u for p, u in _SCRAPER_HOLDS["holds"].items() if u > now}
+
+
+def request_hold_release(platforms) -> list:
+    """Panelden Başlat: askıdaki platformları scraper'a bildirilmek üzere işaretle."""
+    held = [p for p in platforms if p in active_holds()]
+    _HOLD_RELEASE.update(held)
+    return held
+
+
+@router.post("/api/scraper-holds")
+async def scraper_holds(request: Request):
+    key = request.headers.get("X-Api-Key", "")
+    if SCRAPER_SERVICE_KEY:
+        if key != SCRAPER_SERVICE_KEY:
+            raise HTTPException(401, "Geçersiz API anahtarı")
+    elif (request.client.host if request.client else "") not in ("127.0.0.1", "::1"):
+        raise HTTPException(401, "SCRAPER_SERVICE_KEY tanımlı değil")
+    try:
+        body = await request.json()
+        holds = {str(p): float(u) for p, u in (body.get("holds") or {}).items()}
+    except Exception:
+        raise HTTPException(400, "Geçersiz gövde")
+    _SCRAPER_HOLDS["holds"] = holds
+    _SCRAPER_HOLDS["at"] = time.time()
+    release = sorted(p for p in _HOLD_RELEASE if p in holds)
+    _HOLD_RELEASE.clear()
+    if release:
+        log.info(f"[hold] panelden askı bitirme scraper'a iletildi: {release}")
+    return JSONResponse({"release": release})
+
+
 @router.post("/api/scraper-webhook")
 async def scraper_webhook(payload: WebhookPayload, request: Request, background_tasks: BackgroundTasks):
     """Scraper servisi webhook (timeout 5s, log metrics)."""
@@ -882,6 +956,7 @@ async def scraper_monitor(request: Request):
     daily_jobs = DAILY_JOB_KEYS
     result = {}
     paused = paused_platforms(db)
+    holds = active_holds()
 
     for p in platforms:
         # Son başarılı tarama — price_history değişmese bile last_seen_at güncellenir
@@ -934,6 +1009,7 @@ async def scraper_monitor(request: Request):
             "queue_pending": queue["cnt"] if queue else 0,
             "scan_rate_10m": round((rate_10m["cnt"] if rate_10m else 0) / 10, 1),
             "paused": p in paused,
+            "hold_until": holds.get(p),     # engel askısı bitişi (epoch) — yoksa None
         }
 
     # Genel alive durumu: herhangi bir platformda son 30 dakikada başarılı tarama var mı
